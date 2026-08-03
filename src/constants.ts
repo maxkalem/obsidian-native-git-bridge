@@ -11,7 +11,7 @@ export const CANCEL_DIR = "cancel";
 export const DONE_DIR = "done";
 
 export const POLL_INTERVAL_MS = 400;
-export const DEFAULT_TIMEOUT_SECONDS = 180;
+export const DEFAULT_TIMEOUT_SECONDS = 90;
 export const RESULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const STALE_LOCK_MS = 30 * 60 * 1000;
 export const DISPLAY_OUTPUT_LIMIT = 100 * 1024;

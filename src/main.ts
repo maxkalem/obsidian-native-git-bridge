@@ -1,4 +1,4 @@
-import { Notice, Plugin, Platform } from "obsidian";
+import { Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
 import {
   DEFAULT_TIMEOUT_SECONDS,
   PLUGIN_ID,
@@ -53,6 +53,8 @@ import {
   type FileLogEntry,
 } from "./git/historyParsers";
 import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
+import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView";
+import { runSelfCheck } from "./bridge/selfCheck";
 import { PAIRING_FILE } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
@@ -97,8 +99,22 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.statusBar = new StatusBarController(this.addStatusBarItem(), () => this.openStatusModal());
     }
     if (this.sharedPrefs.showRibbonIcon) {
-      this.addRibbonIcon("git-branch", "Native Git: Status", () => void this.cmdStatus());
+      this.addRibbonIcon("git-branch", "Native Git: status panel", () => {
+        void this.openStatusPanel();
+        void this.cmdStatus(true);
+      });
     }
+
+    this.registerView(
+      NGB_STATUS_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new StatusView(leaf, {
+          refresh: () => void this.cmdStatus(true),
+          sync: () => void this.cmdSync(),
+          showChanged: () => void this.cmdShowChangedFiles(),
+          openLog: () => new OperationLogModal(this.app, this.log).open(),
+        })
+    );
 
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
@@ -428,6 +444,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "reapply-sparse", name: "Native Git: Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
       { id: "diagnostics", name: "Native Git: Run diagnostics", cb: () => void this.cmdDiagnostics() },
       { id: "open-operation-log", name: "Native Git: Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
+      { id: "open-status-panel", name: "Native Git: Open status panel", cb: () => void this.openStatusPanel() },
+      { id: "bridge-self-check", name: "Native Git: Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "cancel-operation", name: "Native Git: Cancel current operation when possible", cb: () => void this.cmdCancel() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -469,7 +487,15 @@ export default class NativeGitBridgePlugin extends Plugin {
     const cancel = new CancelToken();
     this.activeCancel = cancel;
     this.statusBar?.set("syncing");
+    this.pushStatusToView();
     this.log.add("info", action, `Queued request ${req.id}.`);
+    // Visible progress with elapsed seconds: mobile has no reliable status bar.
+    const progress = new Notice(`Native Git: ${action}…`, 0);
+    const startedAt = Date.now();
+    const ticker = window.setInterval(() => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      progress.setMessage(`Native Git: ${action}… ${secs}s (cancel via command palette)`);
+    }, 1000);
 
     try {
       await this.client.submit(req);
@@ -482,12 +508,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1000, cancel);
       if (waited.kind === "timeout") {
         this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
-        new ResultModal(this.app, `Native Git: ${action} timed out`, [
-          `No result arrived within ${req.timeoutSeconds}s.`,
-          s.integrationType === "widget-manual"
-            ? "Did you tap the GitBridge shortcut in the Termux widget? The request stays queued and will run at the next tap."
-            : "If Termux setup was never completed, open the Git Bridge Companion app and tap 'Set up Termux'. Otherwise check diagnostics.",
-        ]).open();
+        // Diagnose locally right away: a Termux round trip would time out too.
+        await this.cmdSelfCheck(true);
         return null;
       }
       if (waited.kind === "cancelled") {
@@ -510,9 +532,12 @@ export default class NativeGitBridgePlugin extends Plugin {
       new ResultModal(this.app, `Native Git: ${action} failed`, [String(e)], { isError: true }).open();
       return null;
     } finally {
+      window.clearInterval(ticker);
+      progress.hide();
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
+      this.pushStatusToView();
     }
   }
 
@@ -566,6 +591,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const lastCommit = parseLastCommit(d.lastCommit ?? "");
     this.lastStatus = { status, sparse, lastCommit, fetchedAt: new Date().toLocaleString() };
     this.applyStatusToStatusBar(status);
+    this.pushStatusToView();
     if (!silent) this.openStatusModal();
   }
 
@@ -661,6 +687,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       fetchedAt: new Date().toLocaleString(),
     };
     this.applyStatusToStatusBar(status);
+    this.pushStatusToView();
   }
 
   /** Shared error rendering for mutating operations. Never a bare "failed". */
@@ -923,6 +950,74 @@ export default class NativeGitBridgePlugin extends Plugin {
         new Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
       }
     ).open();
+  }
+
+  // ------------------------------------------------- status panel & selfcheck
+
+  async openStatusPanel(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
+    if (existing.length > 0) {
+      this.app.workspace.revealLeaf(existing[0]!);
+      this.pushStatusToView();
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: NGB_STATUS_VIEW, active: true });
+    this.app.workspace.revealLeaf(leaf);
+    this.pushStatusToView();
+  }
+
+  /** Mirror current state into the sidebar panel (works on mobile). */
+  private pushStatusToView(): void {
+    const leaves = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
+    if (leaves.length === 0) return;
+    const state = this.statusBar?.current ?? (this.lock.active ? "syncing" : "clean");
+    const extra = {
+      sparse: this.lastStatus?.sparse,
+      activeOperation: this.lock.active ? this.lock.active.action : undefined,
+      lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
+      fetchedAt: this.lastStatus?.fetchedAt,
+      bridge: this.deviceSettings.termuxIntegrationEnabled
+        ? `${this.deviceSettings.integrationType}`
+        : "disabled",
+    };
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view instanceof StatusView) {
+        if (this.lastStatus) view.setData(summaryToViewData(this.lastStatus.status, extra, state));
+        else
+          view.setData({
+            state,
+            ahead: 0,
+            behind: 0,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            ...extra,
+          });
+      }
+    }
+  }
+
+  /** Local bridge diagnosis that works even when nothing comes back from Termux. */
+  async cmdSelfCheck(timedOut = false): Promise<void> {
+    const paths = new RuntimePaths(this.app.vault.configDir);
+    const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
+    const lines = [
+      report.verdict,
+      "",
+      `Runtime folder (as the plugin sees it): ${paths.root}`,
+      `Runner has written here: ${report.runnerLogExists ? "yes" : "NO"}`,
+      `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
+      `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`,
+    ];
+    this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
+    new ResultModal(this.app, "Bridge check", lines, {
+      stdout: report.runnerLogTail || undefined,
+      isError: !report.ok,
+    }).open();
   }
 
   async cmdDiagnostics(): Promise<void> {

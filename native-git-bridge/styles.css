@@ -15,3 +15,15 @@
 }
 .ngb-history-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-2); }
 .ngb-history-actions button { font-size: var(--font-ui-small); }
+
+/* Sidebar status view (primary status surface on mobile) */
+.ngb-status-view { padding: var(--size-4-2); }
+.ngb-sv-header { display: flex; align-items: center; gap: var(--size-4-2); margin-bottom: var(--size-4-2); }
+.ngb-sv-state { font-weight: 600; }
+.ngb-sv-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); display: inline-block; }
+.ngb-sv-clean { background: var(--text-success, #08b94e); }
+.ngb-sv-changed { background: var(--text-accent); }
+.ngb-sv-syncing, .ngb-sv-waiting-tap { background: var(--text-warning, #e0ac00); }
+.ngb-sv-conflict, .ngb-sv-error { background: var(--text-error); }
+.ngb-sv-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-bottom: var(--size-4-3); }
+.ngb-sv-actions button { font-size: var(--font-ui-small); }
