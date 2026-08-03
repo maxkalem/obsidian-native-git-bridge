@@ -12,7 +12,7 @@ check(){ if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="$SCRIPT_DIR/termux/native-git-bridge-runner.sh"
+RUNNER="$SCRIPT_DIR/native-git-bridge/termux/native-git-bridge-runner.sh"
 
 echo "# setup: bare remote + working clone with protected dirs"
 git init -q --bare "$ROOT/remote.git"

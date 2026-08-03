@@ -42,7 +42,7 @@ in which protected sparse paths appear as changes.
    settings):
 
 ```
-curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
+curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
 The installer sets up everything inside Termux: packages (git, jq, openssh),

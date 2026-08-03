@@ -17,7 +17,7 @@ const ctx = await esbuild.context({
   logLevel: "info",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
-  outfile: "main.js",
+  outfile: "native-git-bridge/main.js",
 });
 
 if (prod) {

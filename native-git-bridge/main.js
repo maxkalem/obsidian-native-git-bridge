@@ -45,7 +45,7 @@ var DISPLAY_OUTPUT_LIMIT = 100 * 1024;
 var LOG_MAX_ENTRIES = 200;
 var SPARSE_SAFETY_WARNING = "Sparse checkout safety check failed. The excluded directories appear as Git changes. No commit or push was performed.";
 var STORAGE_PREFIX = "ngb:v1";
-var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main";
+var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
 var PAIRING_FILE = "pairing.json";
 
 // src/types.ts

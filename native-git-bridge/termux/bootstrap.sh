@@ -1,9 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Native Git Bridge - one-line Termux bootstrap.
 # Usage (inside Termux):
-#   curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
+#   curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 set -eu
-BASE="${NGB_RAW_BASE:-https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main}"
+BASE="${NGB_RAW_BASE:-https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 echo "-- Downloading Native Git Bridge installer from $BASE ..."
