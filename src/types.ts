@@ -15,7 +15,10 @@ export type BridgeAction =
   | "show-file-at-commit"
   | "diff-file"
   | "restore-file"
-  | "abort-merge";
+  | "abort-merge"
+  | "stage-file"
+  | "unstage-file"
+  | "discard-file";
 
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
   "ping",
@@ -34,6 +37,9 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "sync",
   "restore-file",
   "abort-merge",
+  "stage-file",
+  "unstage-file",
+  "discard-file",
 ]);
 
 export interface BridgeRequest {

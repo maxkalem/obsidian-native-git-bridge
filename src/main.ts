@@ -55,6 +55,7 @@ import {
 import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView";
 import { runSelfCheck } from "./bridge/selfCheck";
+import { registerIcons } from "./ui/icons";
 import { PAIRING_FILE } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
@@ -79,6 +80,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   statusBar: StatusBarController | null = null;
 
   private activeCancel: CancelToken | null = null;
+  private progressText: string | null = null;
   private lastStatus: { status: GitStatusSummary; sparse: SparseStateSummary; lastCommit?: { hash: string; date: string; subject: string }; fetchedAt: string } | null = null;
 
   async onload(): Promise<void> {
@@ -91,6 +93,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const data = (await this.loadData()) as Partial<SharedUiPrefs> | null;
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS, ...(data ?? {}) };
 
+    registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
     this.client = new BridgeClient(this.makeRuntimeFS(), paths);
     this.lock = new OperationLock((marker) => this.persistMarker(marker));
@@ -111,8 +114,15 @@ export default class NativeGitBridgePlugin extends Plugin {
         new StatusView(leaf, {
           refresh: () => void this.cmdStatus(true),
           sync: () => void this.cmdSync(),
-          showChanged: () => void this.cmdShowChangedFiles(),
+          pull: () => void this.cmdPull(),
+          push: () => void this.cmdPush(),
+          commit: () => void this.cmdCommit(),
           openLog: () => new OperationLogModal(this.app, this.log).open(),
+          cancel: () => void this.cmdCancel(),
+          openFile: (p) => this.openVaultFile(p),
+          stage: (p) => void this.cmdStageFile(p),
+          unstage: (p) => void this.cmdUnstageFile(p),
+          discard: (p) => this.cmdDiscardFile(p),
         })
     );
 
@@ -489,12 +499,16 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.statusBar?.set("syncing");
     this.pushStatusToView();
     this.log.add("info", action, `Queued request ${req.id}.`);
-    // Visible progress with elapsed seconds: mobile has no reliable status bar.
-    const progress = new Notice(`Native Git: ${action}…`, 0);
+    // Progress is rendered at the BOTTOM of the status panel (a top notice would
+    // cover the editor on mobile). The panel is opened if it is not visible yet.
+    void this.openStatusPanel(false);
     const startedAt = Date.now();
+    this.progressText = `${action}… 0s`;
+    this.pushStatusToView();
     const ticker = window.setInterval(() => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
-      progress.setMessage(`Native Git: ${action}… ${secs}s (cancel via command palette)`);
+      this.progressText = `${action}… ${secs}s`;
+      this.pushStatusToView();
     }, 1000);
 
     try {
@@ -533,7 +547,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       return null;
     } finally {
       window.clearInterval(ticker);
-      progress.hide();
+      this.progressText = null;
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
@@ -586,7 +600,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",
       sparseList: d.sparseList ?? "",
-      lsFilesV: d.lsFilesV ?? "",
+      skipWorktreeCount: d.skipWorktreeCount,
+      lsFilesV: d.lsFilesV,
     });
     const lastCommit = parseLastCommit(d.lastCommit ?? "");
     this.lastStatus = { status, sparse, lastCommit, fetchedAt: new Date().toLocaleString() };
@@ -678,7 +693,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",
       sparseList: d.sparseList ?? "",
-      lsFilesV: d.lsFilesV ?? "",
+      skipWorktreeCount: d.skipWorktreeCount,
+      lsFilesV: d.lsFilesV,
     });
     this.lastStatus = {
       status,
@@ -954,17 +970,17 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   // ------------------------------------------------- status panel & selfcheck
 
-  async openStatusPanel(): Promise<void> {
+  async openStatusPanel(reveal = true): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
     if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]!);
+      if (reveal) this.app.workspace.revealLeaf(existing[0]!);
       this.pushStatusToView();
       return;
     }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
-    await leaf.setViewState({ type: NGB_STATUS_VIEW, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await leaf.setViewState({ type: NGB_STATUS_VIEW, active: reveal });
+    if (reveal) this.app.workspace.revealLeaf(leaf);
     this.pushStatusToView();
   }
 
@@ -976,6 +992,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const extra = {
       sparse: this.lastStatus?.sparse,
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
+      progress: this.progressText ?? undefined,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled
@@ -991,10 +1008,10 @@ export default class NativeGitBridgePlugin extends Plugin {
             state,
             ahead: 0,
             behind: 0,
-            staged: 0,
-            unstaged: 0,
-            untracked: 0,
-            conflicted: 0,
+            staged: [],
+            unstaged: [],
+            untracked: [],
+            conflicted: [],
             ...extra,
           });
       }
@@ -1003,6 +1020,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   /** Local bridge diagnosis that works even when nothing comes back from Termux. */
   async cmdSelfCheck(timedOut = false): Promise<void> {
+    registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
     const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
     const lines = [
@@ -1018,6 +1036,55 @@ export default class NativeGitBridgePlugin extends Plugin {
       stdout: report.runnerLogTail || undefined,
       isError: !report.ok,
     }).open();
+  }
+
+  // ------------------------------------------------- per-file staging actions
+
+  async cmdStageFile(path: string): Promise<void> {
+    const result = await this.runOperation("stage-file", {
+      path,
+      protectedPaths: this.deviceSettings.protectedPaths,
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
+    this.absorbStatusData(result.data ?? {});
+  }
+
+  async cmdUnstageFile(path: string): Promise<void> {
+    const result = await this.runOperation("unstage-file", {
+      path,
+      protectedPaths: this.deviceSettings.protectedPaths,
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: unstage failed", result);
+    this.absorbStatusData(result.data ?? {});
+  }
+
+  cmdDiscardFile(path: string): void {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Discard changes?",
+        body: [
+          `File: ${path}`,
+          "Tracked files are reset to the last commit; untracked files are deleted.",
+          "This cannot be undone — the changes are not in Git history.",
+        ],
+        confirmLabel: "Discard changes",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("discard-file", {
+          path,
+          protectedPaths: this.deviceSettings.protectedPaths,
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new Notice(`Discarded changes in ${path}.`);
+      }
+    ).open();
   }
 
   async cmdDiagnostics(): Promise<void> {

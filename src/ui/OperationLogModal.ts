@@ -1,4 +1,5 @@
 import { App, Modal } from "obsidian";
+import { addCopyButton } from "./copyable";
 import type { OperationLog } from "../ops/OperationLog";
 
 export class OperationLogModal extends Modal {
@@ -29,6 +30,7 @@ export class OperationLogModal extends Modal {
       }
     }
     const btns = c.createDiv({ cls: "ngb-buttons" });
+    addCopyButton(btns, () => this.logAsText(), "Copy log", "Log copied.");
     const clear = btns.createEl("button", { text: "Clear log" });
     clear.addEventListener("click", () => {
       this.log.clear();
@@ -36,6 +38,13 @@ export class OperationLogModal extends Modal {
     });
     const close = btns.createEl("button", { text: "Close", cls: "mod-cta" });
     close.addEventListener("click", () => this.close());
+  }
+
+  private logAsText(): string {
+    return this.log
+      .list()
+      .map((e) => `${e.ts} [${e.level}] ${e.action}: ${e.message}${e.detail ? "\n  " + e.detail.replace(/\n/g, "\n  ") : ""}`)
+      .join("\n");
   }
 
   onClose(): void {

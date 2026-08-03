@@ -201,7 +201,10 @@ export function parseSparseState(fields: {
   sparseEnabled: string;
   sparseCone: string;
   sparseList: string;
-  lsFilesV: string;
+  /** Legacy: full `git ls-files -v` output. Prefer skipWorktreeCount. */
+  lsFilesV?: string;
+  /** Preferred: count computed by the runner (the full list can be megabytes). */
+  skipWorktreeCount?: string;
 }): SparseStateSummary {
   const enabled = fields.sparseEnabled.trim() === "true";
   const coneRaw = fields.sparseCone.trim();
@@ -212,11 +215,19 @@ export function parseSparseState(fields: {
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => l !== ""),
-    skipWorktreeCount: countSkipWorktree(fields.lsFilesV),
+    skipWorktreeCount: resolveSkipCount(fields.skipWorktreeCount, fields.lsFilesV),
   };
 }
 
 /** Parse `git log -1 --format=%H%x09%cI%x09%s`. */
+function resolveSkipCount(count: string | undefined, lsFilesV: string | undefined): number {
+  if (count !== undefined && count.trim() !== "") {
+    const n = parseInt(count.trim(), 10);
+    if (!Number.isNaN(n)) return n;
+  }
+  return countSkipWorktree(lsFilesV ?? "");
+}
+
 export function parseLastCommit(
   text: string
 ): { hash: string; date: string; subject: string } | undefined {

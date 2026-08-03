@@ -81,7 +81,7 @@ check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok"
 check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "status contains porcelain v2 branch header"
 check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "status reports sparse enabled"
 check 'jq -er ".data.sparseList" "$RES" | grep -q "AgentsMemory"' "status lists sparse patterns"
-check 'jq -er ".data.lsFilesV" "$RES" | grep -q "^S "' "status reports skip-worktree entries"
+check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 1 ]' "status reports skip-worktree count"
 
 echo "# test: verify-sparse-safety - clean tree is SAFE (omissions are not deletions)"
 req "r-20260803T100004Z-safe01" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
@@ -258,6 +258,55 @@ bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T100006Z-show03.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "binary show ok"
 check '[ "$(jq -r ".data.contentBase64" "$RES" | base64 -d | od -An -tx1 | tr -d "[:space:]")" = "00010242494e" ]' "binary bytes intact"
+
+echo "# source control: stage / unstage / discard per file"
+printf 'staged content\n' > Notes/stage-me.md
+req "r-20260804T130000Z-stg001" stage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130000Z-stg001.json" >/dev/null' "stage-file ok"
+check 'git diff --cached --name-only | grep -q "Notes/stage-me.md"' "file is staged"
+req "r-20260804T130001Z-uns001" unstage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130001Z-uns001.json" >/dev/null' "unstage-file ok"
+check '! git diff --cached --name-only | grep -q "Notes/stage-me.md"' "file is unstaged"
+req "r-20260804T130002Z-dsc001" discard-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130002Z-dsc001.json" >/dev/null' "discard-file ok (untracked)"
+check '[ ! -e Notes/stage-me.md ]' "untracked file deleted by discard"
+printf 'tracked change\n' >> Notes/note.md
+req "r-20260804T130003Z-dsc002" discard-file "$TOKEN" '{"path":"Notes/note.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check '! grep -q "tracked change" Notes/note.md' "tracked file restored by discard"
+req "r-20260804T130004Z-stg002" stage-file "$TOKEN" '{"path":"Private/AgentsMemory/mem.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260804T130004Z-stg002.json" >/dev/null' "staging a protected path is blocked"
+
+echo "# regression: large repo payloads must not break result serialization (execve 128KB arg limit)"
+mkdir -p Bulk
+python3 - <<'GEN'
+import os
+os.makedirs("Bulk", exist_ok=True)
+for i in range(3000):
+    with open(f"Bulk/a-fairly-long-file-name-to-inflate-git-output-{i:05d}.md", "w") as f:
+        f.write("x\n")
+GEN
+git add -A >/dev/null 2>&1 && git commit -qm "bulk: many files"
+# mark them skip-worktree so `git ls-files -v | grep ^S` output exceeds 128KB
+git ls-files Bulk | xargs -d '\n' git update-index --skip-worktree
+SKIP_BYTES="$(git ls-files -v | grep '^S ' | wc -c)"
+check '[ "$SKIP_BYTES" -gt 131072 ]' "test fixture really exceeds the 128KB argument limit ($SKIP_BYTES bytes)"
+req "r-20260804T110000Z-big001" status "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T110000Z-big001.json"
+check '[ -f "$RES" ]' "result file written despite huge payload"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok on a large sparse repo"
+check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 3000 ]' "skip-worktree count reported (not the full list)"
+check '! grep -q "ERROR building" "$RUNTIME/runner.log"' "no serialization errors in runner.log"
+# clean up the fixture so later assertions are unaffected
+git ls-files Bulk | xargs -d '\n' git update-index --no-skip-worktree
+git rm -rq --cached Bulk >/dev/null 2>&1 || true
+rm -rf Bulk
+git commit -qm "bulk: remove" >/dev/null 2>&1 || true
 
 echo "# test: runner exits (no daemon) and log has no token"
 check '! grep -q "$TOKEN" "$RUNTIME/runner.log"' "token never written to runner.log"

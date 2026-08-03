@@ -1,4 +1,5 @@
 import { App, Modal } from "obsidian";
+import { addCopyButton } from "./copyable";
 import { DISPLAY_OUTPUT_LIMIT } from "../constants";
 import type { GitStatusSummary, SparseSafetyReport, SparseStateSummary } from "../types";
 
@@ -36,8 +37,16 @@ export class ResultModal extends Modal {
     outputSection(c, "stdout", this.opts.stdout);
     outputSection(c, "stderr", this.opts.stderr);
     const btns = c.createDiv({ cls: "ngb-buttons" });
+    addCopyButton(btns, () => this.fullText(), "Copy details", "Details copied.");
     const ok = btns.createEl("button", { text: "Close", cls: "mod-cta" });
     ok.addEventListener("click", () => this.close());
+  }
+
+  private fullText(): string {
+    const parts = [this.title, ...this.lines];
+    if (this.opts.stdout) parts.push("", "--- stdout ---", this.opts.stdout);
+    if (this.opts.stderr) parts.push("", "--- stderr ---", this.opts.stderr);
+    return parts.join("\n");
   }
 
   onClose(): void {

@@ -68,12 +68,54 @@ valid_rel_path() {
 
 # ---- result writing ----------------------------------------------------------
 
+# ---- large-payload-safe JSON building ---------------------------------------
+# A single execve() argument is limited to 128 KB on Linux, so big git output
+# (status of a large vault, sparse lists, diffs, file contents) must NOT be
+# passed via --arg. We stage each field in a temp file and use jq --rawfile.
+
+NGB_FIELD_MAX_BYTES="${NGB_FIELD_MAX_BYTES:-4194304}"
+JSON_TMPDIR=""
+
+json_tmpdir() {
+  [ -n "$JSON_TMPDIR" ] || JSON_TMPDIR="$(mktemp -d)"
+  printf '%s' "$JSON_TMPDIR"
+}
+
+json_cleanup() { [ -n "$JSON_TMPDIR" ] && rm -rf "$JSON_TMPDIR"; JSON_TMPDIR=""; }
+
+# obj_from_fields name1 value1 name2 value2 ... -> JSON object on stdout
+obj_from_fields() {
+  local dir; dir="$(json_tmpdir)"
+  local -a args=()
+  local filter="{" first=1 name value f i=0
+  while [ "$#" -ge 2 ]; do
+    name="$1"; value="$2"; shift 2
+    i=$((i + 1))
+    f="$dir/f$i"
+    printf '%s' "$value" > "$f"
+    if [ "$(wc -c < "$f")" -gt "$NGB_FIELD_MAX_BYTES" ]; then
+      head -c "$NGB_FIELD_MAX_BYTES" "$f" > "$f.cut" && mv "$f.cut" "$f"
+      printf '\n(truncated by runner)' >> "$f"
+    fi
+    args+=(--rawfile "v$i" "$f")
+    [ "$first" = 1 ] || filter="$filter,"
+    first=0
+    filter="$filter\"$name\":\$v$i"
+  done
+  filter="$filter}"
+  jq -n "${args[@]}" "$filter"
+}
+
 write_result() {
   # $1 id, $2 action, $3 ok(true/false), $4 exitCode, $5 dataJson, $6 errorJson, $7 startedAt
   local id="$1" action="$2" ok="$3" ec="$4" data="$5" err="$6" started="$7"
   local tmp="$RES_DIR/$id.json.tmp"
+  local dir; dir="$(json_tmpdir)"
+  [ -n "$data" ] || data='null'
+  [ -n "$err" ] || err='null'
+  printf '%s' "$data" > "$dir/data.json"
+  printf '%s' "$err"  > "$dir/error.json"
   jq -n \
-    --argjson protocolVersion 1 \
     --arg id "$id" \
     --arg action "$action" \
     --argjson ok "$ok" \
@@ -81,18 +123,23 @@ write_result() {
     --arg startedAt "$started" \
     --arg finishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson runnerVersion "$RUNNER_VERSION" \
-    --argjson data "$data" \
-    --argjson error "$err" \
-    '{protocolVersion:$protocolVersion,id:$id,action:$action,ok:$ok,exitCode:$exitCode,
+    --slurpfile data "$dir/data.json" \
+    --slurpfile error "$dir/error.json" \
+    '{protocolVersion:1,id:$id,action:$action,ok:$ok,exitCode:$exitCode,
       startedAt:$startedAt,finishedAt:$finishedAt,runnerVersion:$runnerVersion,
-      data:$data,error:$error}' > "$tmp" || { log "ERROR building result for $id"; rm -f "$tmp"; return 1; }
+      data:($data[0] // null),error:($error[0] // null)}' > "$tmp" 2>>"$LOG_FILE"
+  if [ ! -s "$tmp" ]; then
+    # Last-resort minimal result: the plugin must never be left hanging.
+    log "ERROR building result for $id (falling back to minimal result)"
+    printf '{"protocolVersion":1,"id":"%s","action":"%s","ok":false,"exitCode":1,"error":{"code":"RUNNER_INTERNAL","message":"The runner could not serialize the result (see runner.log)."},"data":null}\n' \
+      "$id" "$action" > "$tmp"
+  fi
   mv "$tmp" "$RES_DIR/$id.json"
 }
 
 err_json() {
-  # $1 code, $2 message, $3 stdout, $4 stderr
-  jq -n --arg code "$1" --arg message "$2" --arg out "${3:-}" --arg err "${4:-}" \
-    '{code:$code,message:$message,stdout:$out,stderr:$err}'
+  # $1 code, $2 message, $3 stdout, $4 stderr  (payloads may be large)
+  obj_from_fields code "$1" message "$2" stdout "${3:-}" stderr "${4:-}"
 }
 
 # ---- git capture -------------------------------------------------------------
@@ -125,28 +172,27 @@ sparse_safety_raw() {
 # ---- actions -----------------------------------------------------------------
 
 action_ping() {
-  DATA=$(jq -n --arg pong "pong" --argjson v "$RUNNER_VERSION" '{pong:$pong,runnerVersion:($v|tostring)}')
+  DATA=$(obj_from_fields pong "pong" runnerVersion "$RUNNER_VERSION")
 }
 
 collect_status_fields() {
   run_git status --porcelain=v2 --branch || true; local branch_info="$GIT_OUT"
-  local sparse_enabled sparse_cone sparse_list ls_v last_commit remote_url
+  local sparse_enabled sparse_cone sparse_list skip_count last_commit remote_url
   sparse_enabled="$(git config --get core.sparseCheckout 2>/dev/null || true)"
   sparse_cone="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
   sparse_list="$(git sparse-checkout list 2>/dev/null || true)"
-  ls_v="$(git ls-files -v 2>/dev/null | grep '^S ' || true)"
+  # Only the COUNT is needed by the plugin; the full list can be megabytes.
+  skip_count="$(git ls-files -v 2>/dev/null | grep -c '^S ' || true)"
   last_commit="$(git log -1 --format='%H%x09%cI%x09%s' 2>/dev/null || true)"
   remote_url="$(git remote get-url origin 2>/dev/null | redact_url || true)"
-  DATA=$(jq -n \
-    --arg branchInfo "$branch_info" \
-    --arg sparseEnabled "$sparse_enabled" \
-    --arg sparseCone "$sparse_cone" \
-    --arg sparseList "$sparse_list" \
-    --arg lsFilesV "$ls_v" \
-    --arg lastCommit "$last_commit" \
-    --arg remoteUrl "$remote_url" \
-    '{branchInfo:$branchInfo,sparseEnabled:$sparseEnabled,sparseCone:$sparseCone,
-      sparseList:$sparseList,lsFilesV:$lsFilesV,lastCommit:$lastCommit,remoteUrl:$remoteUrl}')
+  DATA=$(obj_from_fields \
+    branchInfo "$branch_info" \
+    sparseEnabled "$sparse_enabled" \
+    sparseCone "$sparse_cone" \
+    sparseList "$sparse_list" \
+    skipWorktreeCount "$skip_count" \
+    lastCommit "$last_commit" \
+    remoteUrl "$remote_url")
 }
 
 action_status() { collect_status_fields; }
@@ -167,11 +213,7 @@ action_verify_sparse_safety() {
   done
   sparse_safety_raw "${ppaths[@]}"
   local plist; plist=$(printf '%s\n' "${ppaths[@]}")
-  DATA=$(jq -n \
-    --arg statusProtected "$SAFE_STATUS" \
-    --arg stagedProtected "$SAFE_STAGED" \
-    --arg protectedPaths "$plist" \
-    '{statusProtected:$statusProtected,stagedProtected:$stagedProtected,protectedPaths:$protectedPaths}')
+  DATA=$(obj_from_fields statusProtected "$SAFE_STATUS" stagedProtected "$SAFE_STAGED" protectedPaths "$plist")
 }
 
 action_sparse_reapply() {
@@ -187,8 +229,7 @@ action_sparse_reapply() {
   fi
   local reapply_out="$GIT_OUT"
   local sparse_list; sparse_list="$(git sparse-checkout list 2>/dev/null || true)"
-  DATA=$(jq -n --arg reapplyOutput "$reapply_out" --arg sparseList "$sparse_list" \
-    '{reapplyOutput:$reapplyOutput,sparseList:$sparseList}')
+  DATA=$(obj_from_fields reapplyOutput "$reapply_out" sparseList "$sparse_list")
 }
 
 action_diagnostics() {
@@ -213,23 +254,20 @@ action_diagnostics() {
     "")          auth_method="no remote" ;;
     *)           auth_method="other" ;;
   esac
-  DATA=$(jq -n \
-    --arg gitVersion "$git_version" \
-    --arg jqVersion "$jq_version" \
-    --arg repoRoot "$repo_root" \
-    --arg insideWorkTree "$inside" \
-    --arg sparseEnabled "$sparse_enabled" \
-    --arg sparseCone "$sparse_cone" \
-    --arg sparsePatternCount "$cone_patterns" \
-    --arg skipWorktreeCount "$skip_count" \
-    --arg remoteUrl "$remote_url" \
-    --arg safeDirectory "$safe_dir" \
-    --arg authMethod "$auth_method" \
-    --arg runnerVersion "$RUNNER_VERSION" \
-    '{gitVersion:$gitVersion,jqVersion:$jqVersion,repoRoot:$repoRoot,insideWorkTree:$insideWorkTree,
-      sparseEnabled:$sparseEnabled,sparseCone:$sparseCone,sparsePatternCount:$sparsePatternCount,
-      skipWorktreeCount:$skipWorktreeCount,remoteUrl:$remoteUrl,safeDirectory:$safeDirectory,
-      authMethod:$authMethod,runnerVersion:$runnerVersion}')
+  DATA=$(obj_from_fields \
+    gitVersion "$git_version" \
+    jqVersion "$jq_version" \
+    repoRoot "$repo_root" \
+    insideWorkTree "$inside" \
+    sparseEnabled "$sparse_enabled" \
+    sparseCone "$sparse_cone" \
+    sparsePatternCount "$cone_patterns" \
+    skipWorktreeCount "$skip_count" \
+    remoteUrl "$remote_url" \
+    safeDirectory "$safe_dir" \
+    authMethod "$auth_method" \
+    runtimeDir "$NGB_RUNTIME_DIR" \
+    runnerVersion "$RUNNER_VERSION")
 }
 
 
@@ -251,8 +289,12 @@ run_git_net() {
   return $GIT_EC
 }
 
-merge_data() { # $1 jsonA, $2 jsonB -> stdout merged
-  jq -n --argjson a "$1" --argjson b "$2" '$a * $b'
+merge_data() { # $1 jsonA, $2 jsonB -> stdout merged (file-based: payloads can be large)
+  local dir; dir="$(json_tmpdir)"
+  printf '%s' "${1:-null}" > "$dir/a.json"
+  printf '%s' "${2:-null}" > "$dir/b.json"
+  jq -n --slurpfile a "$dir/a.json" --slurpfile b "$dir/b.json" \
+    '(($a[0] // {}) * ($b[0] // {}))'
 }
 
 # Read args.protectedPaths into PPATHS (validated). Empty array is allowed.
@@ -282,8 +324,7 @@ safety_gate() {
   [ "${#PPATHS[@]}" -eq 0 ] && return 0
   sparse_safety_raw "${PPATHS[@]}"
   if [ -n "$SAFE_STATUS" ] || [ -n "$SAFE_STAGED" ]; then
-    DATA=$(jq -n --arg statusProtected "$SAFE_STATUS" --arg stagedProtected "$SAFE_STAGED" \
-      '{statusProtected:$statusProtected,stagedProtected:$stagedProtected}')
+    DATA=$(obj_from_fields statusProtected "$SAFE_STATUS" stagedProtected "$SAFE_STAGED")
     ERROR=$(err_json "SAFETY_BLOCKED" \
       "Sparse checkout safety check failed. The excluded directories appear as Git changes. No commit or push was performed." \
       "$SAFE_STATUS" "$SAFE_STAGED")
@@ -319,7 +360,7 @@ action_fetch() {
   fi
   local fetch_out="$GIT_OUT"
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n --arg fetchOutput "$fetch_out" '{fetchOutput:$fetchOutput}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields fetchOutput "$fetch_out")")
 }
 
 action_pull() {
@@ -327,14 +368,14 @@ action_pull() {
   read_protected_paths "$req_file" || return 1
   if merge_in_progress; then
     ERROR=$(err_json "CONFLICT" "A merge is already in progress. Resolve or abort it first." "" "")
-    DATA=$(jq -n --arg conflicts "$(conflicted_files)" '{conflicts:$conflicts}')
+    DATA=$(obj_from_fields conflicts "$(conflicted_files)")
     return 1
   fi
   if ! run_git_net pull --no-rebase --no-edit; then
     local pull_out="$GIT_OUT" pull_err="$GIT_ERR"
     local conf; conf="$(conflicted_files)"
     if [ -n "$conf" ]; then
-      DATA=$(jq -n --arg conflicts "$conf" --arg pullOutput "$pull_out" '{conflicts:$conflicts,pullOutput:$pullOutput}')
+      DATA=$(obj_from_fields conflicts "$conf" pullOutput "$pull_out")
       ERROR=$(err_json "CONFLICT" "Pull produced merge conflicts. Sync stopped; nothing was pushed." "$pull_out" "$pull_err")
     else
       ERROR=$(err_json "GIT_FAILED" "git pull failed." "$pull_out" "$pull_err")
@@ -345,7 +386,7 @@ action_pull() {
   # Post-merge safety: a merge must never have materialized changes to protected paths.
   if ! safety_gate; then return 1; fi
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n --arg pullOutput "$pull_out" '{pullOutput:$pullOutput}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields pullOutput "$pull_out")")
 }
 
 action_commit() {
@@ -372,8 +413,7 @@ action_commit() {
     new_head="$(git rev-parse HEAD 2>/dev/null || true)"
   fi
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n --argjson committed "$committed" --arg newHead "$new_head" --arg commitOutput "$commit_out" \
-    '{committed:($committed|tostring),newHead:$newHead,commitOutput:$commitOutput}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields committed "$committed" newHead "$new_head" commitOutput "$commit_out")")
 }
 
 action_push() {
@@ -389,7 +429,7 @@ action_push() {
   fi
   local push_out="$GIT_OUT$GIT_ERR"
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n --arg pushOutput "$push_out" '{pushOutput:$pushOutput}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields pushOutput "$push_out")")
 }
 
 action_sync() {
@@ -414,7 +454,7 @@ action_sync() {
   steps="$steps,safety-preflight-ok"
 
   if merge_in_progress; then
-    DATA=$(jq -n --arg conflicts "$(conflicted_files)" --arg steps "$steps" '{conflicts:$conflicts,steps:$steps}')
+    DATA=$(obj_from_fields conflicts "$(conflicted_files)" steps "$steps")
     ERROR=$(err_json "CONFLICT" "A merge is already in progress. Resolve or abort it first." "" "")
     return 1
   fi
@@ -432,8 +472,7 @@ action_sync() {
       local pull_out="$GIT_OUT" pull_err="$GIT_ERR"
       local conf; conf="$(conflicted_files)"
       if [ -n "$conf" ]; then
-        DATA=$(jq -n --arg conflicts "$conf" --arg steps "$steps" --arg pullOutput "$pull_out" \
-          '{conflicts:$conflicts,steps:$steps,pullOutput:$pullOutput}')
+        DATA=$(obj_from_fields conflicts "$conf" steps "$steps" pullOutput "$pull_out")
         ERROR=$(err_json "CONFLICT" "Sync stopped: merge conflicts. Nothing was committed or pushed." "$pull_out" "$pull_err")
       else
         ERROR=$(err_json "GIT_FAILED" "git pull failed during sync." "$pull_out" "$pull_err")
@@ -480,11 +519,7 @@ action_sync() {
 
   # 10. Structured result.
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n \
-    --arg steps "$steps" \
-    --arg committed "$committed" \
-    --arg pushed "$pushed" \
-    '{steps:$steps,committed:$committed,pushed:$pushed}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields steps "$steps" committed "$committed" pushed "$pushed")")
 }
 
 action_abort_merge() {
@@ -522,8 +557,7 @@ action_file_log() {
       --format='%x1e%H%x1f%cI%x1f%an%x1f%s' -- "$path"; then
     ERROR=$(err_json GIT_FAILED "git log failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
-  DATA=$(jq -n --arg log "$GIT_OUT" --arg path "$path" --arg limit "$limit" --arg skip "$skip" \
-    '{log:$log,path:$path,limit:$limit,skip:$skip}')
+  DATA=$(obj_from_fields log "$GIT_OUT" path "$path" limit "$limit" skip "$skip")
 }
 
 action_show_file_at_commit() {
@@ -542,8 +576,7 @@ action_show_file_at_commit() {
   fi
   content=$(git show "$commit:$path" | base64 -w0) || {
     ERROR=$(err_json GIT_FAILED "git show failed." "" ""); return 1; }
-  DATA=$(jq -n --arg contentBase64 "$content" --arg size "$size" --arg commit "$commit" --arg path "$path" \
-    '{contentBase64:$contentBase64,size:$size,commit:$commit,path:$path}')
+  DATA=$(obj_from_fields contentBase64 "$content" size "$size" commit "$commit" path "$path")
 }
 
 action_diff_file() {
@@ -566,8 +599,7 @@ action_diff_file() {
     diff_out="${diff_out:0:$NGB_MAX_DIFF_CHARS}"
     truncated=true
   fi
-  DATA=$(jq -n --arg diff "$diff_out" --argjson truncated "$truncated" --arg from "$from" --arg to "$to" --arg path "$path" \
-    '{diff:$diff,truncated:($truncated|tostring),from:$from,to:$to,path:$path}')
+  DATA=$(obj_from_fields diff "$diff_out" truncated "$truncated" from "$from" to "$to" path "$path")
 }
 
 action_restore_file() {
@@ -592,8 +624,74 @@ action_restore_file() {
     ERROR=$(err_json GIT_FAILED "git restore failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(jq -n --arg restored "true" --arg path "$path" --arg commit "$commit" \
-    '{restored:$restored,restoredPath:$path,restoredFrom:$commit}')")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields restored "true" restoredPath "$path" restoredFrom "$commit")")
+}
+
+
+# ---- per-file staging actions (source-control view) ---------------------------
+
+# Guard: the bridge must never touch protected sparse paths.
+refuse_if_protected() { # $1 path
+  local p
+  for p in "${PPATHS[@]}"; do
+    case "$1" in
+      "$p"|"$p"/*)
+        ERROR=$(err_json SAFETY_BLOCKED "Refusing to touch a protected sparse path ($p)." "" "")
+        return 1 ;;
+    esac
+  done
+  return 0
+}
+
+action_stage_file() {
+  local req_file="$1" path
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  read_protected_paths "$req_file" || return 1
+  refuse_if_protected "$path" || return 1
+  if ! run_git add -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git add failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
+action_unstage_file() {
+  local req_file="$1" path
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  read_protected_paths "$req_file" || return 1
+  refuse_if_protected "$path" || return 1
+  # Works for both tracked and newly added files.
+  if ! run_git restore --staged -- "$path"; then
+    if ! run_git rm --cached -q -- "$path"; then
+      ERROR=$(err_json GIT_FAILED "git restore --staged failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
+  collect_status_fields
+}
+
+action_discard_file() {
+  local req_file="$1" path tracked
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  read_protected_paths "$req_file" || return 1
+  refuse_if_protected "$path" || return 1
+  if git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+    tracked=true
+  else
+    tracked=false
+  fi
+  if [ "$tracked" = true ]; then
+    if ! run_git restore --staged --worktree -- "$path"; then
+      ERROR=$(err_json GIT_FAILED "git restore failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  else
+    # Untracked: delete the file itself (explicitly confirmed in the UI).
+    rm -f -- "$NGB_REPO_DIR/$path" || {
+      ERROR=$(err_json GIT_FAILED "Could not delete untracked file." "" ""); return 1; }
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields discarded "$path" wasTracked "$tracked")")
 }
 
 # ---- request processing ------------------------------------------------------
@@ -648,6 +746,9 @@ process_request() {
     show-file-at-commit)   action_show_file_at_commit "$req_file" || { ok=false; ec=1; } ;;
     diff-file)             action_diff_file "$req_file" || { ok=false; ec=1; } ;;
     restore-file)          action_restore_file "$req_file" || { ok=false; ec=1; } ;;
+    stage-file)            action_stage_file "$req_file" || { ok=false; ec=1; } ;;
+    unstage-file)          action_unstage_file "$req_file" || { ok=false; ec=1; } ;;
+    discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
     *)
       ok=false; ec=1
       ERROR=$(err_json "BAD_REQUEST" "Action not allowed: $action" "" "")
@@ -657,6 +758,7 @@ process_request() {
 
   write_result "$id" "$action" "$ok" "$ec" "$DATA" "$ERROR" "$started"
   log "DONE $id action=$action ok=$ok"
+  json_cleanup
   mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
 }
 
@@ -680,4 +782,5 @@ else
   done
 fi
 cleanup_old
+json_cleanup
 exit 0
