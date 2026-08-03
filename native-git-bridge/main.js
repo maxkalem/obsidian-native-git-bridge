@@ -76,7 +76,8 @@ var DEFAULT_DEVICE_SETTINGS = {
   minAutoSyncIntervalMinutes: 15,
   wifiOnly: false,
   skipOnLowBattery: false,
-  companionUriTemplate: "nativegitbridge://run?id={id}"
+  companionUriTemplate: "nativegitbridge://run?id={id}",
+  suppressObsidianGitWarning: false
 };
 var DeviceLocalSettingsStore = class {
   constructor(backend, scopeId) {
@@ -1480,22 +1481,52 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     }
     return true;
   }
+  /**
+   * obsidian-git is truly active only if it is in the enabled plugin list AND
+   * not switched off via its own device-local, non-synced toggle
+   * (app.loadLocalStorage("obsidian-git:pluginDisabled") === "true"). Keeping
+   * it "enabled" in community-plugins.json (which syncs through the vault)
+   * while device-disabled is a perfectly valid setup and must not be flagged.
+   */
+  isObsidianGitActiveOnDevice() {
+    const plugins = this.app.plugins;
+    if (!plugins?.enabledPlugins?.has("obsidian-git")) return false;
+    let disabled = null;
+    try {
+      const load = this.app.loadLocalStorage;
+      if (typeof load === "function") disabled = load.call(this.app, "obsidian-git:pluginDisabled");
+    } catch {
+    }
+    if (disabled === null || disabled === void 0) {
+      try {
+        disabled = window.localStorage.getItem("obsidian-git:pluginDisabled");
+      } catch {
+      }
+    }
+    return disabled !== "true";
+  }
   warnIfObsidianGitEnabledOnAndroid() {
     if (!import_obsidian7.Platform.isAndroidApp) return;
-    const plugins = this.app.plugins;
-    if (plugins?.enabledPlugins?.has("obsidian-git")) {
-      this.log.add("warn", "compat", "obsidian-git enabled on Android alongside Native Git Bridge.");
-      new ResultModal(
-        this.app,
-        "Plugin compatibility warning",
-        [
-          "The 'Git' (obsidian-git) plugin is enabled on this Android device.",
+    if (this.deviceSettings.suppressObsidianGitWarning) return;
+    if (!this.isObsidianGitActiveOnDevice()) return;
+    this.log.add("warn", "compat", "obsidian-git ACTIVE on this Android device alongside Native Git Bridge.");
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Plugin compatibility warning",
+        body: [
+          "The 'Git' (obsidian-git) plugin is ACTIVE on this Android device.",
           "Its mobile backend (isomorphic-git) does not understand native sparse-checkout / skip-worktree index data and may stage protected paths as deletions.",
-          "Recommendation: disable obsidian-git on this device (Settings \u2192 Community plugins). Native Git Bridge will not disable it automatically."
+          "Recommended fix that keeps sync intact: open obsidian-git settings and enable its own 'Disable on this device' toggle (it is not synced), instead of disabling the plugin globally.",
+          "Native Git Bridge will never disable another plugin automatically."
         ],
-        { isError: true }
-      ).open();
-    }
+        confirmLabel: "Don't warn again on this device",
+        cancelLabel: "Close"
+      },
+      async (dontWarnAgain) => {
+        if (dontWarnAgain) await this.updateDeviceSettings({ suppressObsidianGitWarning: true });
+      }
+    ).open();
   }
   /**
    * Import the token dropped by the Termux installer (runtime/pairing.json),
@@ -1980,9 +2011,10 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
     if (import_obsidian7.Platform.isAndroidApp) {
-      const plugins = this.app.plugins;
-      if (plugins?.enabledPlugins?.has("obsidian-git")) {
-        report.problems.push("obsidian-git is enabled on Android: incompatible with a native sparse-checkout index.");
+      if (this.isObsidianGitActiveOnDevice()) {
+        report.problems.push(
+          "obsidian-git is ACTIVE on this device (not device-disabled): incompatible with a native sparse-checkout index. Use its 'Disable on this device' toggle."
+        );
       }
     }
     if (s.enabledOnThisDevice && s.termuxIntegrationEnabled && s.authToken) {

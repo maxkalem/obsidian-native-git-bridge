@@ -223,24 +223,59 @@ export default class NativeGitBridgePlugin extends Plugin {
     return true;
   }
 
-  private warnIfObsidianGitEnabledOnAndroid(): void {
-    if (!Platform.isAndroidApp) return;
+  /**
+   * obsidian-git is truly active only if it is in the enabled plugin list AND
+   * not switched off via its own device-local, non-synced toggle
+   * (app.loadLocalStorage("obsidian-git:pluginDisabled") === "true"). Keeping
+   * it "enabled" in community-plugins.json (which syncs through the vault)
+   * while device-disabled is a perfectly valid setup and must not be flagged.
+   */
+  private isObsidianGitActiveOnDevice(): boolean {
     const plugins = (this.app as unknown as {
       plugins?: { enabledPlugins?: Set<string> };
     }).plugins;
-    if (plugins?.enabledPlugins?.has("obsidian-git")) {
-      this.log.add("warn", "compat", "obsidian-git enabled on Android alongside Native Git Bridge.");
-      new ResultModal(
-        this.app,
-        "Plugin compatibility warning",
-        [
-          "The 'Git' (obsidian-git) plugin is enabled on this Android device.",
-          "Its mobile backend (isomorphic-git) does not understand native sparse-checkout / skip-worktree index data and may stage protected paths as deletions.",
-          "Recommendation: disable obsidian-git on this device (Settings → Community plugins). Native Git Bridge will not disable it automatically.",
-        ],
-        { isError: true }
-      ).open();
+    if (!plugins?.enabledPlugins?.has("obsidian-git")) return false;
+    let disabled: string | null = null;
+    try {
+      const load = (this.app as unknown as {
+        loadLocalStorage?: (key: string) => string | null;
+      }).loadLocalStorage;
+      if (typeof load === "function") disabled = load.call(this.app, "obsidian-git:pluginDisabled");
+    } catch {
+      /* fall through */
     }
+    if (disabled === null || disabled === undefined) {
+      try {
+        disabled = window.localStorage.getItem("obsidian-git:pluginDisabled");
+      } catch {
+        /* unavailable */
+      }
+    }
+    return disabled !== "true";
+  }
+
+  private warnIfObsidianGitEnabledOnAndroid(): void {
+    if (!Platform.isAndroidApp) return;
+    if (this.deviceSettings.suppressObsidianGitWarning) return;
+    if (!this.isObsidianGitActiveOnDevice()) return;
+    this.log.add("warn", "compat", "obsidian-git ACTIVE on this Android device alongside Native Git Bridge.");
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Plugin compatibility warning",
+        body: [
+          "The 'Git' (obsidian-git) plugin is ACTIVE on this Android device.",
+          "Its mobile backend (isomorphic-git) does not understand native sparse-checkout / skip-worktree index data and may stage protected paths as deletions.",
+          "Recommended fix that keeps sync intact: open obsidian-git settings and enable its own 'Disable on this device' toggle (it is not synced), instead of disabling the plugin globally.",
+          "Native Git Bridge will never disable another plugin automatically.",
+        ],
+        confirmLabel: "Don't warn again on this device",
+        cancelLabel: "Close",
+      },
+      async (dontWarnAgain) => {
+        if (dontWarnAgain) await this.updateDeviceSettings({ suppressObsidianGitWarning: true });
+      }
+    ).open();
   }
 
   /**
@@ -776,9 +811,11 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
     if (Platform.isAndroidApp) {
-      const plugins = (this.app as unknown as { plugins?: { enabledPlugins?: Set<string> } }).plugins;
-      if (plugins?.enabledPlugins?.has("obsidian-git")) {
-        report.problems.push("obsidian-git is enabled on Android: incompatible with a native sparse-checkout index.");
+      if (this.isObsidianGitActiveOnDevice()) {
+        report.problems.push(
+          "obsidian-git is ACTIVE on this device (not device-disabled): incompatible with a native sparse-checkout index. " +
+            "Use its 'Disable on this device' toggle."
+        );
       }
     }
 
