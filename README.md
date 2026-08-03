@@ -33,18 +33,30 @@ in which protected sparse paths appear as changes.
    **exits**.
 5. The plugin (polling only while the operation is in flight) renders the result.
 
-## Install (Termux side)
+## Install — two APKs and one pasted line
+
+1. Install **Termux** (from F-Droid) and the **Git Bridge Companion** APK
+   (built by `.github/workflows/build-companion.yml`; grant it the
+   "Run commands in Termux environment" permission).
+2. Paste one line into Termux (also available with a Copy button in the plugin
+   settings):
 
 ```
-# inside Termux, from the plugin folder of your vault:
-bash .obsidian/plugins/native-git-bridge/termux/install.sh /storage/emulated/0/<YourVault>
+curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
-The installer installs `git`+`jq`, links shared storage, verifies the repo and
-sparse checkout, installs the runner and the `GitBridge` widget task, excludes
-the runtime dir locally, runs a self-test, and prints the pairing token to paste
-into the plugin settings. Credentials (SSH keys, credential helper, `gh`) stay
-entirely inside Termux; the plugin never stores or sees them.
+The installer sets up everything inside Termux: packages (git, jq, openssh),
+storage access, `allow-external-apps` for the companion, an SSH key (it prints
+the public key to add as a repo deploy key), repo + sparse verification, the
+runner, a local `.git/info/exclude` entry, a self-test — and drops a one-shot
+`pairing.json` that the plugin imports automatically, so the token never needs
+to be copied by hand. Credentials stay entirely inside Termux; the plugin never
+stores or sees them. Any auth you already use works unchanged — a GitHub PAT
+via the git credential helper (or embedded in the remote URL, which the
+installer offers to move into `~/.git-credentials`), or an SSH key (generated
+only for SSH remotes). The runner always runs git with
+`GIT_TERMINAL_PROMPT=0`, so an expired PAT fails fast with a clear error
+instead of hanging, and diagnostics reports the detected auth method.
 
 ## Sparse checkout safety
 

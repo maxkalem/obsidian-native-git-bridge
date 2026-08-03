@@ -45,6 +45,8 @@ import {
 } from "./ui/modals";
 import { DiagnosticsModal, type DiagnosticsReport } from "./ui/DiagnosticsModal";
 import { CommitMessageModal, ConflictModal } from "./ui/gitModals";
+import { parsePairingFile } from "./settings/pairing";
+import { PAIRING_FILE } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
 
@@ -197,6 +199,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   private async startupChecks(): Promise<void> {
     this.refreshStatusBarIdle();
     this.warnIfObsidianGitEnabledOnAndroid();
+    await this.tryImportPairing();
     await this.reconcileAfterRestart();
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
@@ -237,6 +240,60 @@ export default class NativeGitBridgePlugin extends Plugin {
         ],
         { isError: true }
       ).open();
+    }
+  }
+
+  /**
+   * Import the token dropped by the Termux installer (runtime/pairing.json),
+   * then delete the file. Overwriting an existing, different token requires
+   * explicit confirmation.
+   */
+  private async tryImportPairing(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    const path = `${this.app.vault.configDir}/plugins/${this.manifest.id}/runtime/${PAIRING_FILE}`;
+    try {
+      if (!(await adapter.exists(path))) return;
+      const pairing = parsePairingFile(await adapter.read(path));
+      if (!pairing) {
+        this.log.add("warn", "pairing", "pairing.json present but invalid; ignoring.");
+        return;
+      }
+      const apply = async () => {
+        await this.updateDeviceSettings({
+          authToken: pairing.token,
+          repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
+          termuxIntegrationEnabled: true,
+        });
+        try {
+          await adapter.remove(path);
+        } catch {
+          /* best effort */
+        }
+        this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
+        new Notice("Native Git Bridge: paired with the Termux runner.");
+      };
+      const current = this.deviceSettings.authToken;
+      if (current === "" || current === pairing.token) {
+        await apply();
+      } else {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Replace pairing token?",
+            body: [
+              "A new pairing file from the Termux installer was found, but this device already has a different token.",
+              "Replace it only if you re-ran the installer on purpose.",
+            ],
+            confirmLabel: "Replace token",
+            danger: true,
+          },
+          async (confirmed) => {
+            if (confirmed) await apply();
+          }
+        ).open();
+      }
+    } catch (e) {
+      this.log.add("warn", "pairing", `Pairing import failed: ${String(e)}`);
     }
   }
 

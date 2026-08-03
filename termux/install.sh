@@ -19,12 +19,8 @@ case "${PREFIX:-}" in
 esac
 
 # 2. Install required packages.
-say "-- Installing packages (git, jq)..."
-pkg install -y git jq >/dev/null || fail "pkg install failed"
-if $WITH_SSH; then
-  say "-- Installing openssh (for SSH remotes)..."
-  pkg install -y openssh >/dev/null || fail "openssh install failed"
-fi
+say "-- Installing packages (git, jq, openssh)..."
+pkg install -y git jq openssh >/dev/null || fail "pkg install failed"
 
 # 3. Storage access.
 if [ ! -d "$HOME/storage" ]; then
@@ -66,6 +62,82 @@ if [ "$SPARSE" = "true" ]; then
   say "-- Sparse checkout: ENABLED ($(git -C "$REPO_DIR" sparse-checkout list 2>/dev/null | wc -l | tr -d ' ') patterns)"
 else
   say "-- Sparse checkout: not enabled (that's fine if you don't use it)."
+fi
+
+# 4b. Allow the companion app to trigger the runner (RUN_COMMAND intent).
+# This only permits apps that ALSO hold the RUN_COMMAND permission, which the
+# user grants per-app in Android settings.
+TP="$HOME/.termux/termux.properties"
+mkdir -p "$HOME/.termux"
+if ! grep -Eq '^\s*allow-external-apps\s*=\s*true\s*$' "$TP" 2>/dev/null; then
+  printf '\nallow-external-apps=true\n' >> "$TP"
+  command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings || true
+  say "-- Enabled allow-external-apps in ~/.termux/termux.properties (needed for the companion app)."
+else
+  say "-- allow-external-apps already enabled."
+fi
+
+# 4c. Authentication check - adapts to what you already use (PAT over HTTPS,
+# credential helper, or SSH). Credentials never leave Termux.
+REMOTE_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
+case "$REMOTE_URL" in
+  https://*@*)
+    say "-- HTTPS remote with credentials embedded in the URL detected."
+    say "   This works, but the token then appears in .git/config."
+    printf 'Move the token into the git credential store (~/.git-credentials, chmod 600) and clean the URL? [y/N] '
+    read -r yn
+    if [ "$yn" = "y" ]; then
+      CREDS="${REMOTE_URL#https://}"; CREDS="${CREDS%%@*}"
+      HOSTPATH="${REMOTE_URL#https://*@}"
+      HOSTONLY="${HOSTPATH%%/*}"
+      printf 'https://%s@%s\n' "$CREDS" "$HOSTONLY" >> "$HOME/.git-credentials"
+      chmod 600 "$HOME/.git-credentials"
+      git -C "$REPO_DIR" config --local credential.helper store
+      git -C "$REPO_DIR" remote set-url origin "https://$HOSTPATH"
+      say "-- Token moved to credential store; remote URL cleaned."
+    else
+      say "-- Left as is (the bridge redacts credentials from all logs and results)."
+    fi
+    ;;
+  https://*)
+    HELPER="$(git -C "$REPO_DIR" config --get credential.helper 2>/dev/null || git config --global --get credential.helper 2>/dev/null || true)"
+    if [ -z "$HELPER" ]; then
+      say "-- HTTPS remote without a credential helper: pushes from the bridge would fail"
+      say "   (the runner never prompts interactively)."
+      printf 'Enable the git credential store and cache your PAT on the next pull? [y/N] '
+      read -r yn
+      if [ "$yn" = "y" ]; then
+        git -C "$REPO_DIR" config --local credential.helper store
+        say "-- credential.helper=store set (repo-local). Run 'git pull' once in Termux and"
+        say "   enter your PAT as the password; it will be reused non-interactively afterwards."
+      fi
+    else
+      say "-- HTTPS remote with credential helper '$HELPER': OK, your PAT will be used."
+    fi
+    ;;
+  git@*|ssh://*)
+    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+      mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
+      ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "native-git-bridge@termux" >/dev/null
+      say "-- Generated SSH key ~/.ssh/id_ed25519 (add the public key to your repo):"
+      cat "$HOME/.ssh/id_ed25519.pub"
+    else
+      say "-- SSH remote with existing key: OK."
+    fi
+    ;;
+  "")
+    say "-- WARNING: no 'origin' remote configured; pull/push will fail until you add one."
+    ;;
+esac
+
+# Non-interactive auth self-test (fails fast instead of hanging).
+if [ -n "$REMOTE_URL" ]; then
+  if GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$REPO_DIR" ls-remote --heads origin >/dev/null 2>&1; then
+    say "-- Remote authentication check PASSED (non-interactive ls-remote)."
+  else
+    say "-- WARNING: non-interactive access to the remote FAILED. The bridge will not be able"
+    say "   to fetch/push until credentials work without a prompt (expired PAT? missing helper?)."
+  fi
 fi
 
 # 5. Install runner + config + token.
@@ -133,17 +205,24 @@ else
   fail "Self-test failed; see $RUNTIME_DIR/runner.log"
 fi
 
-# 11. Next steps.
+# 11. Auto-pairing: the plugin imports this file on next start and deletes it,
+# so the token never has to be copied by hand. (It transits vault storage once;
+# same trust boundary as the request files themselves.)
+cat > "$RUNTIME_DIR/pairing.json" <<PAIR
+{"token":"$TOKEN","repoPath":"$REPO_DIR","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+PAIR
+say "-- Pairing file written; the Obsidian plugin will import the token automatically."
+
+# 12. Next steps.
 say ""
-say "== Done. Next steps =="
-say "1. Add a Termux:Widget to your home screen (install the Termux:Widget app if needed)"
-say "   and pin the 'GitBridge' task, or long-press the Termux:Widget icon for shortcuts."
-say "2. In Obsidian -> Settings -> Native Git Bridge:"
-say "   - enable the plugin on this device,"
-say "   - enable Termux integration,"
-say "   - paste this pairing token:"
+say "== Done. What is left (outside Termux) =="
+say "1. Open Obsidian -> Settings -> Native Git Bridge -> enable on this device."
+say "   The pairing token is imported automatically on plugin start."
+say "2. If you use the companion app: set integration type to 'Companion app intent'"
+say "   and grant it the 'Run commands in Termux environment' permission in Android settings."
+say "   Without the companion: pin the 'GitBridge' Termux:Widget task instead."
+say "3. Authentication: whatever you already use in Termux (PAT via credential helper,"
+say "   token in URL, or SSH key) keeps working - see the auth check result above."
 say ""
-say "   $TOKEN"
-say ""
-say "3. Run 'Native Git: Run diagnostics' in Obsidian, then tap the GitBridge widget."
-say "Note: nothing runs in the background; the runner only executes when you tap the widget."
+say "Manual pairing token (only needed if auto-import fails): $TOKEN"
+say "Note: nothing runs in the background; the runner executes only when triggered."

@@ -8,6 +8,12 @@ umask 077
 RUNNER_VERSION=1
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
+# Never let git block on an interactive credential prompt: with a missing or
+# expired PAT the command must fail fast with a clear stderr, not hang.
+export GIT_TERMINAL_PROMPT=0
+export GCM_INTERACTIVE=never
+export SSH_ASKPASS=/bin/false
+
 die() { echo "native-git-bridge-runner: $*" >&2; exit 1; }
 
 [ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
@@ -197,6 +203,16 @@ action_diagnostics() {
   skip_count="$(git ls-files -v 2>/dev/null | grep -c '^S ' || true)"
   remote_url="$(git remote get-url origin 2>/dev/null | redact_url || true)"
   safe_dir="$(git config --global --get-all safe.directory 2>/dev/null | tr '\n' ' ' || true)"
+  local raw_url auth_method cred_helper
+  raw_url="$(git remote get-url origin 2>/dev/null || true)"
+  cred_helper="$(git config --get credential.helper 2>/dev/null || git config --global --get credential.helper 2>/dev/null || true)"
+  case "$raw_url" in
+    https://*@*) auth_method="https (credentials embedded in URL - consider credential.helper store)" ;;
+    https://*)   auth_method="https (PAT via credential helper: ${cred_helper:-NOT CONFIGURED})" ;;
+    git@*|ssh://*) auth_method="ssh" ;;
+    "")          auth_method="no remote" ;;
+    *)           auth_method="other" ;;
+  esac
   DATA=$(jq -n \
     --arg gitVersion "$git_version" \
     --arg jqVersion "$jq_version" \
@@ -208,11 +224,12 @@ action_diagnostics() {
     --arg skipWorktreeCount "$skip_count" \
     --arg remoteUrl "$remote_url" \
     --arg safeDirectory "$safe_dir" \
+    --arg authMethod "$auth_method" \
     --arg runnerVersion "$RUNNER_VERSION" \
     '{gitVersion:$gitVersion,jqVersion:$jqVersion,repoRoot:$repoRoot,insideWorkTree:$insideWorkTree,
       sparseEnabled:$sparseEnabled,sparseCone:$sparseCone,sparsePatternCount:$sparsePatternCount,
       skipWorktreeCount:$skipWorktreeCount,remoteUrl:$remoteUrl,safeDirectory:$safeDirectory,
-      runnerVersion:$runnerVersion}')
+      authMethod:$authMethod,runnerVersion:$runnerVersion}')
 }
 
 

@@ -3,6 +3,8 @@ import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
 import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
+import { REPO_RAW_BASE } from "../constants";
+import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: NativeGitBridgePlugin) {
@@ -28,6 +30,24 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "Check available storage / WebView state.",
       });
     }
+
+    containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
+    const cmd = `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint || "/storage/emulated/0/<YourVault>"}"`;
+    const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
+    cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
+    new Setting(containerEl)
+      .setName("Install command")
+      .setDesc(
+        "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. " +
+          "It installs git/jq/openssh, links storage, enables the companion trigger, creates an SSH key, verifies the repo " +
+          "and pairs with this plugin automatically — no manual token copying."
+      )
+      .addButton((b) =>
+        b.setButtonText("Copy command").setCta().onClick(async () => {
+          await navigator.clipboard.writeText(cmd);
+          new Notice("Install command copied.");
+        })
+      );
 
     new Setting(containerEl)
       .setName("Enable on this device")

@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => NativeGitBridgePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
@@ -45,6 +45,8 @@ var DISPLAY_OUTPUT_LIMIT = 100 * 1024;
 var LOG_MAX_ENTRIES = 200;
 var SPARSE_SAFETY_WARNING = "Sparse checkout safety check failed. The excluded directories appear as Git changes. No commit or push was performed.";
 var STORAGE_PREFIX = "ngb:v1";
+var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main";
+var PAIRING_FILE = "pairing.json";
 
 // src/types.ts
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
@@ -411,6 +413,7 @@ var StatusModal = class extends import_obsidian.Modal {
 };
 
 // src/settings/SettingsTab.ts
+var import_obsidian3 = require("obsidian");
 var NativeGitBridgeSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -430,6 +433,18 @@ var NativeGitBridgeSettingTab = class extends import_obsidian2.PluginSettingTab 
         text: "Device-local storage is unavailable; settings will not survive an app restart. Check available storage / WebView state."
       });
     }
+    containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
+    const cmd = `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint || "/storage/emulated/0/<YourVault>"}"`;
+    const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
+    cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
+    new import_obsidian2.Setting(containerEl).setName("Install command").setDesc(
+      "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. It installs git/jq/openssh, links storage, enables the companion trigger, creates an SSH key, verifies the repo and pairs with this plugin automatically \u2014 no manual token copying."
+    ).addButton(
+      (b) => b.setButtonText("Copy command").setCta().onClick(async () => {
+        await navigator.clipboard.writeText(cmd);
+        new import_obsidian3.Notice("Install command copied.");
+      })
+    );
     new import_obsidian2.Setting(containerEl).setName("Enable on this device").setDesc("Master switch. Off by default on every new device.").addToggle(
       (t) => t.setValue(s.enabledOnThisDevice).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ enabledOnThisDevice: v });
@@ -1132,8 +1147,8 @@ var StatusBarController = class {
 };
 
 // src/ui/DiagnosticsModal.ts
-var import_obsidian3 = require("obsidian");
-var DiagnosticsModal = class extends import_obsidian3.Modal {
+var import_obsidian4 = require("obsidian");
+var DiagnosticsModal = class extends import_obsidian4.Modal {
   constructor(app, report) {
     super(app);
     this.report = report;
@@ -1173,8 +1188,8 @@ var DiagnosticsModal = class extends import_obsidian3.Modal {
 };
 
 // src/ui/gitModals.ts
-var import_obsidian4 = require("obsidian");
-var CommitMessageModal = class extends import_obsidian4.Modal {
+var import_obsidian5 = require("obsidian");
+var CommitMessageModal = class extends import_obsidian5.Modal {
   constructor(app, opts, onDone) {
     super(app);
     this.opts = opts;
@@ -1224,7 +1239,7 @@ var CommitMessageModal = class extends import_obsidian4.Modal {
     this.contentEl.empty();
   }
 };
-var ConflictModal = class extends import_obsidian4.Modal {
+var ConflictModal = class extends import_obsidian5.Modal {
   constructor(app, conflicts, actions) {
     super(app);
     this.conflicts = conflicts;
@@ -1263,12 +1278,30 @@ var ConflictModal = class extends import_obsidian4.Modal {
   }
 };
 
+// src/settings/pairing.ts
+var TOKEN_RE = /^[A-Za-z0-9]{16,128}$/;
+function parsePairingFile(text) {
+  let obj;
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof obj !== "object" || obj === null) return null;
+  const r = obj;
+  if (typeof r.token !== "string" || !TOKEN_RE.test(r.token)) return null;
+  const out = { token: r.token };
+  if (typeof r.repoPath === "string" && r.repoPath.length < 4096) out.repoPath = r.repoPath;
+  if (typeof r.createdAt === "string") out.createdAt = r.createdAt;
+  return out;
+}
+
 // src/main.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/ui/OperationLogModal.ts
-var import_obsidian5 = require("obsidian");
-var OperationLogModal = class extends import_obsidian5.Modal {
+var import_obsidian6 = require("obsidian");
+var OperationLogModal = class extends import_obsidian6.Modal {
   constructor(app, log) {
     super(app);
     this.log = log;
@@ -1313,7 +1346,7 @@ var OperationLogModal = class extends import_obsidian5.Modal {
 var DEFAULT_SHARED_PREFS = { showStatusBar: true, showRibbonIcon: true };
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
-var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
+var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
   constructor() {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
@@ -1426,6 +1459,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
   async startupChecks() {
     this.refreshStatusBarIdle();
     this.warnIfObsidianGitEnabledOnAndroid();
+    await this.tryImportPairing();
     await this.reconcileAfterRestart();
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
@@ -1447,7 +1481,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
     return true;
   }
   warnIfObsidianGitEnabledOnAndroid() {
-    if (!import_obsidian6.Platform.isAndroidApp) return;
+    if (!import_obsidian7.Platform.isAndroidApp) return;
     const plugins = this.app.plugins;
     if (plugins?.enabledPlugins?.has("obsidian-git")) {
       this.log.add("warn", "compat", "obsidian-git enabled on Android alongside Native Git Bridge.");
@@ -1461,6 +1495,58 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
         ],
         { isError: true }
       ).open();
+    }
+  }
+  /**
+   * Import the token dropped by the Termux installer (runtime/pairing.json),
+   * then delete the file. Overwriting an existing, different token requires
+   * explicit confirmation.
+   */
+  async tryImportPairing() {
+    const adapter = this.app.vault.adapter;
+    const path = `${this.app.vault.configDir}/plugins/${this.manifest.id}/runtime/${PAIRING_FILE}`;
+    try {
+      if (!await adapter.exists(path)) return;
+      const pairing = parsePairingFile(await adapter.read(path));
+      if (!pairing) {
+        this.log.add("warn", "pairing", "pairing.json present but invalid; ignoring.");
+        return;
+      }
+      const apply = async () => {
+        await this.updateDeviceSettings({
+          authToken: pairing.token,
+          repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
+          termuxIntegrationEnabled: true
+        });
+        try {
+          await adapter.remove(path);
+        } catch {
+        }
+        this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
+        new import_obsidian7.Notice("Native Git Bridge: paired with the Termux runner.");
+      };
+      const current = this.deviceSettings.authToken;
+      if (current === "" || current === pairing.token) {
+        await apply();
+      } else {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Replace pairing token?",
+            body: [
+              "A new pairing file from the Termux installer was found, but this device already has a different token.",
+              "Replace it only if you re-ran the installer on purpose."
+            ],
+            confirmLabel: "Replace token",
+            danger: true
+          },
+          async (confirmed) => {
+            if (confirmed) await apply();
+          }
+        ).open();
+      }
+    } catch (e) {
+      this.log.add("warn", "pairing", `Pairing import failed: ${String(e)}`);
     }
   }
   async reconcileAfterRestart() {
@@ -1508,7 +1594,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
     this.store.reset();
     this.deviceSettings = this.store.read();
     this.refreshStatusBarIdle();
-    new import_obsidian6.Notice("Native Git Bridge: device-local settings reset.");
+    new import_obsidian7.Notice("Native Git Bridge: device-local settings reset.");
   }
   refreshStatusBarIdle() {
     if (!this.statusBar) return;
@@ -1547,25 +1633,25 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
   async runOperation(action, args = {}) {
     const s = this.deviceSettings;
     if (!s.enabledOnThisDevice) {
-      new import_obsidian6.Notice("Native Git Bridge is disabled on this device (see settings).");
+      new import_obsidian7.Notice("Native Git Bridge is disabled on this device (see settings).");
       return null;
     }
     if (!s.termuxIntegrationEnabled) {
-      new import_obsidian6.Notice("Termux integration is disabled on this device (see settings).");
+      new import_obsidian7.Notice("Termux integration is disabled on this device (see settings).");
       return null;
     }
     if (!s.authToken) {
-      new import_obsidian6.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
+      new import_obsidian7.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
       return null;
     }
     const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
-      new import_obsidian6.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
+      new import_obsidian7.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
       return null;
     }
     if (!mutating && this.lock.active && MUTATING_ACTIONS.has(this.lock.active.action)) {
-      new import_obsidian6.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
+      new import_obsidian7.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
       return null;
     }
     const cancel = new CancelToken();
@@ -1578,7 +1664,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
       const outcome = transport.trigger(req.id);
       if (outcome.kind === "manual" && outcome.instruction) {
         this.statusBar?.set("waiting-tap");
-        new import_obsidian6.Notice(outcome.instruction, 1e4);
+        new import_obsidian7.Notice(outcome.instruction, 1e4);
       }
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1e3, cancel);
       if (waited.kind === "timeout") {
@@ -1592,7 +1678,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
       if (waited.kind === "cancelled") {
         await this.client.requestCancel(req.id);
         this.log.add("warn", action, `Request ${req.id} cancelled by user.`);
-        new import_obsidian6.Notice(`Native Git: ${action} cancelled.`);
+        new import_obsidian7.Notice(`Native Git: ${action} cancelled.`);
         return null;
       }
       const result = waited.result;
@@ -1684,7 +1770,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
   async cmdVerifySparseSafety() {
     const protectedPaths = this.deviceSettings.protectedPaths;
     if (protectedPaths.length === 0) {
-      new import_obsidian6.Notice("No protected sparse paths configured (see settings).");
+      new import_obsidian7.Notice("No protected sparse paths configured (see settings).");
       return;
     }
     const result = await this.runOperation("verify-sparse-safety", { protectedPaths });
@@ -1778,8 +1864,8 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
   }
   openVaultFile(path) {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (f instanceof import_obsidian7.TFile) void this.app.workspace.getLeaf(false).openFile(f);
-    else new import_obsidian6.Notice(`Cannot open ${path} (not found in vault).`);
+    if (f instanceof import_obsidian8.TFile) void this.app.workspace.getLeaf(false).openFile(f);
+    else new import_obsidian7.Notice(`Cannot open ${path} (not found in vault).`);
   }
   async cmdFetch() {
     const result = await this.runOperation("fetch");
@@ -1787,7 +1873,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
     if (!result.ok) return this.renderMutationError("Native Git: fetch failed", result);
     this.absorbStatusData(result.data ?? {});
     const st = this.lastStatus?.status;
-    new import_obsidian6.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
+    new import_obsidian7.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
   }
   async cmdPull(silent = false) {
     const result = await this.runOperation("pull", {
@@ -1852,7 +1938,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
       `Committed: ${result.data?.committed ?? "false"} \xB7 Pushed: ${result.data?.pushed ?? "false"}`
     ];
     this.log.add("info", "sync", "Sync completed successfully.");
-    if (silent) new import_obsidian6.Notice("Native Git: sync completed.");
+    if (silent) new import_obsidian7.Notice("Native Git: sync completed.");
     else new ResultModal(this.app, "Native Git: sync completed", lines, { stdout: result.data?.pullOutput }).open();
   }
   async cmdAbortMerge() {
@@ -1873,7 +1959,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
         this.absorbStatusData(result.data ?? {});
-        new import_obsidian6.Notice("Merge aborted; repository restored.");
+        new import_obsidian7.Notice("Merge aborted; repository restored.");
       }
     ).open();
   }
@@ -1881,7 +1967,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
     const report = { pluginSide: {}, problems: [] };
     const s = this.deviceSettings;
     report.pluginSide["Plugin version"] = this.manifest.version;
-    report.pluginSide["Platform"] = import_obsidian6.Platform.isAndroidApp ? "Android app" : import_obsidian6.Platform.isMobile ? "mobile" : "desktop";
+    report.pluginSide["Platform"] = import_obsidian7.Platform.isAndroidApp ? "Android app" : import_obsidian7.Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Integration type"] = s.integrationType;
@@ -1893,7 +1979,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
-    if (import_obsidian6.Platform.isAndroidApp) {
+    if (import_obsidian7.Platform.isAndroidApp) {
       const plugins = this.app.plugins;
       if (plugins?.enabledPlugins?.has("obsidian-git")) {
         report.problems.push("obsidian-git is enabled on Android: incompatible with a native sparse-checkout index.");
@@ -1915,7 +2001,7 @@ var NativeGitBridgePlugin = class extends import_obsidian6.Plugin {
   }
   async cmdCancel() {
     if (!this.activeCancel) {
-      new import_obsidian6.Notice("No operation is currently awaiting a result.");
+      new import_obsidian7.Notice("No operation is currently awaiting a result.");
       return;
     }
     this.activeCancel.cancel();

@@ -129,6 +129,7 @@ RES="$RUNTIME/results/r-20260803T100009Z-diag01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "diagnostics ok"
 check 'jq -er ".data.gitVersion" "$RES" | grep -q "git version"' "diagnostics reports git version"
 check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "diagnostics reports sparse state"
+check 'jq -er ".data.authMethod" "$RES" | grep -q .' "diagnostics reports auth method"
 
 echo "# phase 3: commit + push to a real remote"
 echo "more" >> Notes/note.md
