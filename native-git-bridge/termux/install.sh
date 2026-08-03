@@ -59,12 +59,22 @@ esac
 say "-- Installing packages (git, jq, openssh)..."
 pkg install -y git jq openssh >/dev/null || fail "pkg install failed"
 
-# 3. Storage access.
+# 3. Storage access: request it and WAIT for the user to accept the dialog,
+# so the installer continues by itself instead of demanding a re-run.
 if [ ! -d "$HOME/storage" ]; then
-  say "-- Shared storage is not linked yet. Running termux-setup-storage."
-  say "   Please ACCEPT the Android permission dialog, then re-run this installer."
-  termux-setup-storage
-  exit 0
+  say "-- Shared storage is not linked yet. Requesting access (termux-setup-storage)."
+  say "   Please ACCEPT the Android permission dialog that appears now..."
+  termux-setup-storage || true
+  waited=0
+  while [ ! -d "$HOME/storage" ] && [ "$waited" -lt 120 ]; do
+    sleep 2
+    waited=$((waited + 2))
+  done
+  if [ -d "$HOME/storage" ]; then
+    say "-- Storage access granted; continuing."
+  else
+    fail "Storage access was not granted within 2 minutes. Accept the dialog and re-run the same command."
+  fi
 fi
 
 # 4. Repository path: use the argument, otherwise auto-detect vaults
