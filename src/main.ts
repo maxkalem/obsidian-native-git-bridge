@@ -46,6 +46,13 @@ import {
 import { DiagnosticsModal, type DiagnosticsReport } from "./ui/DiagnosticsModal";
 import { CommitMessageModal, ConflictModal } from "./ui/gitModals";
 import { parsePairingFile } from "./settings/pairing";
+import {
+  bytesToTextIfNotBinary,
+  decodeBase64ToBytes,
+  parseFileLog,
+  type FileLogEntry,
+} from "./git/historyParsers";
+import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
 import { PAIRING_FILE } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
@@ -412,6 +419,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "commit", name: "Native Git: Commit", cb: () => void this.cmdCommit() },
       { id: "sync", name: "Native Git: Sync", cb: () => void this.cmdSync() },
       { id: "fetch", name: "Native Git: Fetch", cb: () => void this.cmdFetch() },
+      { id: "show-history-current-file", name: "Native Git: Show history for current file", cb: () => this.cmdFileHistory() },
+      { id: "show-diff-current-file", name: "Native Git: Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
+      { id: "show-file-at-commit", name: "Native Git: Show selected file at commit", cb: () => this.cmdFileHistory() },
+      { id: "restore-file-from-commit", name: "Native Git: Restore selected file from commit", cb: () => this.cmdFileHistory() },
       { id: "show-changed-files", name: "Native Git: Show changed files", cb: () => void this.cmdShowChangedFiles() },
       { id: "verify-sparse-safety", name: "Native Git: Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
       { id: "reapply-sparse", name: "Native Git: Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
@@ -789,6 +800,127 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
         this.absorbStatusData(result.data ?? {});
         new Notice("Merge aborted; repository restored.");
+      }
+    ).open();
+  }
+
+  // ---------------------------------------------------- phase 4: history/diff
+
+  private activeFilePath(): string | null {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) {
+      new Notice("No active file.");
+      return null;
+    }
+    return f.path;
+  }
+
+  /** Entry point for history / view-at-commit / restore commands. */
+  cmdFileHistory(): void {
+    const path = this.activeFilePath();
+    if (path === null) return;
+    new FileHistoryModal(this.app, path, {
+      loadPage: async (skip, limit) => {
+        const result = await this.runOperation("file-log", { path, skip, limit });
+        if (!result) return null;
+        if (!result.ok) {
+          this.renderMutationError("Native Git: history failed", result);
+          return null;
+        }
+        return parseFileLog(result.data?.log ?? "", path);
+      },
+      viewAt: (e) => void this.showFileAtCommit(e),
+      diffVsCurrent: (e) => void this.showDiff(path, e.hash, "WORKTREE", `${e.hash.slice(0, 8)} → working tree`),
+      diffVsPrevious: (e, prev) =>
+        void this.showDiff(path, prev.hash, e.hash, `${prev.hash.slice(0, 8)} → ${e.hash.slice(0, 8)}`),
+      restore: (e) => this.confirmRestore(path, e),
+    }).open();
+  }
+
+  private async showFileAtCommit(e: FileLogEntry): Promise<void> {
+    const result = await this.runOperation("show-file-at-commit", {
+      path: e.pathAtCommit,
+      commit: e.hash,
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: show file failed", result);
+    const bytes = decodeBase64ToBytes(result.data?.contentBase64 ?? "");
+    const text = bytesToTextIfNotBinary(bytes);
+    const meta = `${e.pathAtCommit} @ ${e.hash.slice(0, 8)} · ${e.date.slice(0, 16).replace("T", " ")} · ${bytes.length} bytes`;
+    if (text === null) {
+      new ResultModal(this.app, "Binary file", [
+        `${e.pathAtCommit} at ${e.hash.slice(0, 8)} is binary (${bytes.length} bytes); preview is not available.`,
+        "Restore is still possible from the history list.",
+      ]).open();
+      return;
+    }
+    new TextPreviewModal(this.app, "File at commit", meta, text).open();
+  }
+
+  private async showDiff(path: string, from: string, to: string, label: string): Promise<void> {
+    const result = await this.runOperation("diff-file", { path, from, to });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: diff failed", result);
+    new DiffModal(
+      this.app,
+      "Diff",
+      `${path} · ${label}`,
+      result.data?.diff ?? "",
+      result.data?.truncated === "true"
+    ).open();
+  }
+
+  async cmdDiffCurrentFile(): Promise<void> {
+    const path = this.activeFilePath();
+    if (path === null) return;
+    await this.showDiff(path, "HEAD", "WORKTREE", "HEAD → working tree");
+  }
+
+  private confirmRestore(currentPath: string, e: FileLogEntry): void {
+    const renamed = e.pathAtCommit !== currentPath;
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Restore file version?",
+        body: [
+          `File: ${e.pathAtCommit}`,
+          `Version: ${e.hash.slice(0, 8)} (${e.date.slice(0, 16).replace("T", " ")}) — ${e.subject}`,
+          renamed
+            ? `Note: the file had a different name at that commit. The historical content will be written into the CURRENT file (${currentPath}); nothing is created at the old path.`
+            : "The current working-tree content of this file will be overwritten. The version stays in Git history, but uncommitted edits to this file are lost.",
+        ],
+        confirmLabel: "Restore this version",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        if (renamed) {
+          // Rename-safe restore: fetch the blob and write it into the current
+          // file through the vault, after explicit confirmation above.
+          const result = await this.runOperation("show-file-at-commit", {
+            path: e.pathAtCommit,
+            commit: e.hash,
+          });
+          if (!result) return;
+          if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
+          const bytes = decodeBase64ToBytes(result.data?.contentBase64 ?? "");
+          await this.app.vault.adapter.writeBinary(
+            currentPath,
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+          );
+          this.log.add("info", "restore-file", `Restored ${currentPath} from ${e.hash} (historical name ${e.pathAtCommit}).`);
+          new Notice("File content restored from the selected version.");
+          return;
+        }
+        const result = await this.runOperation("restore-file", {
+          path: currentPath,
+          commit: e.hash,
+          protectedPaths: this.deviceSettings.protectedPaths,
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
       }
     ).open();
   }

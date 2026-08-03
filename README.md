@@ -1,12 +1,15 @@
-# Obsidian Native Git Bridge
+# Obsidian Native Mobile Git Bridge
 
 Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Termux** — with first-class **sparse checkout** support. No isomorphic-git, no
 HTTP server, no open ports, nothing running in the background.
 
-> Status: Phase 2 prototype — status, sparse-safety verification, sparse
-> reapply, diagnostics, operation log, cancellation. Pull/commit/push/sync land
-> in Phase 3 (see `docs/`).
+> Status: Phases 1–4 implemented — status, sparse safety, pull/commit/push/
+> sync/fetch with conflict handling, per-file history (rename-aware), view at
+> commit, diffs, and confirmed restore. Version History Diff exposes no public
+> provider API (it consumes obsidian-git's private API), so the history/diff UX
+> is provided by this plugin's own views; an upstream adapter PR remains an
+> option (see docs/research-notes.md).
 
 ## Why
 

@@ -200,6 +200,65 @@ check 'jq -e ".ok == true" "$RUNTIME/results/r-20260803T100016Z-abrt01.json" >/d
 check '! git diff --name-only --diff-filter=U | grep -q .' "no conflicted files remain"
 check '[ ! -e "$(git rev-parse --git-path MERGE_HEAD)" ]' "MERGE_HEAD removed"
 
+echo "# phase 4: file history with rename tracking"
+printf 'v1\n' > "Notes/hist note.md"
+git add -A && git commit -qm "hist: create"
+printf 'v1\nv2\n' > "Notes/hist note.md"
+git add -A && git commit -qm "hist: edit"
+git mv "Notes/hist note.md" "Notes/hist renamed.md"
+git commit -qm "hist: rename"
+req "r-20260804T100000Z-log001" file-log "$TOKEN" '{"path":"Notes/hist renamed.md","limit":10,"skip":0}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100000Z-log001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "file-log ok"
+check '[ "$(jq -r ".data.log" "$RES" | grep -c "hist:")" = "3" ]' "file-log follows across the rename (3 commits)"
+check 'jq -r ".data.log" "$RES" | grep -q "hist note.md"' "historical name present in log"
+
+echo "# phase 4: show file at old commit (pre-rename path)"
+OLD_HASH="$(git log --format=%H --reverse -- "Notes/hist renamed.md" "Notes/hist note.md" | head -1)"
+OLD_HASH="$(git log --follow --format=%H -- "Notes/hist renamed.md" | tail -1)"
+req "r-20260804T100001Z-show01" show-file-at-commit "$TOKEN" "{\"path\":\"Notes/hist note.md\",\"commit\":\"$OLD_HASH\"}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100001Z-show01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "show-file-at-commit ok"
+check '[ "$(jq -r ".data.contentBase64" "$RES" | base64 -d)" = "v1" ]' "content at old commit is v1"
+
+echo "# phase 4: absent file at commit -> FILE_ABSENT"
+req "r-20260804T100002Z-show02" show-file-at-commit "$TOKEN" "{\"path\":\"Notes/never-existed.md\",\"commit\":\"$OLD_HASH\"}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"FILE_ABSENT\"" "$RUNTIME/results/r-20260804T100002Z-show02.json" >/dev/null' "absent file reported"
+
+echo "# phase 4: diff between commit and worktree"
+printf 'v1\nv2\nworktree\n' > "Notes/hist renamed.md"
+req "r-20260804T100003Z-diff01" diff-file "$TOKEN" '{"path":"Notes/hist renamed.md","from":"HEAD","to":"WORKTREE"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-diff01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "diff-file ok"
+check 'jq -r ".data.diff" "$RES" | grep -q "^+worktree"' "diff shows worktree addition"
+
+echo "# phase 4: restore file from commit after confirmation (runner side)"
+HEAD_HASH="$(git rev-parse HEAD)"
+req "r-20260804T100004Z-rest01" restore-file "$TOKEN" "{\"path\":\"Notes/hist renamed.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/AgentsMemory\",\"Projects/Backus\"]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100004Z-rest01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "restore ok"
+check '[ "$(cat "Notes/hist renamed.md")" = "v1
+v2" ]' "worktree content restored to committed version"
+
+echo "# phase 4: restore into a protected path is blocked"
+req "r-20260804T100005Z-rest02" restore-file "$TOKEN" "{\"path\":\"Private/AgentsMemory/mem.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/AgentsMemory\",\"Projects/Backus\"]}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260804T100005Z-rest02.json" >/dev/null' "protected restore blocked"
+
+echo "# phase 4: binary file round trip"
+printf '\x00\x01\x02BIN' > Notes/blob.bin
+git add Notes/blob.bin && git commit -qm "hist: binary"
+req "r-20260804T100006Z-show03" show-file-at-commit "$TOKEN" '{"path":"Notes/blob.bin","commit":"HEAD"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100006Z-show03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "binary show ok"
+check '[ "$(jq -r ".data.contentBase64" "$RES" | base64 -d | od -An -tx1 | tr -d "[:space:]")" = "00010242494e" ]' "binary bytes intact"
+
 echo "# test: runner exits (no daemon) and log has no token"
 check '! grep -q "$TOKEN" "$RUNTIME/runner.log"' "token never written to runner.log"
 

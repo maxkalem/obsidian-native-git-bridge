@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => NativeGitBridgePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
@@ -1297,12 +1297,184 @@ function parsePairingFile(text) {
   return out;
 }
 
+// src/git/historyParsers.ts
+var RS = String.fromCharCode(30);
+var FS = String.fromCharCode(31);
+function parseFileLog(raw, currentPath) {
+  const out = [];
+  let lastKnownPath = currentPath;
+  for (const record of raw.split(RS)) {
+    if (record.trim() === "") continue;
+    const lines = record.split("\n");
+    const header = lines[0] ?? "";
+    const [hash, date, author, ...subj] = header.split(FS);
+    if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) continue;
+    let pathAtCommit;
+    for (const rawLine of lines.slice(1)) {
+      const line = rawLine.replace(/\r$/, "");
+      if (line.trim() === "") continue;
+      const parts = line.split("	");
+      const code = parts[0] ?? "";
+      if ((code.startsWith("R") || code.startsWith("C")) && parts.length >= 3) {
+        pathAtCommit = unquoteGitPath(parts[2]);
+      } else if (parts.length >= 2) {
+        pathAtCommit = unquoteGitPath(parts[1]);
+      }
+      if (pathAtCommit !== void 0) break;
+    }
+    if (pathAtCommit === void 0) pathAtCommit = lastKnownPath;
+    lastKnownPath = pathAtCommit;
+    out.push({
+      hash,
+      date: date ?? "",
+      author: author ?? "",
+      subject: (subj ?? []).join(FS),
+      pathAtCommit
+    });
+  }
+  return out;
+}
+function decodeBase64ToBytes(b64) {
+  const bin = atob(b64.trim());
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+function bytesToTextIfNotBinary(bytes) {
+  const probe = bytes.subarray(0, Math.min(bytes.length, 8e3));
+  for (const b of probe) if (b === 0) return null;
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+// src/ui/historyViews.ts
+var import_obsidian6 = require("obsidian");
+var TextPreviewModal = class extends import_obsidian6.Modal {
+  constructor(app, title, meta, text) {
+    super(app);
+    this.title = title;
+    this.meta = meta;
+    this.text = text;
+  }
+  onOpen() {
+    this.modalEl.addClass("ngb-modal");
+    this.titleEl.setText(this.title);
+    const c = this.contentEl;
+    c.createDiv({ cls: "ngb-settings-note", text: this.meta });
+    const box = c.createDiv({ cls: "ngb-output ngb-output-tall" });
+    box.createEl("pre", { text: this.text });
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var DiffModal = class extends import_obsidian6.Modal {
+  constructor(app, title, meta, diffText, truncated) {
+    super(app);
+    this.title = title;
+    this.meta = meta;
+    this.diffText = diffText;
+    this.truncated = truncated;
+  }
+  onOpen() {
+    this.modalEl.addClass("ngb-modal");
+    this.titleEl.setText(this.title);
+    const c = this.contentEl;
+    c.createDiv({ cls: "ngb-settings-note", text: this.meta });
+    if (this.diffText.trim() === "") {
+      c.createEl("p", { cls: "ngb-ok", text: "No differences." });
+      return;
+    }
+    const box = c.createDiv({ cls: "ngb-output ngb-output-tall ngb-diff" });
+    for (const line of this.diffText.split("\n")) {
+      const cls = line.startsWith("+") && !line.startsWith("+++") ? "ngb-diff-add" : line.startsWith("-") && !line.startsWith("---") ? "ngb-diff-del" : line.startsWith("@@") ? "ngb-diff-hunk" : line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("+++") || line.startsWith("---") ? "ngb-diff-meta" : "";
+      box.createDiv({ cls: `ngb-diff-line ${cls}`, text: line === "" ? " " : line });
+    }
+    if (this.truncated) {
+      c.createDiv({ cls: "ngb-warning", text: "Diff truncated (too large). Full diff is available via git in Termux." });
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+var FileHistoryModal = class extends import_obsidian6.Modal {
+  constructor(app, filePath, actions) {
+    super(app);
+    this.filePath = filePath;
+    this.actions = actions;
+    this.entries = [];
+    this.skip = 0;
+    this.pageSize = 30;
+    this.exhausted = false;
+  }
+  onOpen() {
+    this.modalEl.addClass("ngb-modal");
+    this.titleEl.setText("History");
+    const c = this.contentEl;
+    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: this.filePath });
+    this.listEl = c.createDiv();
+    const btns = c.createDiv({ cls: "ngb-buttons" });
+    this.moreBtn = btns.createEl("button", { text: "Load more" });
+    this.moreBtn.addEventListener("click", () => void this.loadMore());
+    void this.loadMore();
+  }
+  async loadMore() {
+    this.moreBtn.disabled = true;
+    this.moreBtn.setText("Loading\u2026");
+    const page = await this.actions.loadPage(this.skip, this.pageSize);
+    this.moreBtn.disabled = false;
+    this.moreBtn.setText("Load more");
+    if (page === null) return;
+    if (this.skip === 0 && page.length === 0) {
+      this.listEl.createEl("p", { text: "No history for this file (not committed yet?)." });
+      this.moreBtn.hide();
+      return;
+    }
+    if (page.length < this.pageSize) {
+      this.exhausted = true;
+      this.moreBtn.hide();
+    }
+    const startIndex = this.entries.length;
+    this.entries.push(...page);
+    this.skip += page.length;
+    page.forEach((e, i) => this.renderRow(e, startIndex + i));
+  }
+  renderRow(e, index) {
+    const row = this.listEl.createDiv({ cls: "ngb-history-row" });
+    const head = row.createDiv();
+    head.createSpan({ cls: "ngb-badge", text: e.hash.slice(0, 8) });
+    head.createSpan({ text: ` ${e.date.slice(0, 16).replace("T", " ")} \xB7 ${e.author}`, cls: "ngb-settings-note" });
+    row.createDiv({ text: e.subject });
+    if (e.pathAtCommit !== this.filePath) {
+      row.createDiv({ cls: "ngb-settings-note ngb-mono", text: `as: ${e.pathAtCommit}` });
+    }
+    const acts = row.createDiv({ cls: "ngb-history-actions" });
+    const mk = (label2, cb, danger = false) => {
+      const b = acts.createEl("button", { text: label2, cls: danger ? "mod-warning" : "" });
+      b.addEventListener("click", cb);
+    };
+    mk("View", () => this.actions.viewAt(e));
+    mk("Diff vs now", () => this.actions.diffVsCurrent(e));
+    const prev = this.entries[index + 1];
+    mk("Diff vs previous", () => {
+      const p = this.entries[index + 1];
+      if (p) this.actions.diffVsPrevious(e, p);
+      else if (this.exhausted) new import_obsidian6.Notice("This is the oldest known commit for the file.");
+      else new import_obsidian6.Notice("Load more history first (the previous commit is not loaded yet).");
+    });
+    mk("Restore\u2026", () => this.actions.restore(e), true);
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
 // src/main.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // src/ui/OperationLogModal.ts
-var import_obsidian6 = require("obsidian");
-var OperationLogModal = class extends import_obsidian6.Modal {
+var import_obsidian7 = require("obsidian");
+var OperationLogModal = class extends import_obsidian7.Modal {
   constructor(app, log) {
     super(app);
     this.log = log;
@@ -1347,7 +1519,7 @@ var OperationLogModal = class extends import_obsidian6.Modal {
 var DEFAULT_SHARED_PREFS = { showStatusBar: true, showRibbonIcon: true };
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
-var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
+var NativeGitBridgePlugin = class extends import_obsidian8.Plugin {
   constructor() {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
@@ -1506,7 +1678,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     return disabled !== "true";
   }
   warnIfObsidianGitEnabledOnAndroid() {
-    if (!import_obsidian7.Platform.isAndroidApp) return;
+    if (!import_obsidian8.Platform.isAndroidApp) return;
     if (this.deviceSettings.suppressObsidianGitWarning) return;
     if (!this.isObsidianGitActiveOnDevice()) return;
     this.log.add("warn", "compat", "obsidian-git ACTIVE on this Android device alongside Native Git Bridge.");
@@ -1554,7 +1726,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
         } catch {
         }
         this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
-        new import_obsidian7.Notice("Native Git Bridge: paired with the Termux runner.");
+        new import_obsidian8.Notice("Native Git Bridge: paired with the Termux runner.");
       };
       const current = this.deviceSettings.authToken;
       if (current === "" || current === pairing.token) {
@@ -1625,7 +1797,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     this.store.reset();
     this.deviceSettings = this.store.read();
     this.refreshStatusBarIdle();
-    new import_obsidian7.Notice("Native Git Bridge: device-local settings reset.");
+    new import_obsidian8.Notice("Native Git Bridge: device-local settings reset.");
   }
   refreshStatusBarIdle() {
     if (!this.statusBar) return;
@@ -1650,6 +1822,10 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
       { id: "commit", name: "Native Git: Commit", cb: () => void this.cmdCommit() },
       { id: "sync", name: "Native Git: Sync", cb: () => void this.cmdSync() },
       { id: "fetch", name: "Native Git: Fetch", cb: () => void this.cmdFetch() },
+      { id: "show-history-current-file", name: "Native Git: Show history for current file", cb: () => this.cmdFileHistory() },
+      { id: "show-diff-current-file", name: "Native Git: Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
+      { id: "show-file-at-commit", name: "Native Git: Show selected file at commit", cb: () => this.cmdFileHistory() },
+      { id: "restore-file-from-commit", name: "Native Git: Restore selected file from commit", cb: () => this.cmdFileHistory() },
       { id: "show-changed-files", name: "Native Git: Show changed files", cb: () => void this.cmdShowChangedFiles() },
       { id: "verify-sparse-safety", name: "Native Git: Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
       { id: "reapply-sparse", name: "Native Git: Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
@@ -1664,25 +1840,25 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
   async runOperation(action, args = {}) {
     const s = this.deviceSettings;
     if (!s.enabledOnThisDevice) {
-      new import_obsidian7.Notice("Native Git Bridge is disabled on this device (see settings).");
+      new import_obsidian8.Notice("Native Git Bridge is disabled on this device (see settings).");
       return null;
     }
     if (!s.termuxIntegrationEnabled) {
-      new import_obsidian7.Notice("Termux integration is disabled on this device (see settings).");
+      new import_obsidian8.Notice("Termux integration is disabled on this device (see settings).");
       return null;
     }
     if (!s.authToken) {
-      new import_obsidian7.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
+      new import_obsidian8.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
       return null;
     }
     const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
-      new import_obsidian7.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
+      new import_obsidian8.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
       return null;
     }
     if (!mutating && this.lock.active && MUTATING_ACTIONS.has(this.lock.active.action)) {
-      new import_obsidian7.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
+      new import_obsidian8.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
       return null;
     }
     const cancel = new CancelToken();
@@ -1695,7 +1871,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
       const outcome = transport.trigger(req.id);
       if (outcome.kind === "manual" && outcome.instruction) {
         this.statusBar?.set("waiting-tap");
-        new import_obsidian7.Notice(outcome.instruction, 1e4);
+        new import_obsidian8.Notice(outcome.instruction, 1e4);
       }
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1e3, cancel);
       if (waited.kind === "timeout") {
@@ -1709,7 +1885,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
       if (waited.kind === "cancelled") {
         await this.client.requestCancel(req.id);
         this.log.add("warn", action, `Request ${req.id} cancelled by user.`);
-        new import_obsidian7.Notice(`Native Git: ${action} cancelled.`);
+        new import_obsidian8.Notice(`Native Git: ${action} cancelled.`);
         return null;
       }
       const result = waited.result;
@@ -1801,7 +1977,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
   async cmdVerifySparseSafety() {
     const protectedPaths = this.deviceSettings.protectedPaths;
     if (protectedPaths.length === 0) {
-      new import_obsidian7.Notice("No protected sparse paths configured (see settings).");
+      new import_obsidian8.Notice("No protected sparse paths configured (see settings).");
       return;
     }
     const result = await this.runOperation("verify-sparse-safety", { protectedPaths });
@@ -1895,8 +2071,8 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
   }
   openVaultFile(path) {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (f instanceof import_obsidian8.TFile) void this.app.workspace.getLeaf(false).openFile(f);
-    else new import_obsidian7.Notice(`Cannot open ${path} (not found in vault).`);
+    if (f instanceof import_obsidian9.TFile) void this.app.workspace.getLeaf(false).openFile(f);
+    else new import_obsidian8.Notice(`Cannot open ${path} (not found in vault).`);
   }
   async cmdFetch() {
     const result = await this.runOperation("fetch");
@@ -1904,7 +2080,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     if (!result.ok) return this.renderMutationError("Native Git: fetch failed", result);
     this.absorbStatusData(result.data ?? {});
     const st = this.lastStatus?.status;
-    new import_obsidian7.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
+    new import_obsidian8.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
   }
   async cmdPull(silent = false) {
     const result = await this.runOperation("pull", {
@@ -1969,7 +2145,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
       `Committed: ${result.data?.committed ?? "false"} \xB7 Pushed: ${result.data?.pushed ?? "false"}`
     ];
     this.log.add("info", "sync", "Sync completed successfully.");
-    if (silent) new import_obsidian7.Notice("Native Git: sync completed.");
+    if (silent) new import_obsidian8.Notice("Native Git: sync completed.");
     else new ResultModal(this.app, "Native Git: sync completed", lines, { stdout: result.data?.pullOutput }).open();
   }
   async cmdAbortMerge() {
@@ -1990,7 +2166,116 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
         this.absorbStatusData(result.data ?? {});
-        new import_obsidian7.Notice("Merge aborted; repository restored.");
+        new import_obsidian8.Notice("Merge aborted; repository restored.");
+      }
+    ).open();
+  }
+  // ---------------------------------------------------- phase 4: history/diff
+  activeFilePath() {
+    const f = this.app.workspace.getActiveFile();
+    if (!f) {
+      new import_obsidian8.Notice("No active file.");
+      return null;
+    }
+    return f.path;
+  }
+  /** Entry point for history / view-at-commit / restore commands. */
+  cmdFileHistory() {
+    const path = this.activeFilePath();
+    if (path === null) return;
+    new FileHistoryModal(this.app, path, {
+      loadPage: async (skip, limit) => {
+        const result = await this.runOperation("file-log", { path, skip, limit });
+        if (!result) return null;
+        if (!result.ok) {
+          this.renderMutationError("Native Git: history failed", result);
+          return null;
+        }
+        return parseFileLog(result.data?.log ?? "", path);
+      },
+      viewAt: (e) => void this.showFileAtCommit(e),
+      diffVsCurrent: (e) => void this.showDiff(path, e.hash, "WORKTREE", `${e.hash.slice(0, 8)} \u2192 working tree`),
+      diffVsPrevious: (e, prev) => void this.showDiff(path, prev.hash, e.hash, `${prev.hash.slice(0, 8)} \u2192 ${e.hash.slice(0, 8)}`),
+      restore: (e) => this.confirmRestore(path, e)
+    }).open();
+  }
+  async showFileAtCommit(e) {
+    const result = await this.runOperation("show-file-at-commit", {
+      path: e.pathAtCommit,
+      commit: e.hash
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: show file failed", result);
+    const bytes = decodeBase64ToBytes(result.data?.contentBase64 ?? "");
+    const text = bytesToTextIfNotBinary(bytes);
+    const meta = `${e.pathAtCommit} @ ${e.hash.slice(0, 8)} \xB7 ${e.date.slice(0, 16).replace("T", " ")} \xB7 ${bytes.length} bytes`;
+    if (text === null) {
+      new ResultModal(this.app, "Binary file", [
+        `${e.pathAtCommit} at ${e.hash.slice(0, 8)} is binary (${bytes.length} bytes); preview is not available.`,
+        "Restore is still possible from the history list."
+      ]).open();
+      return;
+    }
+    new TextPreviewModal(this.app, "File at commit", meta, text).open();
+  }
+  async showDiff(path, from, to, label2) {
+    const result = await this.runOperation("diff-file", { path, from, to });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: diff failed", result);
+    new DiffModal(
+      this.app,
+      "Diff",
+      `${path} \xB7 ${label2}`,
+      result.data?.diff ?? "",
+      result.data?.truncated === "true"
+    ).open();
+  }
+  async cmdDiffCurrentFile() {
+    const path = this.activeFilePath();
+    if (path === null) return;
+    await this.showDiff(path, "HEAD", "WORKTREE", "HEAD \u2192 working tree");
+  }
+  confirmRestore(currentPath, e) {
+    const renamed = e.pathAtCommit !== currentPath;
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Restore file version?",
+        body: [
+          `File: ${e.pathAtCommit}`,
+          `Version: ${e.hash.slice(0, 8)} (${e.date.slice(0, 16).replace("T", " ")}) \u2014 ${e.subject}`,
+          renamed ? `Note: the file had a different name at that commit. The historical content will be written into the CURRENT file (${currentPath}); nothing is created at the old path.` : "The current working-tree content of this file will be overwritten. The version stays in Git history, but uncommitted edits to this file are lost."
+        ],
+        confirmLabel: "Restore this version",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        if (renamed) {
+          const result2 = await this.runOperation("show-file-at-commit", {
+            path: e.pathAtCommit,
+            commit: e.hash
+          });
+          if (!result2) return;
+          if (!result2.ok) return this.renderMutationError("Native Git: restore failed", result2);
+          const bytes = decodeBase64ToBytes(result2.data?.contentBase64 ?? "");
+          await this.app.vault.adapter.writeBinary(
+            currentPath,
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+          );
+          this.log.add("info", "restore-file", `Restored ${currentPath} from ${e.hash} (historical name ${e.pathAtCommit}).`);
+          new import_obsidian8.Notice("File content restored from the selected version.");
+          return;
+        }
+        const result = await this.runOperation("restore-file", {
+          path: currentPath,
+          commit: e.hash,
+          protectedPaths: this.deviceSettings.protectedPaths
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new import_obsidian8.Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
       }
     ).open();
   }
@@ -1998,7 +2283,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     const report = { pluginSide: {}, problems: [] };
     const s = this.deviceSettings;
     report.pluginSide["Plugin version"] = this.manifest.version;
-    report.pluginSide["Platform"] = import_obsidian7.Platform.isAndroidApp ? "Android app" : import_obsidian7.Platform.isMobile ? "mobile" : "desktop";
+    report.pluginSide["Platform"] = import_obsidian8.Platform.isAndroidApp ? "Android app" : import_obsidian8.Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Integration type"] = s.integrationType;
@@ -2010,7 +2295,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
-    if (import_obsidian7.Platform.isAndroidApp) {
+    if (import_obsidian8.Platform.isAndroidApp) {
       if (this.isObsidianGitActiveOnDevice()) {
         report.problems.push(
           "obsidian-git is ACTIVE on this device (not device-disabled): incompatible with a native sparse-checkout index. Use its 'Disable on this device' toggle."
@@ -2033,7 +2318,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
   }
   async cmdCancel() {
     if (!this.activeCancel) {
-      new import_obsidian7.Notice("No operation is currently awaiting a result.");
+      new import_obsidian8.Notice("No operation is currently awaiting a result.");
       return;
     }
     this.activeCancel.cancel();

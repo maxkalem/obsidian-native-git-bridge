@@ -28,8 +28,11 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
 - `id`: `^r-[0-9TZ.-]+-[a-z0-9]+$`, unique per request.
 - `action` (implemented): `ping` | `status` | `verify-sparse-safety` |
   `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` |
-  `abort-merge`. Phase 4 adds `file-log`, `show-file-at-commit`, `diff-file`,
-  `restore-file`. `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
+  `abort-merge`. Phase 4 (implemented): `file-log` (paginated, rename-aware via
+  `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap,
+  `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or
+  commit→WORKTREE, 200 KB cap with `truncated` flag), `restore-file`
+  (worktree-only `git restore --source`, blocked for protected paths). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
   (validated on both sides) and enforce the sparse safety gate; `commit`/`sync`
   require `args.message` (`sync` falls back to a default). Conflicts are returned
   as `error.code = "CONFLICT"` with `data.conflicts`; safety violations as

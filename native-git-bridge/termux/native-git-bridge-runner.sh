@@ -497,6 +497,105 @@ action_abort_merge() {
   collect_status_fields
 }
 
+
+# ---- phase 4 actions: history / diff / restore --------------------------------
+
+NGB_MAX_SHOW_BYTES="${NGB_MAX_SHOW_BYTES:-1048576}"
+NGB_MAX_DIFF_CHARS="${NGB_MAX_DIFF_CHARS:-200000}"
+
+valid_commitish() { printf '%s' "$1" | grep -Eq '^(HEAD|[0-9a-fA-F]{4,40})$'; }
+
+# git log --follow with rename tracking; fields separated by \x1f, records by \x1e,
+# plus --name-status lines so the TS side knows the file's path AT each commit.
+action_file_log() {
+  local req_file="$1"
+  local path limit skip
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  limit=$(jq -r '.args.limit // 30' "$req_file")
+  skip=$(jq -r '.args.skip // 0' "$req_file")
+  printf '%s' "$limit" | grep -Eq '^[0-9]{1,3}$' || limit=30
+  [ "$limit" -gt 100 ] && limit=100
+  [ "$limit" -lt 1 ] && limit=1
+  printf '%s' "$skip" | grep -Eq '^[0-9]{1,6}$' || skip=0
+  if ! run_git log --follow --name-status --max-count="$limit" --skip="$skip" \
+      --format='%x1e%H%x1f%cI%x1f%an%x1f%s' -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git log failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  DATA=$(jq -n --arg log "$GIT_OUT" --arg path "$path" --arg limit "$limit" --arg skip "$skip" \
+    '{log:$log,path:$path,limit:$limit,skip:$skip}')
+}
+
+action_show_file_at_commit() {
+  local req_file="$1"
+  local path commit size content
+  path=$(jq -r '.args.path // empty' "$req_file")
+  commit=$(jq -r '.args.commit // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  valid_commitish "$commit" || { ERROR=$(err_json BAD_REQUEST "Invalid commit reference." "" ""); return 1; }
+  if ! git cat-file -e "$commit:$path" 2>/dev/null; then
+    ERROR=$(err_json FILE_ABSENT "The file does not exist at that commit." "" ""); return 1
+  fi
+  size=$(git cat-file -s "$commit:$path" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$NGB_MAX_SHOW_BYTES" ]; then
+    ERROR=$(err_json TOO_LARGE "File is $size bytes at that commit (limit $NGB_MAX_SHOW_BYTES)." "" ""); return 1
+  fi
+  content=$(git show "$commit:$path" | base64 -w0) || {
+    ERROR=$(err_json GIT_FAILED "git show failed." "" ""); return 1; }
+  DATA=$(jq -n --arg contentBase64 "$content" --arg size "$size" --arg commit "$commit" --arg path "$path" \
+    '{contentBase64:$contentBase64,size:$size,commit:$commit,path:$path}')
+}
+
+action_diff_file() {
+  local req_file="$1"
+  local path from to truncated=false
+  path=$(jq -r '.args.path // empty' "$req_file")
+  from=$(jq -r '.args.from // empty' "$req_file")
+  to=$(jq -r '.args.to // "WORKTREE"' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  valid_commitish "$from" || { ERROR=$(err_json BAD_REQUEST "Invalid 'from' commit." "" ""); return 1; }
+  if [ "$to" = "WORKTREE" ]; then
+    run_git diff --find-renames "$from" -- "$path" || true
+  else
+    valid_commitish "$to" || { ERROR=$(err_json BAD_REQUEST "Invalid 'to' commit." "" ""); return 1; }
+    run_git diff --find-renames "$from" "$to" -- "$path" || true
+  fi
+  [ $GIT_EC -gt 1 ] && { ERROR=$(err_json GIT_FAILED "git diff failed." "$GIT_OUT" "$GIT_ERR"); return 1; }
+  local diff_out="$GIT_OUT"
+  if [ "${#diff_out}" -gt "$NGB_MAX_DIFF_CHARS" ]; then
+    diff_out="${diff_out:0:$NGB_MAX_DIFF_CHARS}"
+    truncated=true
+  fi
+  DATA=$(jq -n --arg diff "$diff_out" --argjson truncated "$truncated" --arg from "$from" --arg to "$to" --arg path "$path" \
+    '{diff:$diff,truncated:($truncated|tostring),from:$from,to:$to,path:$path}')
+}
+
+action_restore_file() {
+  local req_file="$1"
+  local path commit p
+  path=$(jq -r '.args.path // empty' "$req_file")
+  commit=$(jq -r '.args.commit // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  valid_commitish "$commit" || { ERROR=$(err_json BAD_REQUEST "Invalid commit reference." "" ""); return 1; }
+  read_protected_paths "$req_file" || return 1
+  for p in "${PPATHS[@]}"; do
+    case "$path" in
+      "$p"|"$p"/*)
+        ERROR=$(err_json SAFETY_BLOCKED "Refusing to restore into a protected sparse path ($p)." "" "")
+        return 1 ;;
+    esac
+  done
+  if ! git cat-file -e "$commit:$path" 2>/dev/null; then
+    ERROR=$(err_json FILE_ABSENT "The file does not exist at that commit." "" ""); return 1
+  fi
+  if ! run_git restore --source="$commit" --worktree -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git restore failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(jq -n --arg restored "true" --arg path "$path" --arg commit "$commit" \
+    '{restored:$restored,restoredPath:$path,restoredFrom:$commit}')")
+}
+
 # ---- request processing ------------------------------------------------------
 
 process_request() {
@@ -545,6 +644,10 @@ process_request() {
     push)                  action_push "$req_file" || { ok=false; ec=1; } ;;
     sync)                  action_sync "$req_file" || { ok=false; ec=1; } ;;
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
+    file-log)              action_file_log "$req_file" || { ok=false; ec=1; } ;;
+    show-file-at-commit)   action_show_file_at_commit "$req_file" || { ok=false; ec=1; } ;;
+    diff-file)             action_diff_file "$req_file" || { ok=false; ec=1; } ;;
+    restore-file)          action_restore_file "$req_file" || { ok=false; ec=1; } ;;
     *)
       ok=false; ec=1
       ERROR=$(err_json "BAD_REQUEST" "Action not allowed: $action" "" "")
