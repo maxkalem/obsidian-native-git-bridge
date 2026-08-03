@@ -1,8 +1,10 @@
 package dev.nativegitbridge.companion
 
 import android.app.Activity
+import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 
 /** Shared, fixed forwarding logic: the ONLY thing this app ever asks Termux to run. */
 object TermuxForwarder {
@@ -25,7 +27,13 @@ object TermuxForwarder {
         false
     }
 
-    fun forward(activity: Activity): Result {
+    /**
+     * Forward the fixed runner invocation to Termux. When [resultReceiver] is
+     * provided, Termux reports stdout/exitCode/errmsg back through it
+     * (documented RUN_COMMAND pending-intent mechanism), which lets the setup
+     * screen verify the whole chain and show real checkmarks.
+     */
+    fun forward(activity: Activity, resultReceiver: PendingIntent? = null): Result {
         if (!hasPermission(activity)) return Result.NO_PERMISSION
         val intent = Intent().apply {
             setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService")
@@ -36,6 +44,9 @@ object TermuxForwarder {
             )
             putExtra("com.termux.RUN_COMMAND_WORKDIR", "/data/data/com.termux/files/home")
             putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
+            if (resultReceiver != null) {
+                putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", resultReceiver)
+            }
         }
         return try {
             if (activity.startService(intent) == null) Result.NO_TERMUX else Result.OK
@@ -45,4 +56,7 @@ object TermuxForwarder {
             Result.NO_PERMISSION
         }
     }
+
+    fun mutableFlag(): Int =
+        if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
 }
