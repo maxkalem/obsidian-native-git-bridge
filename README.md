@@ -95,7 +95,7 @@ Docs: `docs/ADR-001-android-invocation.md`, `docs/threat-model.md`,
 
 1. Copy the entire "native-git-bridge" folder into your vault at:
  
-     <YourVault>/.obsidian/plugins/native-git-bridge/
+     (YourVault)/.obsidian/plugins/native-git-bridge/
  
    After copying it must contain: main.js, manifest.json, styles.css
    (the termux/ folder holds helper scripts; Obsidian ignores it).
