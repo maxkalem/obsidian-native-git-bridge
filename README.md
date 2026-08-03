@@ -90,6 +90,26 @@ npm run build     # type check + bundle to main.js
 Docs: `docs/ADR-001-android-invocation.md`, `docs/threat-model.md`,
 `docs/protocol.md`, `docs/limitations.md`, `docs/research-notes.md`.
 
+----
+# HOW TO INSTALL THE PLUGIN
+
+1. Copy the entire "native-git-bridge" folder into your vault at:
+ 
+     <YourVault>/.obsidian/plugins/native-git-bridge/
+ 
+   After copying it must contain: main.js, manifest.json, styles.css
+   (the termux/ folder holds helper scripts; Obsidian ignores it).
+ 
+2. Restart Obsidian (or Settings -> Community plugins -> Reload).
+ 
+3. Settings -> Community plugins -> enable "Native Git Bridge".
+ 
+4. In the plugin settings press "Copy command" and paste the command
+   into Termux - everything else is set up automatically (the pairing
+   token is imported by the plugin on its own).
+
+----
+
 ## License
 
 MIT. Version History Diff (MIT) and obsidian-git were reviewed for integration
