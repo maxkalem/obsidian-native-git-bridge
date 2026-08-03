@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The single purpose of this app: permission to ask Termux to run the
+         Native Git Bridge runner script. Granted by the user once, in
+         Android Settings -> Apps -> Git Bridge Companion -> Permissions. -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- Package visibility (targetSdk >= 30): without this, the RUN_COMMAND
+         intent silently fails. See Termux wiki, "Target SDK 30 Package Visibility". -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
+    <application
+        android:label="@string/app_name"
+        android:allowBackup="false"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+
+        <!-- Invisible transponder activity. Obsidian opens
+             nativegitbridge://run; this activity forwards a RUN_COMMAND intent
+             to Termux with a FIXED script path and finishes immediately.
+             It accepts no command content from the URI. -->
+        <activity
+            android:name=".BridgeActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="nativegitbridge" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

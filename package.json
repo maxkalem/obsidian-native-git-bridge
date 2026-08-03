@@ -1,0 +1,23 @@
+{
+  "name": "native-git-bridge",
+  "version": "0.3.0",
+  "description": "Native Git frontend for Obsidian on Android, delegating Git operations to the real Git binary in Termux. Sparse-checkout aware, no background services.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "vitest run",
+    "test:e2e": "bash tests/e2e-runner.sh"
+  },
+  "keywords": ["obsidian", "git", "termux", "android", "sparse-checkout"],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.7.2",
+    "tslib": "^2.6.2",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

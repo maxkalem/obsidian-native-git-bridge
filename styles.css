@@ -1,0 +1,46 @@
+/* Native Git Bridge - uses Obsidian CSS variables only (light+dark safe). */
+.ngb-status-bar-item { cursor: pointer; }
+.ngb-status-clean    { color: var(--text-muted); }
+.ngb-status-changed  { color: var(--text-accent); }
+.ngb-status-syncing  { color: var(--text-accent); }
+.ngb-status-waiting  { color: var(--text-warning, var(--text-accent)); }
+.ngb-status-conflict { color: var(--text-error); font-weight: 600; }
+.ngb-status-error    { color: var(--text-error); }
+
+.ngb-modal .ngb-section { margin-bottom: var(--size-4-4); }
+.ngb-modal h3 { margin: var(--size-4-2) 0; }
+.ngb-kv { display: grid; grid-template-columns: minmax(9em, auto) 1fr; gap: 2px 12px; font-size: var(--font-ui-small); }
+.ngb-kv .k { color: var(--text-muted); }
+.ngb-mono, .ngb-output pre {
+  font-family: var(--font-monospace);
+  font-size: var(--font-smaller);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ngb-output {
+  background: var(--background-secondary);
+  border-radius: var(--radius-s);
+  padding: var(--size-4-2);
+  max-height: 40vh;
+  overflow: auto;
+}
+.ngb-warning {
+  color: var(--text-error);
+  background: var(--background-modifier-error);
+  border-radius: var(--radius-s);
+  padding: var(--size-4-2);
+}
+.ngb-ok { color: var(--text-success); }
+.ngb-file-list { margin: 0; padding-left: 1.2em; }
+.ngb-file-list li { font-family: var(--font-monospace); font-size: var(--font-smaller); }
+.ngb-badge {
+  display: inline-block; min-width: 1.4em; text-align: center;
+  border-radius: var(--radius-s); background: var(--background-secondary-alt);
+  font-family: var(--font-monospace); font-size: var(--font-smaller);
+  margin-right: 6px; padding: 0 4px;
+}
+.ngb-buttons { display: flex; gap: var(--size-4-2); justify-content: flex-end; margin-top: var(--size-4-4); }
+.ngb-buttons button.mod-warning { background: var(--background-modifier-error); }
+details.ngb-details > summary { cursor: pointer; color: var(--text-muted); }
+.ngb-settings-note { color: var(--text-muted); font-size: var(--font-ui-small); margin: var(--size-4-2) 0; }
+.ngb-invalid { color: var(--text-error); font-size: var(--font-ui-small); }

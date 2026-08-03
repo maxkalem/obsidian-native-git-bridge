@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Git Bridge Companion</string>
+    <string name="err_unknown_action">Git Bridge Companion: unknown action in URI.</string>
+    <string name="err_termux_missing">Git Bridge Companion: Termux is not installed (or not visible).</string>
+    <string name="err_permission">Git Bridge Companion: grant the “Run commands in Termux” permission in Android Settings → Apps → Git Bridge Companion → Permissions, and set allow-external-apps=true in ~/.termux/termux.properties.</string>
+    <string name="ok_forwarded">Git Bridge: running…</string>
+</resources>

@@ -1,0 +1,9 @@
+{
+  "id": "native-git-bridge",
+  "name": "Native Git Bridge",
+  "version": "0.3.0",
+  "minAppVersion": "1.5.0",
+  "description": "Native Git frontend for Android vaults: delegates Git operations to the real Git binary in Termux. Sparse-checkout aware. No background services, no servers, no ports.",
+  "author": "Native Git Bridge contributors",
+  "isDesktopOnly": false
+}

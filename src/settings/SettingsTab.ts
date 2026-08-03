@@ -1,0 +1,215 @@
+import { App, PluginSettingTab, Setting } from "obsidian";
+import type NativeGitBridgePlugin from "../main";
+import { validateProtectedPaths } from "./pathValidation";
+import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
+import { ConfirmModal } from "../ui/modals";
+
+export class NativeGitBridgeSettingTab extends PluginSettingTab {
+  constructor(app: App, private plugin: NativeGitBridgePlugin) {
+    super(app, plugin);
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+    const s = this.plugin.deviceSettings;
+
+    containerEl.createEl("p", {
+      cls: "ngb-settings-note",
+      text:
+        "All settings below are stored on this device only (never synced through the vault), " +
+        "so each device can be enabled and configured independently.",
+    });
+    if (this.plugin.store.isVolatile) {
+      containerEl.createDiv({
+        cls: "ngb-warning",
+        text:
+          "Device-local storage is unavailable; settings will not survive an app restart. " +
+          "Check available storage / WebView state.",
+      });
+    }
+
+    new Setting(containerEl)
+      .setName("Enable on this device")
+      .setDesc("Master switch. Off by default on every new device.")
+      .addToggle((t) =>
+        t.setValue(s.enabledOnThisDevice).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ enabledOnThisDevice: v });
+          this.display();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Termux integration")
+      .setDesc("Allow this plugin to queue requests for the Termux runner.")
+      .addToggle((t) =>
+        t.setValue(s.termuxIntegrationEnabled).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ termuxIntegrationEnabled: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Android integration type")
+      .setDesc(
+        "widget-manual: you tap the Termux widget shortcut to run queued requests (documented, reliable). " +
+          "companion-intent: experimental; requires the companion app."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("widget-manual", "Termux widget (manual tap)")
+          .addOption("companion-intent", "Companion app intent (experimental)")
+          .setValue(s.integrationType)
+          .onChange(async (v) => {
+            await this.plugin.updateDeviceSettings({
+              integrationType: v as "widget-manual" | "companion-intent",
+            });
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Pairing token")
+      .setDesc(
+        "Paste the token printed by the Termux installer (termux/install.sh). " +
+          "It authenticates requests between this plugin and the runner. Stored locally; never logged."
+      )
+      .addText((t) => {
+        t.inputEl.type = "password";
+        t.setPlaceholder("token from installer")
+          .setValue(s.authToken)
+          .onChange(async (v) => {
+            await this.plugin.updateDeviceSettings({ authToken: v.trim() });
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Repository path (informational)")
+      .setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.")
+      .addText((t) =>
+        t.setValue(s.repoPathHint).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ repoPathHint: v.trim() });
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Sparse checkout protection" });
+    const desc = containerEl.createEl("p", {
+      cls: "ngb-settings-note",
+      text:
+        "Repository-relative paths excluded by sparse checkout. Before any commit or push these must " +
+        "show no Git changes; otherwise the operation is blocked. One path per line.",
+    });
+    void desc;
+    const invalidNote = containerEl.createDiv({ cls: "ngb-invalid" });
+    new Setting(containerEl).setName("Protected sparse paths").addTextArea((ta) => {
+      ta.inputEl.rows = 4;
+      ta.setValue(s.protectedPaths.join("\n")).onChange(async (v) => {
+        const lines = v.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+        const res = validateProtectedPaths(lines);
+        if (res.ok) {
+          invalidNote.setText("");
+          await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
+        } else {
+          invalidNote.setText(`Rejected "${res.offending}": ${res.reason} Nothing saved.`);
+        }
+      });
+    });
+
+    containerEl.createEl("h3", { text: "Automatic actions (all off by default)" });
+
+    new Setting(containerEl)
+      .setName("Pull when Obsidian opens")
+      .addToggle((t) =>
+        t.setValue(s.autoPullOnOpen).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ autoPullOnOpen: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Sync when Obsidian closes / goes to background")
+      .setDesc("Queues a sync request during the close transition; in widget mode it runs at your next tap.")
+      .addToggle((t) =>
+        t.setValue(s.autoSyncOnClose).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Periodic sync while Obsidian is open (minutes, 0 = off)")
+      .addText((t) =>
+        t.setValue(String(s.periodicSyncMinutes)).onChange(async (v) => {
+          const n = Math.max(0, Math.floor(Number(v) || 0));
+          await this.plugin.updateDeviceSettings({ periodicSyncMinutes: n });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Minimum interval between automatic syncs (minutes)")
+      .addText((t) =>
+        t.setValue(String(s.minAutoSyncIntervalMinutes)).onChange(async (v) => {
+          const n = Math.max(1, Math.floor(Number(v) || 15));
+          await this.plugin.updateDeviceSettings({ minAutoSyncIntervalMinutes: n });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Only sync on Wi-Fi (best effort)")
+      .setDesc("Uses the WebView network API when available; skipped silently when the API is missing.")
+      .addToggle((t) =>
+        t.setValue(s.wifiOnly).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ wifiOnly: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Skip automatic sync when battery is low (best effort)")
+      .addToggle((t) =>
+        t.setValue(s.skipOnLowBattery).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ skipOnLowBattery: v });
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Advanced" });
+
+    new Setting(containerEl)
+      .setName("Operation timeout (seconds)")
+      .addText((t) =>
+        t.setValue(String(s.opTimeoutSeconds)).onChange(async (v) => {
+          const n = Math.min(3600, Math.max(10, Math.floor(Number(v) || DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds)));
+          await this.plugin.updateDeviceSettings({ opTimeoutSeconds: n });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Companion intent URI template")
+      .setDesc('Experimental. "{id}" is replaced by the request id. Only used with the companion-intent type.')
+      .addText((t) =>
+        t.setValue(s.companionUriTemplate).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ companionUriTemplate: v.trim() });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Reset device-local settings")
+      .setDesc("Restores all settings on this device to defaults. The vault and repository are not touched.")
+      .addButton((b) =>
+        b.setButtonText("Reset").setWarning().onClick(() => {
+          new ConfirmModal(
+            this.app,
+            {
+              title: "Reset device-local settings?",
+              body: [
+                "This resets Native Git Bridge settings on this device only.",
+                "The repository, the vault, and other devices are not affected.",
+              ],
+              confirmLabel: "Reset settings",
+              danger: true,
+            },
+            async (confirmed) => {
+              if (!confirmed) return;
+              await this.plugin.resetDeviceSettings();
+              this.display();
+            }
+          ).open();
+        })
+      );
+  }
+}
