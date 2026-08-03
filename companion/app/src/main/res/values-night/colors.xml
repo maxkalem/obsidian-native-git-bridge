@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Obsidian default dark theme palette -->
+    <color name="bg">#1E1E1E</color>
+    <color name="bg_secondary">#262626</color>
+    <color name="text_normal">#DADADA</color>
+    <color name="text_muted">#999999</color>
+    <color name="accent">#8A5CF5</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="success">#3FB950</color>
+    <color name="border">#363636</color>
+</resources>

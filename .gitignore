@@ -1,0 +1,6 @@
+node_modules/
+package-lock.json
+companion/.gradle/
+companion/app/build/
+companion/build/
+*.log

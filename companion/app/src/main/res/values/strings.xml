@@ -1,14 +1,15 @@
 <resources>
     <string name="app_name">Git Bridge Companion</string>
-    <string name="setup_title">Git Bridge Companion — setup</string>
-    <string name="check_termux">1. Termux is installed</string>
+    <string name="setup_title">Setup</string>
+    <string name="section_actions">Actions</string>
+    <string name="check_termux">Termux is installed</string>
     <string name="check_permission">Permission “Run commands in Termux environment” granted</string>
     <string name="setup_ready">All steps done ✅ — the bridge answered. Close this screen and use the commands in Obsidian.</string>
     <string name="setup_not_ready">Not ready yet — fix the [MISSING] items above.</string>
-    <string name="btn_grant">2. Grant Termux permission</string>
-    <string name="btn_grant_done">2. Permission granted</string>
-    <string name="btn_setup_termux">3. Set up Termux (copy command &amp; open Termux)</string>
-    <string name="btn_setup_termux_done">3. Termux configured</string>
+    <string name="btn_grant">Grant Termux permission</string>
+    <string name="btn_grant_done">Permission granted</string>
+    <string name="btn_setup_termux">Set up Termux (copy command &amp; open Termux)</string>
+    <string name="btn_setup_termux_done">Termux configured</string>
     <string name="probe_running">Checking the bridge: asking Termux to run the runner…</string>
     <string name="probe_timeout">Termux did not answer within 15 s. Most likely allow-external-apps is not enabled yet — run step 3, then fully restart Termux (Exit in its notification).</string>
     <string name="setup_command">curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash</string>

@@ -1,4 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#1E2632</color>
+    <!-- Obsidian-like light palette -->
+    <color name="bg">#FFFFFF</color>
+    <color name="bg_secondary">#F2F3F5</color>
+    <color name="text_normal">#222222</color>
+    <color name="text_muted">#5C5C5C</color>
+    <color name="accent">#7B6CD9</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="success">#08B94E</color>
+    <color name="border">#E0E0E0</color>
 </resources>

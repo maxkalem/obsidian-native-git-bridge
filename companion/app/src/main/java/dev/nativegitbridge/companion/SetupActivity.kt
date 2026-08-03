@@ -9,36 +9,40 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.provider.Settings
 import android.view.Gravity
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 
 /**
- * Setup checklist. Every step shows a live checkmark:
- *   1. Termux installed            — detected automatically
- *   2. Termux permission granted   — standard runtime permission dialog
- *   3. Termux configured           — verified by a real probe: the runner is
- *      executed and Termux reports the result back via PendingIntent
- * The probe re-runs automatically when you return to this screen, so the
- * checkmarks update by themselves after each step.
+ * Setup checklist styled after Obsidian (light/dark palette follows the system
+ * theme via values-night resources).
+ *
+ * Steps are uniform card rows with a status circle (number -> checkmark);
+ * actionable steps are tappable as a whole row. Utility actions that have no
+ * checkmark semantics (re-test, app settings) are separate buttons below.
  */
 class SetupActivity : Activity() {
 
-    private lateinit var mark1: TextView
-    private lateinit var mark2: TextView
-    private lateinit var mark3: TextView
+    private class StepRow(
+        val container: LinearLayout,
+        val circle: TextView,
+        val label: TextView,
+        val number: String
+    )
+
+    private lateinit var step1: StepRow
+    private lateinit var step2: StepRow
+    private lateinit var step3: StepRow
     private lateinit var detail: TextView
-    private lateinit var grantButton: Button
-    private lateinit var setupButton: Button
-    private lateinit var testButton: Button
 
     private var probeInFlight = false
     private val handler = Handler()
@@ -59,98 +63,83 @@ class SetupActivity : Activity() {
         }
     }
 
+    // ---- palette helpers -------------------------------------------------
+
+    private fun c(id: Int): Int = resources.getColor(id, theme)
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun roundedBg(fill: Int, stroke: Int? = null): GradientDrawable =
+        GradientDrawable().apply {
+            cornerRadius = dp(12f).toFloat()
+            setColor(fill)
+            if (stroke != null) setStroke(dp(1f), stroke)
+        }
+
+    private fun circleBg(fill: Int?, stroke: Int?): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(fill ?: 0x00000000)
+            if (stroke != null) setStroke(dp(2f), stroke)
+        }
+
+    // ---- UI construction -------------------------------------------------
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val pad = (16 * resources.displayMetrics.density).toInt()
+        val pad = dp(16f)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(pad, pad, pad, pad)
         }
+
         root.addView(TextView(this).apply {
-            text = getString(R.string.setup_title)
-            textSize = 20f
+            text = getString(R.string.app_name)
+            textSize = 22f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(c(R.color.text_normal))
         })
+        root.addView(sectionHeader(R.string.setup_title))
 
-        fun row(mark: TextView, button: Button?): LinearLayout {
-            val r = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, pad / 2, 0, 0)
-            }
-            mark.textSize = 18f
-            mark.minWidth = (32 * resources.displayMetrics.density).toInt()
-            r.addView(mark)
-            if (button != null) {
-                r.addView(
-                    button,
-                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                )
-            }
-            return r
+        step1 = makeStepRow("1", null)
+        step2 = makeStepRow("2") {
+            requestPermissions(arrayOf(TermuxForwarder.PERMISSION), REQ_PERMISSION)
         }
-
-        // Step 1: Termux installed (no button; install happens outside).
-        mark1 = TextView(this)
-        val step1Label = TextView(this).apply { text = getString(R.string.check_termux) }
-        val r1 = row(mark1, null); r1.addView(step1Label); root.addView(r1)
-
-        // Step 2: permission.
-        mark2 = TextView(this)
-        grantButton = Button(this).apply {
-            text = getString(R.string.btn_grant)
-            setOnClickListener {
-                requestPermissions(arrayOf(TermuxForwarder.PERMISSION), REQ_PERMISSION)
-            }
+        step3 = makeStepRow("3") {
+            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(
+                ClipData.newPlainText("git-bridge-setup", getString(R.string.setup_command))
+            )
+            Toast.makeText(this, R.string.setup_command_copied, Toast.LENGTH_LONG).show()
+            val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
+            if (launch != null) startActivity(launch)
+            else Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
         }
-        root.addView(row(mark2, grantButton))
-
-        // Step 3: Termux configured (copy command + open Termux; verified by probe).
-        mark3 = TextView(this)
-        setupButton = Button(this).apply {
-            text = getString(R.string.btn_setup_termux)
-            setOnClickListener {
-                val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(
-                    ClipData.newPlainText("git-bridge-setup", getString(R.string.setup_command))
-                )
-                Toast.makeText(this@SetupActivity, R.string.setup_command_copied, Toast.LENGTH_LONG)
-                    .show()
-                val launch =
-                    packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
-                if (launch != null) startActivity(launch)
-                else Toast.makeText(
-                    this@SetupActivity, R.string.err_termux_missing, Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-        root.addView(row(mark3, setupButton))
-
-        // Manual re-test.
-        testButton = Button(this).apply {
-            text = getString(R.string.btn_test)
-            setOnClickListener { startProbe() }
-        }
-        root.addView(testButton)
-
-        root.addView(Button(this).apply {
-            text = getString(R.string.btn_app_settings)
-            setOnClickListener {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-            }
-        })
+        root.addView(step1.container)
+        root.addView(step2.container)
+        root.addView(step3.container)
 
         detail = TextView(this).apply {
-            textSize = 12f
-            setPadding(0, pad, 0, 0)
+            textSize = 13f
+            setTextColor(c(R.color.text_muted))
+            setPadding(dp(4f), dp(12f), dp(4f), dp(12f))
         }
         root.addView(detail)
 
-        setContentView(ScrollView(this).apply { addView(root) })
+        root.addView(sectionHeader(R.string.section_actions))
+        root.addView(actionButton(R.string.btn_test, primary = true) { startProbe() })
+        root.addView(actionButton(R.string.btn_app_settings, primary = false) {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        })
+
+        setContentView(ScrollView(this).apply {
+            addView(root)
+            setBackgroundColor(c(R.color.bg))
+        })
 
         val filter = IntentFilter(ACTION_PROBE_RESULT)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -161,22 +150,129 @@ class SetupActivity : Activity() {
         }
     }
 
+    private fun sectionHeader(textRes: Int): TextView = TextView(this).apply {
+        text = getString(textRes)
+        textSize = 13f
+        typeface = Typeface.DEFAULT_BOLD
+        isAllCaps = true
+        setTextColor(c(R.color.text_muted))
+        setPadding(dp(4f), dp(18f), dp(4f), dp(8f))
+    }
+
+    private fun makeStepRow(number: String, onClick: (() -> Unit)?): StepRow {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14f), dp(14f), dp(14f), dp(14f))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8f) }
+        }
+        val circle = TextView(this).apply {
+            gravity = Gravity.CENTER
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            layoutParams = LinearLayout.LayoutParams(dp(28f), dp(28f)).apply {
+                marginEnd = dp(12f)
+            }
+        }
+        val label = TextView(this).apply {
+            textSize = 15f
+            setTextColor(c(R.color.text_normal))
+            layoutParams = LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+            )
+        }
+        row.addView(circle)
+        row.addView(label)
+        if (onClick != null) row.setOnClickListener { onClick() }
+        return StepRow(row, circle, label, number)
+    }
+
+    private fun actionButton(textRes: Int, primary: Boolean, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = getString(textRes)
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(14f), dp(13f), dp(14f), dp(13f))
+            setTextColor(if (primary) c(R.color.on_accent) else c(R.color.text_normal))
+            background =
+                if (primary) roundedBg(c(R.color.accent))
+                else roundedBg(c(R.color.bg_secondary), c(R.color.border))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8f) }
+            setOnClickListener { onClick() }
+        }
+
+    // ---- state -----------------------------------------------------------
+
+    private fun style(row: StepRow, done: Boolean, pendingText: Int, doneText: Int, busy: Boolean = false) {
+        row.label.text = getString(if (done) doneText else pendingText)
+        when {
+            done -> {
+                row.circle.text = "✓"
+                row.circle.setTextColor(c(R.color.on_accent))
+                row.circle.background = circleBg(c(R.color.success), null)
+                row.container.background = roundedBg(c(R.color.bg_secondary), c(R.color.border))
+                row.container.alpha = 0.75f
+                row.container.isClickable = false
+            }
+            busy -> {
+                row.circle.text = "…"
+                row.circle.setTextColor(c(R.color.accent))
+                row.circle.background = circleBg(null, c(R.color.accent))
+                row.container.background = roundedBg(c(R.color.bg_secondary), c(R.color.accent))
+                row.container.alpha = 1f
+            }
+            else -> {
+                row.circle.text = row.number
+                row.circle.setTextColor(c(R.color.accent))
+                row.circle.background = circleBg(null, c(R.color.accent))
+                row.container.background = roundedBg(c(R.color.bg_secondary), c(R.color.accent))
+                row.container.alpha = 1f
+                row.container.isClickable = true
+            }
+        }
+    }
+
+    private fun refresh() {
+        val termuxOk = TermuxForwarder.isTermuxInstalled(this)
+        val permissionOk = TermuxForwarder.hasPermission(this)
+        val probeOk = prefs().getBoolean(KEY_PROBE_OK, false)
+        val probeMsg = prefs().getString(KEY_PROBE_MSG, "") ?: ""
+
+        style(step1, termuxOk, R.string.check_termux, R.string.check_termux)
+        style(step2, permissionOk, R.string.btn_grant, R.string.btn_grant_done)
+        style(step3, probeOk, R.string.btn_setup_termux, R.string.btn_setup_termux_done, probeInFlight)
+
+        detail.text = when {
+            probeOk -> getString(R.string.setup_ready)
+            probeInFlight -> getString(R.string.probe_running)
+            probeMsg.isNotEmpty() -> getString(R.string.setup_not_ready) + "\n" + probeMsg
+            else -> getString(R.string.setup_help)
+        }
+    }
+
+    // ---- probe (unchanged logic) ------------------------------------------
+
+    override fun onResume() {
+        super.onResume()
+        refresh()
+        if (TermuxForwarder.isTermuxInstalled(this) && TermuxForwarder.hasPermission(this)) {
+            startProbe()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         try {
             unregisterReceiver(probeReceiver)
         } catch (e: Exception) {
             // not registered
-        }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refresh()
-        // Auto-verify: whenever the prerequisites hold, re-run the probe so the
-        // third checkmark updates by itself after the user returns from Termux.
-        if (TermuxForwarder.isTermuxInstalled(this) && TermuxForwarder.hasPermission(this)) {
-            startProbe()
         }
     }
 
@@ -199,10 +295,7 @@ class SetupActivity : Activity() {
             return
         }
         probeInFlight = true
-        mark3.text = HOURGLASS
-        detail.text = getString(R.string.probe_running)
-        // If Termux never answers (allow-external-apps off, app force-stopped),
-        // record that after 15 s so the user is not left with a spinner.
+        refresh()
         handler.postDelayed({
             if (probeInFlight) {
                 probeInFlight = false
@@ -213,29 +306,6 @@ class SetupActivity : Activity() {
                 refresh()
             }
         }, 15000)
-    }
-
-    private fun refresh() {
-        val termuxOk = TermuxForwarder.isTermuxInstalled(this)
-        val permissionOk = TermuxForwarder.hasPermission(this)
-        val probeOk = prefs().getBoolean(KEY_PROBE_OK, false)
-        val probeMsg = prefs().getString(KEY_PROBE_MSG, "") ?: ""
-
-        mark1.text = if (termuxOk) CHECK else CROSS
-        mark2.text = if (permissionOk) CHECK else CROSS
-        mark3.text = if (probeOk) CHECK else if (probeInFlight) HOURGLASS else CROSS
-        grantButton.isEnabled = !permissionOk
-        grantButton.text = getString(
-            if (permissionOk) R.string.btn_grant_done else R.string.btn_grant
-        )
-        setupButton.text = getString(
-            if (probeOk) R.string.btn_setup_termux_done else R.string.btn_setup_termux
-        )
-        detail.text = when {
-            probeOk -> getString(R.string.setup_ready)
-            probeMsg.isNotEmpty() -> getString(R.string.setup_not_ready) + "\n" + probeMsg
-            else -> getString(R.string.setup_help)
-        }
     }
 
     override fun onRequestPermissionsResult(
@@ -259,8 +329,5 @@ class SetupActivity : Activity() {
         private const val ACTION_PROBE_RESULT = "dev.nativegitbridge.companion.PROBE_RESULT"
         private const val KEY_PROBE_OK = "probeOk"
         private const val KEY_PROBE_MSG = "probeMsg"
-        private const val CHECK = "✅"      // ✅
-        private const val CROSS = "⭕"      // ⭕ (step not done yet)
-        private const val HOURGLASS = "⏳"  // ⏳
     }
 }
