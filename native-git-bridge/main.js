@@ -434,11 +434,11 @@ var NativeGitBridgeSettingTab = class extends import_obsidian2.PluginSettingTab 
       });
     }
     containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
-    const cmd = `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint || "/storage/emulated/0/<YourVault>"}"`;
+    const cmd = s.repoPathHint ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"` : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
     const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
     cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
     new import_obsidian2.Setting(containerEl).setName("Install command").setDesc(
-      "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. It installs git/jq/openssh, links storage, enables the companion trigger, creates an SSH key, verifies the repo and pairs with this plugin automatically \u2014 no manual token copying."
+      "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you."
     ).addButton(
       (b) => b.setButtonText("Copy command").setCta().onClick(async () => {
         await navigator.clipboard.writeText(cmd);
@@ -1671,7 +1671,7 @@ var NativeGitBridgePlugin = class extends import_obsidian7.Plugin {
         this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
         new ResultModal(this.app, `Native Git: ${action} timed out`, [
           `No result arrived within ${req.timeoutSeconds}s.`,
-          s.integrationType === "widget-manual" ? "Did you tap the GitBridge shortcut in the Termux widget? The request stays queued and will run at the next tap." : "Check that the companion app and Termux are set up correctly (see diagnostics)."
+          s.integrationType === "widget-manual" ? "Did you tap the GitBridge shortcut in the Termux widget? The request stays queued and will run at the next tap." : "If Termux setup was never completed, open the Git Bridge Companion app and tap 'Set up Termux'. Otherwise check diagnostics."
         ]).open();
         return null;
       }

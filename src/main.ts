@@ -440,7 +440,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           `No result arrived within ${req.timeoutSeconds}s.`,
           s.integrationType === "widget-manual"
             ? "Did you tap the GitBridge shortcut in the Termux widget? The request stays queued and will run at the next tap."
-            : "Check that the companion app and Termux are set up correctly (see diagnostics).",
+            : "If Termux setup was never completed, open the Git Bridge Companion app and tap 'Set up Termux'. Otherwise check diagnostics.",
         ]).open();
         return null;
       }

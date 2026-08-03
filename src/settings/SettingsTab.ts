@@ -32,15 +32,18 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
-    const cmd = `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint || "/storage/emulated/0/<YourVault>"}"`;
+    const cmd = s.repoPathHint
+      ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"`
+      : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
     const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
     cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
     new Setting(containerEl)
       .setName("Install command")
       .setDesc(
         "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. " +
-          "It installs git/jq/openssh, links storage, enables the companion trigger, creates an SSH key, verifies the repo " +
-          "and pairs with this plugin automatically — no manual token copying."
+          "It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, " +
+          "verifies the repo and pairs with this plugin — no manual token copying. The Companion app has a " +
+          "'Set up Termux' button that copies this command and opens Termux for you."
       )
       .addButton((b) =>
         b.setButtonText("Copy command").setCta().onClick(async () => {

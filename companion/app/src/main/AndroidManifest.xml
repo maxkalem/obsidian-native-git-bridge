@@ -17,6 +17,18 @@
         android:allowBackup="false"
         android:theme="@android:style/Theme.Translucent.NoTitleBar">
 
+        <!-- Visible setup screen: shows status and requests the Termux
+             permission with the standard Android runtime dialog. -->
+        <activity
+            android:name=".SetupActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.Light">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <!-- Invisible transponder activity. Obsidian opens
              nativegitbridge://run; this activity forwards a RUN_COMMAND intent
              to Termux with a FIXED script path and finishes immediately.

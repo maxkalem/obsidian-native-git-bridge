@@ -6,6 +6,43 @@ set -u
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Prompts must work when piped through `curl | bash` (stdin is the pipe), so we
+# talk to /dev/tty. With no terminal at all (e.g. re-run non-interactively) we
+# assume "yes" and log every decision instead of hanging.
+confirm() { # $1 question -> 0=yes
+  if [ "${NGB_ASSUME_YES:-}" = "1" ]; then say "   auto-yes: $1"; return 0; fi
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '%s [y/N] ' "$1" > /dev/tty
+    local yn=""; IFS= read -r yn < /dev/tty || yn=""
+    [ "$yn" = "y" ] || [ "$yn" = "Y" ]
+  else
+    say "   non-interactive: assuming yes: $1"; return 0
+  fi
+}
+
+ask_line() { # $1 prompt -> stdout answer
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf '%s' "$1" > /dev/tty
+    local a=""; IFS= read -r a < /dev/tty || a=""
+    printf '%s' "$a"
+  else
+    printf ''
+  fi
+}
+
+# Find Obsidian vaults that are git repositories on shared storage.
+detect_vaults() {
+  local roots="/storage/emulated/0 $HOME/storage/shared /sdcard"
+  local r d v
+  { for r in $roots; do
+      [ -d "$r" ] || continue
+      find "$r/" -maxdepth 4 -type d -name .obsidian 2>/dev/null
+    done; } | while IFS= read -r d; do
+      v="$(dirname "$d")"
+      [ -d "$v/.git" ] && realpath "$v" 2>/dev/null
+    done | sort -u
+}
+
 REPO_ARG="${1:-}"
 WITH_SSH=false
 for a in "$@"; do [ "$a" = "--with-ssh" ] && WITH_SSH=true; done
@@ -30,10 +67,24 @@ if [ ! -d "$HOME/storage" ]; then
   exit 0
 fi
 
-# 4. Repository path.
+# 4. Repository path: use the argument, otherwise auto-detect vaults
+# (folders on shared storage containing both .obsidian and .git).
 if [ -z "$REPO_ARG" ]; then
-  printf 'Enter the absolute path of your vault repository (e.g. /storage/emulated/0/Documents/MyVault): '
-  read -r REPO_ARG
+  say "-- No path given; scanning shared storage for Obsidian vaults with a git repo..."
+  VAULTS="$(detect_vaults)"
+  COUNT="$(printf '%s\n' "$VAULTS" | grep -c . || true)"
+  if [ "$COUNT" -eq 1 ]; then
+    REPO_ARG="$VAULTS"
+    say "-- Found exactly one: $REPO_ARG"
+  elif [ "$COUNT" -gt 1 ]; then
+    say "-- Found several vaults:"
+    printf '%s\n' "$VAULTS" | nl -w2 -s'. '
+    PICK="$(ask_line 'Enter the number of the vault to use: ')"
+    REPO_ARG="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
+    [ -n "$REPO_ARG" ] || fail "Invalid selection."
+  else
+    fail "No vault with a .git repository found on shared storage. Clone your repo first, or pass the path: bash install.sh /storage/emulated/0/<YourVault>"
+  fi
 fi
 REPO_DIR="$REPO_ARG"
 [ -d "$REPO_DIR" ] || fail "Directory does not exist: $REPO_DIR"
@@ -45,9 +96,7 @@ if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     say "-- Git rejected the repository because of 'dubious ownership' (normal for shared storage)."
     say "   The following EXPLICIT global change marks only this directory as safe:"
     say "     git config --global --add safe.directory \"$REPO_DIR\""
-    printf 'Apply it now? [y/N] '
-    read -r yn
-    [ "$yn" = "y" ] || fail "Cannot continue without safe.directory. Nothing was changed."
+    confirm "Apply it now?" || fail "Cannot continue without safe.directory. Nothing was changed."
     git config --global --add safe.directory "$REPO_DIR"
     git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Still not a git work tree."
   else
@@ -84,9 +133,7 @@ case "$REMOTE_URL" in
   https://*@*)
     say "-- HTTPS remote with credentials embedded in the URL detected."
     say "   This works, but the token then appears in .git/config."
-    printf 'Move the token into the git credential store (~/.git-credentials, chmod 600) and clean the URL? [y/N] '
-    read -r yn
-    if [ "$yn" = "y" ]; then
+    if confirm "Move the token into the git credential store (~/.git-credentials, chmod 600) and clean the URL?"; then
       CREDS="${REMOTE_URL#https://}"; CREDS="${CREDS%%@*}"
       HOSTPATH="${REMOTE_URL#https://*@}"
       HOSTONLY="${HOSTPATH%%/*}"
@@ -104,9 +151,7 @@ case "$REMOTE_URL" in
     if [ -z "$HELPER" ]; then
       say "-- HTTPS remote without a credential helper: pushes from the bridge would fail"
       say "   (the runner never prompts interactively)."
-      printf 'Enable the git credential store and cache your PAT on the next pull? [y/N] '
-      read -r yn
-      if [ "$yn" = "y" ]; then
+      if confirm "Enable the git credential store and cache your PAT on the next pull?"; then
         git -C "$REPO_DIR" config --local credential.helper store
         say "-- credential.helper=store set (repo-local). Run 'git pull' once in Termux and"
         say "   enter your PAT as the password; it will be reused non-interactively afterwards."

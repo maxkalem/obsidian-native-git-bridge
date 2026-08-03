@@ -1,7 +1,21 @@
 <resources>
     <string name="app_name">Git Bridge Companion</string>
+    <string name="setup_title">Git Bridge Companion — setup</string>
+    <string name="check_termux">Termux is installed</string>
+    <string name="check_permission">Permission “Run commands in Termux environment” granted</string>
+    <string name="setup_ready">Ready. You can close this screen — everything is now driven from Obsidian.</string>
+    <string name="setup_not_ready">Not ready yet — fix the [MISSING] items above.</string>
+    <string name="btn_grant">Grant Termux permission</string>
+    <string name="btn_setup_termux">Set up Termux (copy command &amp; open Termux)</string>
+    <string name="setup_command">curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/termux/bootstrap.sh | bash</string>
+    <string name="setup_command_copied">Command copied. In Termux: long-press → Paste → Enter. It finds your vault and sets up everything by itself.</string>
+    <string name="btn_test">Test: trigger the runner now</string>
+    <string name="btn_app_settings">Open Android app settings</string>
+    <string name="setup_help">One-time Termux step: tap “Set up Termux” above — it copies the install command and opens Termux; you only paste (long-press) and press Enter. The command finds your vault automatically, installs the runner, enables allow-external-apps and pairs with the Obsidian plugin.</string>
+    <string name="perm_denied_hint">Permission denied. If the dialog no longer appears, grant it via “Open Android app settings” → Permissions → Additional permissions.</string>
     <string name="err_unknown_action">Git Bridge Companion: unknown action in URI.</string>
     <string name="err_termux_missing">Git Bridge Companion: Termux is not installed (or not visible).</string>
-    <string name="err_permission">Git Bridge Companion: grant the “Run commands in Termux” permission in Android Settings → Apps → Git Bridge Companion → Permissions, and set allow-external-apps=true in ~/.termux/termux.properties.</string>
+    <string name="err_permission">Git Bridge Companion: Termux permission missing, or allow-external-apps is not enabled in Termux (re-run the install command).</string>
+    <string name="err_no_permission_opening_setup">Git Bridge needs a one-time permission — opening setup…</string>
     <string name="ok_forwarded">Git Bridge: running…</string>
 </resources>

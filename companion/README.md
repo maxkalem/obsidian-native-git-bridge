@@ -22,10 +22,14 @@ Locally: open `companion/` in Android Studio, or `gradle assembleDebug`
 ## One-time setup on the phone
 
 1. Install the APK (enable "install unknown apps" for your file manager).
-2. Android Settings → Apps → Git Bridge Companion → Permissions → Additional
-   permissions → allow "Run commands in Termux environment".
-3. In Termux: `mkdir -p ~/.termux && echo "allow-external-apps=true" >> ~/.termux/termux.properties`,
-   then restart Termux. (The plugin installer prints this too.)
+2. Open the **Git Bridge Companion** app from the launcher and tap
+   **Grant Termux permission** — the standard Android permission dialog
+   appears; just tap Allow. (If a trigger arrives from Obsidian before the
+   permission is granted, the app opens this screen by itself.)
+   Fallback for OEMs that suppress the dialog: the "Open Android app settings"
+   button → Permissions → Additional permissions.
+3. Run the plugin's one-line install command in Termux (Copy button in the
+   plugin settings) — it enables `allow-external-apps` and installs the runner.
 4. In Obsidian → Native Git Bridge settings → Android integration type →
    "Companion app intent".
 
