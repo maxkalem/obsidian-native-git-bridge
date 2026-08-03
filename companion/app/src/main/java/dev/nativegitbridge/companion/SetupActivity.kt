@@ -45,6 +45,8 @@ class SetupActivity : Activity() {
     private lateinit var detail: TextView
 
     private var probeInFlight = false
+    /** True when the current probe was started by the Test button: its outcome is toasted. */
+    private var probeIsManual = false
     private val handler = Handler()
 
     private val probeReceiver = object : BroadcastReceiver() {
@@ -59,6 +61,14 @@ class SetupActivity : Activity() {
                 .putBoolean(KEY_PROBE_OK, ok)
                 .putString(KEY_PROBE_MSG, if (ok) "" else "errmsg=$errmsg err=$err exit=$exitCode")
                 .apply()
+            if (probeIsManual) {
+                probeIsManual = false
+                Toast.makeText(
+                    this@SetupActivity,
+                    if (ok) R.string.probe_ok_toast else R.string.probe_fail_toast,
+                    Toast.LENGTH_LONG
+                ).show()
+            }
             refresh()
         }
     }
@@ -126,7 +136,7 @@ class SetupActivity : Activity() {
         root.addView(detail)
 
         root.addView(sectionHeader(R.string.section_actions))
-        root.addView(actionButton(R.string.btn_test, primary = true) { startProbe() })
+        root.addView(actionButton(R.string.btn_test, primary = true) { startProbe(manual = true) })
         root.addView(actionButton(R.string.btn_app_settings, primary = false) {
             startActivity(
                 Intent(
@@ -263,7 +273,7 @@ class SetupActivity : Activity() {
         super.onResume()
         refresh()
         if (TermuxForwarder.isTermuxInstalled(this) && TermuxForwarder.hasPermission(this)) {
-            startProbe()
+            startProbe(manual = false)
         }
     }
 
@@ -276,8 +286,11 @@ class SetupActivity : Activity() {
         }
     }
 
-    private fun startProbe() {
-        if (probeInFlight) return
+    private fun startProbe(manual: Boolean) {
+        if (probeInFlight) {
+            if (manual) Toast.makeText(this, R.string.probe_already_running, Toast.LENGTH_SHORT).show()
+            return
+        }
         if (!TermuxForwarder.hasPermission(this)) {
             Toast.makeText(this, R.string.err_permission, Toast.LENGTH_LONG).show()
             return
@@ -295,6 +308,8 @@ class SetupActivity : Activity() {
             return
         }
         probeInFlight = true
+        probeIsManual = manual
+        if (manual) Toast.makeText(this, R.string.ok_forwarded, Toast.LENGTH_SHORT).show()
         refresh()
         handler.postDelayed({
             if (probeInFlight) {
@@ -303,6 +318,10 @@ class SetupActivity : Activity() {
                     .putBoolean(KEY_PROBE_OK, false)
                     .putString(KEY_PROBE_MSG, getString(R.string.probe_timeout))
                     .apply()
+                if (probeIsManual) {
+                    probeIsManual = false
+                    Toast.makeText(this@SetupActivity, R.string.probe_fail_toast, Toast.LENGTH_LONG).show()
+                }
                 refresh()
             }
         }, 15000)

@@ -11,6 +11,9 @@
     <string name="btn_setup_termux">Set up Termux (copy command &amp; open Termux)</string>
     <string name="btn_setup_termux_done">Termux configured</string>
     <string name="probe_running">Checking the bridge: asking Termux to run the runner…</string>
+    <string name="probe_ok_toast">Test passed ✅ — Termux ran the runner and answered.</string>
+    <string name="probe_fail_toast">Test failed — see the message below the checklist.</string>
+    <string name="probe_already_running">A check is already running…</string>
     <string name="probe_timeout">Termux did not answer within 15 s. Most likely allow-external-apps is not enabled yet — run step 3, then fully restart Termux (Exit in its notification).</string>
     <string name="setup_command">curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash</string>
     <string name="setup_command_copied">Command copied. In Termux: long-press → Paste → Enter. It finds your vault and sets up everything by itself.</string>
