@@ -31,6 +31,7 @@ var import_obsidian12 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
+var RUNNER_MIN_VERSION = 2;
 var DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
 var RUNTIME_DIR_NAME = "runtime";
 var REQUESTS_DIR = "requests";
@@ -47,6 +48,7 @@ var SPARSE_SAFETY_WARNING = "Sparse checkout safety check failed. The excluded d
 var STORAGE_PREFIX = "ngb:v1";
 var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
 var PAIRING_FILE = "pairing.json";
+var RUNNER_OUTDATED_HINT = "The Termux runner script is outdated. Updating the plugin does not update it \u2014 re-run the install command in Termux (Settings -> Native Git Bridge -> Copy command, or the 'Set up Termux' button in the companion app).";
 
 // src/types.ts
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
@@ -478,8 +480,9 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     }
     containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
     const cmd = s.repoPathHint ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"` : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
-    const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
-    cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
+    const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
+    cmdBox.setText(cmd);
+    cmdBox.setAttribute("aria-label", "Install command");
     new import_obsidian3.Setting(containerEl).setName("Install command").setDesc(
       "Install Termux (F-Droid) and the Git Bridge Companion app, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you."
     ).addButton(
@@ -1911,6 +1914,13 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     this.runningAction = null;
     this.lastStatus = null;
     this.lastAutoSyncMs = 0;
+    /**
+     * Warn once per session when the Termux-side runner predates this plugin
+     * build. Updating main.js in the vault does not touch the runner script, so a
+     * stale runner is a genuinely common failure mode (it shows up as
+     * RUNNER_INTERNAL / serialization errors).
+     */
+    this.runnerVersionWarned = false;
   }
   async onload() {
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
@@ -2304,6 +2314,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       }
       const result = waited.result;
       await this.client.consume(req.id);
+      this.checkRunnerVersion(result);
       this.log.add(
         result.ok ? "info" : "error",
         action,
@@ -2324,6 +2335,21 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       this.refreshStatusBarIdle();
       this.pushStatusToView();
     }
+  }
+  checkRunnerVersion(result) {
+    const version = typeof result.runnerVersion === "number" ? result.runnerVersion : 1;
+    if (version >= RUNNER_MIN_VERSION || this.runnerVersionWarned) return;
+    this.runnerVersionWarned = true;
+    this.log.add("warn", "compat", `Runner version ${version} < required ${RUNNER_MIN_VERSION}.`);
+    new ResultModal(
+      this.app,
+      "Termux runner is outdated",
+      [
+        `Runner version: ${version} \u2014 this plugin needs ${RUNNER_MIN_VERSION}.`,
+        RUNNER_OUTDATED_HINT
+      ],
+      { isError: true }
+    ).open();
   }
   makeTransport() {
     return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
@@ -2764,6 +2790,9 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
       `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
     ];
+    if (/ERROR building result for [^(]*$/m.test(report.runnerLogTail)) {
+      lines.splice(1, 0, "", `Detected an OUTDATED runner in the log. ${RUNNER_OUTDATED_HINT}`);
+    }
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
     new ResultModal(this.app, "Bridge check", lines, {
       stdout: report.runnerLogTail || void 0,
@@ -2860,6 +2889,12 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       if (result?.ok && result.data) {
         report.runnerSide = {};
         for (const [k, v] of Object.entries(result.data)) report.runnerSide[k] = v;
+        const rv = Number(result.data.runnerVersion ?? result.runnerVersion ?? 1);
+        if (!Number.isNaN(rv) && rv < RUNNER_MIN_VERSION) {
+          report.problems.push(
+            `Termux runner is version ${rv}, this plugin needs ${RUNNER_MIN_VERSION}. ${RUNNER_OUTDATED_HINT}`
+          );
+        }
         if (result.data.sparseEnabled?.trim() !== "true") {
           report.problems.push("core.sparseCheckout is not 'true' in the repository.");
         }

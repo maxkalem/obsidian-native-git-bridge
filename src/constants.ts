@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 1;
+export const RUNNER_MIN_VERSION = 2;
 
 export const DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
 
@@ -27,3 +27,9 @@ export const STORAGE_PREFIX = "ngb:v1";
 /** Raw base URL for the one-line Termux bootstrap (used only for display/copy in settings). */
 export const REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
 export const PAIRING_FILE = "pairing.json";
+
+/** Shown whenever the Termux-side runner is older than RUNNER_MIN_VERSION. */
+export const RUNNER_OUTDATED_HINT =
+  "The Termux runner script is outdated. Updating the plugin does not update it — " +
+  "re-run the install command in Termux (Settings -> Native Git Bridge -> Copy command, " +
+  "or the 'Set up Termux' button in the companion app).";

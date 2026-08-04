@@ -35,8 +35,10 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     const cmd = s.repoPathHint
       ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"`
       : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
-    const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
-    cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
+    // A dedicated class (not <pre>) so long URLs wrap on narrow phone screens.
+    const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
+    cmdBox.setText(cmd);
+    cmdBox.setAttribute("aria-label", "Install command");
     new Setting(containerEl)
       .setName("Install command")
       .setDesc(

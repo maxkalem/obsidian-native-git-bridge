@@ -327,6 +327,25 @@ git rm -rq --cached Bulk >/dev/null 2>&1 || true
 rm -rf Bulk
 git commit -qm "bulk: remove" >/dev/null 2>&1 || true
 
+echo "# concurrency: two runners must not process the same request twice"
+req "r-20260804T150000Z-conc01" status "$TOKEN"
+bash "$RUNNER" & bash "$RUNNER" & wait
+DONE_COUNT="$(grep -c "DONE r-20260804T150000Z-conc01" "$RUNTIME/runner.log" || true)"
+check '[ "$DONE_COUNT" = "1" ]' "request processed exactly once (got $DONE_COUNT DONE lines)"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150000Z-conc01.json" >/dev/null' "result still produced under concurrency"
+check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drained"
+check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
+
+echo "# handshake: runner reports its protocol version"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "2" ]' "runnerVersion = 2 reported to the plugin"
+
+echo "# resilience: interrupted requests are requeued on the next run"
+req "r-20260804T150100Z-intr01" status "$TOKEN"
+mkdir -p "$RUNTIME/processing"
+mv "$RUNTIME/requests/r-20260804T150100Z-intr01.json" "$RUNTIME/processing/"
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150100Z-intr01.json" >/dev/null' "interrupted request recovered and completed"
+
 echo "# test: runner exits (no daemon) and log has no token"
 check '! grep -q "$TOKEN" "$RUNTIME/runner.log"' "token never written to runner.log"
 

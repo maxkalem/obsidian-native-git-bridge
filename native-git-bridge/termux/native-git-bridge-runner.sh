@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=1
+RUNNER_VERSION=2
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -32,11 +32,13 @@ cd "$NGB_REPO_DIR" 2>/dev/null || die "repo dir not accessible: $NGB_REPO_DIR"
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git work tree: $NGB_REPO_DIR"
 
 REQ_DIR="$NGB_RUNTIME_DIR/requests"
+PROC_DIR="$NGB_RUNTIME_DIR/processing"
+LOCK_DIR="$NGB_RUNTIME_DIR/.runner.lock"
 RES_DIR="$NGB_RUNTIME_DIR/results"
 CAN_DIR="$NGB_RUNTIME_DIR/cancel"
 DONE_DIR="$NGB_RUNTIME_DIR/done"
 LOG_FILE="$NGB_RUNTIME_DIR/runner.log"
-mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR"
+mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR"
 
 log() {
   # Never log tokens or credentialed URLs.
@@ -798,7 +800,37 @@ cleanup_old() {
 
 # ---- main --------------------------------------------------------------------
 
+# Only one runner instance may drain the queue: two triggers arriving close
+# together previously processed the same request twice (visible as duplicate
+# DONE lines in the log). mkdir is atomic, so it is a safe lock primitive.
+acquire_lock() {
+  local waited=0
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    # Reclaim a lock left behind by a killed process (older than 10 minutes).
+    if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +10 2>/dev/null)" ]; then
+      log "LOCK stale lock reclaimed"
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
+    sleep 1
+    waited=$((waited + 1))
+    if [ "$waited" -ge 20 ]; then
+      log "LOCK another runner is active; exiting without processing"
+      exit 0
+    fi
+  done
+  trap 'rm -rf "$LOCK_DIR"; json_cleanup' EXIT
+}
+
+acquire_lock
+
+# Requests interrupted mid-flight (device killed Termux) are retried once.
 shopt -s nullglob
+for stale in "$PROC_DIR"/*.json; do
+  log "RECOVER requeueing interrupted request $(basename "$stale")"
+  mv "$stale" "$REQ_DIR/" 2>/dev/null || rm -f "$stale"
+done
+
 pending=("$REQ_DIR"/*.json)
 if [ "${#pending[@]}" -eq 0 ]; then
   log "RUN no pending requests"
@@ -806,7 +838,13 @@ else
   # oldest first (ids embed a UTC timestamp, so lexical sort is chronological)
   mapfile -t sorted < <(printf '%s\n' "${pending[@]}" | sort)
   for f in "${sorted[@]}"; do
-    process_request "$f"
+    # Claim atomically: if another process took it first, mv fails and we skip.
+    claimed="$PROC_DIR/$(basename "$f")"
+    if mv "$f" "$claimed" 2>/dev/null; then
+      process_request "$claimed"
+    else
+      log "SKIP $(basename "$f") already claimed"
+    fi
   done
 fi
 cleanup_old

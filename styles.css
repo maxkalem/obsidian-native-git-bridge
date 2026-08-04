@@ -130,3 +130,21 @@
 .ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }
 
 .ngb-sv-toolbar { justify-content: space-between; }
+
+/* Install command block: must wrap inside narrow settings panes */
+.ngb-cmd {
+  font-family: var(--font-monospace);
+  font-size: var(--font-smaller);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: var(--size-4-2);
+  margin: var(--size-4-2) 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  user-select: all;
+  max-width: 100%;
+}
+/* Same guarantee for any monospace output rendered in modals */
+.ngb-mono, .ngb-output pre { overflow-wrap: anywhere; }
