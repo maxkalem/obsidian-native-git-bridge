@@ -17,8 +17,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
       - name: Build debug APK
         run: gradle -p companion :app:assembleDebug
+      - name: Name the APK after the version it was built from
+        run: |
+          V=$(jq -r .version manifest.json)
+          cp companion/app/build/outputs/apk/debug/app-debug.apk \
+             "git-bridge-companion-$V-debug.apk"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v5
         with:
           name: git-bridge-companion-debug-apk
-          path: companion/app/build/outputs/apk/debug/app-debug.apk
+          path: git-bridge-companion-*-debug.apk

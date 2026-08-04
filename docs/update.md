@@ -35,9 +35,14 @@ touched.
 
 ## Updating the companion app
 
-Only needed when a release says so (it changes rarely). Note Android's
-signature rule: a debug APK and a signed release APK cannot update each other —
-uninstall the old one first (the companion holds no state, nothing is lost).
+The companion carries the **same version number as the release**, so
+"companion 0.5.2" belongs to plugin 0.5.2 — if the numbers differ, the
+companion is the older part. It changes rarely, so a release usually says
+whether updating it matters.
+
+Note Android's signature rule: a debug APK and a signed release APK cannot
+update each other — uninstall the old one first (the companion holds no state,
+nothing is lost). Two signed APKs update over each other normally.
 
 ## After any update
 

@@ -45,6 +45,12 @@ class SetupActivity : Activity() {
     private lateinit var detail: TextView
     /** Raw Termux error, kept small and secondary (for bug reports only). */
     private lateinit var technical: TextView
+    /** "Plugin x.y.z · Runner vN" line under the title. */
+    private lateinit var versions: TextView
+    /** Which of the three parts needs updating (empty when they agree). */
+    private lateinit var mismatch: TextView
+    /** Shown only when THIS app is the outdated part. */
+    private lateinit var updateButton: TextView
 
     private var probeInFlight = false
     /** True when the current probe was started by the Test button: its outcome is toasted. */
@@ -104,12 +110,43 @@ class SetupActivity : Activity() {
             setPadding(pad, pad, pad, pad)
         }
 
-        root.addView(TextView(this).apply {
+        // Title row: name on the left, THIS app's version top-right; the
+        // plugin/runner versions go underneath. The companion cannot read the
+        // vault, so those two arrive as URI parameters when Obsidian opens
+        // this screen (display only) — otherwise they read "unknown".
+        val titleRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        titleRow.addView(TextView(this).apply {
             text = getString(R.string.app_name)
             textSize = 22f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(c(R.color.text_normal))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
+        titleRow.addView(TextView(this).apply {
+            text = "v" + appVersion()
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(c(R.color.text_muted))
+        })
+        root.addView(titleRow)
+
+        versions = TextView(this).apply {
+            textSize = 12f
+            setTextColor(c(R.color.text_muted))
+            setPadding(0, dp(2f), 0, 0)
+        }
+        root.addView(versions)
+
+        mismatch = TextView(this).apply {
+            textSize = 13f
+            setTextColor(c(R.color.danger))
+            setPadding(0, dp(6f), 0, 0)
+        }
+        root.addView(mismatch)
+
         root.addView(sectionHeader(R.string.setup_title))
 
         step1 = makeStepRow("1", null)
@@ -146,6 +183,13 @@ class SetupActivity : Activity() {
         root.addView(technical)
 
         root.addView(sectionHeader(R.string.section_actions))
+        // Only shown when this app is the outdated part (see renderVersions).
+        updateButton = actionButton(R.string.btn_update_companion, primary = true) {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(BridgeActivity.APK_URL)))
+            Toast.makeText(this, R.string.update_hint, Toast.LENGTH_LONG).show()
+        }
+        updateButton.visibility = android.view.View.GONE
+        root.addView(updateButton)
         root.addView(actionButton(R.string.btn_test, primary = true) { startProbe(manual = true) })
         root.addView(actionButton(R.string.btn_app_settings, primary = false) {
             startActivity(
@@ -297,8 +341,16 @@ class SetupActivity : Activity() {
 
     // ---- probe (unchanged logic) ------------------------------------------
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        storeReportedVersions(intent)
+        renderVersions()
+    }
+
     override fun onResume() {
         super.onResume()
+        storeReportedVersions(intent)
+        renderVersions()
         refresh()
         if (TermuxForwarder.isTermuxInstalled(this) && TermuxForwarder.hasPermission(this)) {
             startProbe(manual = false)
@@ -371,10 +423,86 @@ class SetupActivity : Activity() {
 
     private fun prefs() = getSharedPreferences("setup-state", MODE_PRIVATE)
 
+    private fun appVersion(): String = try {
+        packageManager.getPackageInfo(packageName, 0).versionName ?: "?"
+    } catch (e: Exception) {
+        "?"
+    }
+
+    /**
+     * Remember the plugin/runner versions Obsidian passed in, so they still
+     * show after the user leaves and comes back (e.g. via the launcher).
+     */
+    private fun storeReportedVersions(intent: Intent?) {
+        val pv = intent?.getStringExtra(EXTRA_PLUGIN_VERSION)
+        val rv = intent?.getStringExtra(EXTRA_RUNNER_VERSION)
+        val rmin = intent?.getStringExtra(EXTRA_RUNNER_MIN)
+        if (pv.isNullOrEmpty() && rv.isNullOrEmpty()) return
+        prefs().edit()
+            .putString(KEY_PLUGIN_VERSION, pv ?: "")
+            .putString(KEY_RUNNER_VERSION, rv ?: "")
+            .putString(KEY_RUNNER_MIN, rmin ?: "")
+            .apply()
+    }
+
+    private fun renderVersions() {
+        val pv = prefs().getString(KEY_PLUGIN_VERSION, "") ?: ""
+        val rv = prefs().getString(KEY_RUNNER_VERSION, "") ?: ""
+        val rmin = prefs().getString(KEY_RUNNER_MIN, "") ?: ""
+        val pluginText = if (pv.isEmpty()) getString(R.string.ver_unknown) else pv
+        val runnerNum = rv.toIntOrNull() ?: 0
+        val runnerMin = rmin.toIntOrNull() ?: 0
+        val runnerText = when {
+            runnerNum == 0 -> getString(R.string.ver_unknown)
+            runnerMin != 0 && runnerNum != runnerMin -> getString(R.string.ver_runner_stale, rv, rmin)
+            else -> "v$rv"
+        }
+        versions.text = getString(R.string.ver_line, pluginText, runnerText)
+
+        // The same three-way check the plugin does, repeated here because the
+        // user may open this screen directly from the launcher and expects the
+        // verdict where the numbers are shown.
+        val cmp = if (pv.isEmpty()) 0 else compareVersions(pv, appVersion())
+        // This app is the outdated part: offer the download right here. It can
+        // open the real default browser, which Obsidian's in-app tab cannot do
+        // reliably (its downloads are discarded when the tab closes).
+        updateButton.visibility =
+            if (cmp > 0) android.view.View.VISIBLE else android.view.View.GONE
+        mismatch.text = when {
+            cmp < 0 -> getString(R.string.ver_update_plugin, pv, appVersion())
+            cmp > 0 -> getString(R.string.ver_update_companion, appVersion(), pv)
+            runnerNum != 0 && runnerMin != 0 && runnerNum < runnerMin ->
+                getString(R.string.ver_update_runner, rv, rmin)
+            runnerNum != 0 && runnerMin != 0 && runnerNum > runnerMin ->
+                getString(R.string.ver_update_plugin_for_runner, rv, rmin)
+            else -> ""
+        }
+    }
+
+    /** Compare dotted numeric versions; junk parts count as 0 (never invents a mismatch). */
+    private fun compareVersions(a: String, b: String): Int {
+        val pa = a.split(".")
+        val pb = b.split(".")
+        for (i in 0 until maxOf(pa.size, pb.size)) {
+            val na = pa.getOrNull(i)?.toIntOrNull() ?: 0
+            val nb = pb.getOrNull(i)?.toIntOrNull() ?: 0
+            if (na != nb) return if (na < nb) -1 else 1
+        }
+        return 0
+    }
+
     companion object {
         private const val REQ_PERMISSION = 42
         private const val ACTION_PROBE_RESULT = "dev.nativegitbridge.companion.PROBE_RESULT"
         private const val KEY_PROBE_OK = "probeOk"
         private const val KEY_PROBE_MSG = "probeMsg"
+        private const val KEY_PLUGIN_VERSION = "pluginVersion"
+        private const val KEY_RUNNER_VERSION = "runnerVersion"
+        private const val KEY_RUNNER_MIN = "runnerMin"
+
+        /** Display-only metadata forwarded by BridgeActivity from the setup URI. */
+        const val EXTRA_PLUGIN_VERSION = "pluginVersion"
+        const val EXTRA_RUNNER_VERSION = "runnerVersion"
+        const val EXTRA_RUNNER_MIN = "runnerMin"
     }
 }

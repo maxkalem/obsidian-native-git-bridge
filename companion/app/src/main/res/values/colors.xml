@@ -10,4 +10,5 @@
     <color name="on_accent">#FFFFFF</color>
     <color name="success">#08B94E</color>
     <color name="border">#E0E0E0</color>
+    <color name="danger">#E93147</color>
 </resources>

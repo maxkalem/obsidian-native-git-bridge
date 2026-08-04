@@ -15,9 +15,9 @@ import android.widget.Toast
 class BridgeActivity : Activity() {
 
     companion object {
-        /** Newest signed companion APK (GitHub keeps this path stable). */
+        /** Latest release page — the versioned companion APK is listed there. */
         const val APK_URL =
-            "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/git-bridge-companion.apk"
+            "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest"
 
         /** Official Termux site: lists the supported download sources. */
         const val TERMUX_SITE_URL = "https://termux.dev"
@@ -38,7 +38,13 @@ class BridgeActivity : Activity() {
             // ack is sent FIRST so the setup screen lands on top of Obsidian.
             uri.host == "setup" -> {
                 ackObsidian("setup")
-                startActivity(Intent(this, SetupActivity::class.java))
+                // Forward the display-only version metadata (numbers only).
+                startActivity(
+                    Intent(this, SetupActivity::class.java)
+                        .putExtra(SetupActivity.EXTRA_PLUGIN_VERSION, uri.getQueryParameter("pv"))
+                        .putExtra(SetupActivity.EXTRA_RUNNER_VERSION, uri.getQueryParameter("rv"))
+                        .putExtra(SetupActivity.EXTRA_RUNNER_MIN, uri.getQueryParameter("rmin"))
+                )
             }
             // One-tap fix path: bring Termux to the foreground so the user can
             // paste the install command. Falls back to the official site when
@@ -113,11 +119,16 @@ class BridgeActivity : Activity() {
         // `termux` tells the plugin whether Termux is installed — the WebView
         // cannot query other packages, but this app can (declared in <queries>).
         val termux = if (TermuxForwarder.isTermuxInstalled(this)) "1" else "0"
+        val cv = try {
+            packageManager.getPackageInfo(packageName, 0).versionName ?: ""
+        } catch (e: Exception) {
+            ""
+        }
         try {
             startActivity(
                 Intent(
                     Intent.ACTION_VIEW,
-                    Uri.parse("obsidian://native-git-bridge-ack?src=$src&termux=$termux")
+                    Uri.parse("obsidian://native-git-bridge-ack?src=$src&termux=$termux&cv=$cv")
                 )
             )
         } catch (e: Exception) {

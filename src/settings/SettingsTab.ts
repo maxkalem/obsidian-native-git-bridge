@@ -3,7 +3,7 @@ import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
 import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
-import { REPO_RAW_BASE } from "../constants";
+import { REPO_RAW_BASE, RUNNER_MIN_VERSION } from "../constants";
 import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
@@ -30,6 +30,48 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "Android device (they are stored per device and never synced through the vault).",
       });
       return;
+    }
+
+    // Versions first: three parts update independently, so "which versions do
+    // I actually have here" is the first question when something misbehaves.
+    const advice = this.plugin.versionAdvice();
+    const stale = (part: "plugin" | "companion" | "runner") => advice.some((a) => a.part === part);
+    const badge = (text: string, part: "plugin" | "companion" | "runner") =>
+      ver.createSpan({
+        cls: stale(part) ? "ngb-version-badge ngb-version-stale" : "ngb-version-badge",
+        text,
+      });
+
+    const ver = containerEl.createDiv({ cls: "ngb-version-row" });
+    badge(`Plugin ${this.plugin.manifest.version}`, "plugin");
+    const rv = this.plugin.lastRunnerVersion;
+    // "needs vN" only when it actually differs — otherwise it reads like a problem.
+    badge(
+      rv === 0
+        ? `Runner: unknown`
+        : rv === RUNNER_MIN_VERSION
+          ? `Runner v${rv}`
+          : `Runner v${rv} (needs v${RUNNER_MIN_VERSION})`,
+      "runner"
+    );
+    badge(
+      this.plugin.lastCompanionVersion !== ""
+        ? `Companion ${this.plugin.lastCompanionVersion}`
+        : "Companion: not seen yet",
+      "companion"
+    );
+
+    for (const a of advice) {
+      const box = containerEl.createDiv({ cls: "ngb-warning" });
+      box.createDiv({ text: a.text });
+      const btns = box.createDiv({ cls: "ngb-add-row" });
+      if (a.part === "runner") {
+        const b = btns.createEl("button", { text: "Copy command & open Termux", cls: "mod-cta" });
+        b.addEventListener("click", () => this.plugin.copyCommandAndOpenTermux());
+      } else {
+        const b = btns.createEl("button", { text: "Open latest release", cls: "mod-cta" });
+        b.addEventListener("click", () => this.plugin.openLatestRelease());
+      }
     }
 
     containerEl.createEl("p", {

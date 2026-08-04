@@ -27,6 +27,15 @@ export type BridgeAction =
   | "exclude-remove"
   | "exclude-list";
 
+/** Actions that only exist from runner v4 on (config management). */
+export const RUNNER4_ACTIONS: ReadonlySet<BridgeAction> = new Set([
+  "sparse-exclude-add",
+  "sparse-exclude-remove",
+  "exclude-add",
+  "exclude-remove",
+  "exclude-list",
+]);
+
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
   "ping",
   "status",

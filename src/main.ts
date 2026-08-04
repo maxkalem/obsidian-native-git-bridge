@@ -12,7 +12,7 @@ import type {
   OperationMarker,
   SparseStateSummary,
 } from "./types";
-import { MUTATING_ACTIONS } from "./types";
+import { MUTATING_ACTIONS, RUNNER4_ACTIONS } from "./types";
 import {
   DeviceLocalSettingsStore,
   type DeviceLocalSettings,
@@ -56,7 +56,6 @@ import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView"
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
 import {
-  COMPANION_APK_URL,
   COMPANION_DOWNLOAD_APK_URI,
   COMPANION_GET_TERMUX_URI,
   COMPANION_OPEN_TERMUX_URI,
@@ -100,6 +99,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     // ---- device-local settings (never synced through the vault) ----
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
     this.deviceSettings = this.store.read();
+    this.lastRunnerVersion = Number(this.store.getValue("last-runner-version") ?? 0) || 0;
+    this.lastCompanionVersion = this.store.getValue("last-companion-version") ?? "";
     this.log = new OperationLog(this.store);
 
     // ---- shared, non-device-specific UI prefs only ----
@@ -617,7 +618,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     // deterministic "companion installed and reachable" signal.
     this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
       const p = params as Record<string, string> | undefined;
-      this.onCompanionAck(p?.src, p?.termux);
+      this.onCompanionAck(p?.src, p?.termux, p?.cv);
     });
   }
 
@@ -652,6 +653,35 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     if (!s.authToken) {
       this.openSetupGuide("This device is not paired with a Termux runner yet.");
+      return null;
+    }
+    // Actions introduced with a newer runner would come back as a bare
+    // BAD_REQUEST ("action not allowed") from an old one, which reads like a
+    // plugin bug. Name the real cause before spending a round trip.
+    if (
+      this.lastRunnerVersion > 0 &&
+      this.lastRunnerVersion < RUNNER_MIN_VERSION &&
+      RUNNER4_ACTIONS.has(action)
+    ) {
+      new ResultModal(
+        this.app,
+        "Termux runner is too old for this action",
+        [
+          `'${action}' needs runner v${RUNNER_MIN_VERSION}; this device answers with v${this.lastRunnerVersion}.`,
+          RUNNER_OUTDATED_HINT,
+        ],
+        {
+          isError: true,
+          actions: [
+            {
+              label: "Copy command & open Termux",
+              cta: true,
+              keepOpen: true,
+              onClick: () => this.copyCommandAndOpenTermux(),
+            },
+          ],
+        }
+      ).open();
       return null;
     }
 
@@ -761,8 +791,16 @@ export default class NativeGitBridgePlugin extends Plugin {
    */
   private runnerVersionWarned = false;
   private companionSetupAutoOpened = false;
+  /** Last runner version reported by a result (0 = never heard from). */
+  lastRunnerVersion = 0;
   private checkRunnerVersion(result: BridgeResult): void {
     const version = typeof result.runnerVersion === "number" ? result.runnerVersion : 1;
+    // Remembered device-locally so settings/diagnostics can show it without a
+    // round trip, and so the companion can be told which runner answers here.
+    if (typeof result.runnerVersion === "number" && result.runnerVersion !== this.lastRunnerVersion) {
+      this.lastRunnerVersion = result.runnerVersion;
+      this.store.setValue("last-runner-version", String(result.runnerVersion));
+    }
     if (version >= RUNNER_MIN_VERSION || this.runnerVersionWarned) return;
     this.runnerVersionWarned = true;
     this.log.add("warn", "compat", `Runner version ${version} < required ${RUNNER_MIN_VERSION}.`);
@@ -826,6 +864,8 @@ export default class NativeGitBridgePlugin extends Plugin {
   private lastCompanionAckMs = 0;
   /** What the companion reported about Termux (null until the first ack). */
   lastAckTermuxInstalled: boolean | null = null;
+  /** Companion version from its ack ("" until one arrives). */
+  lastCompanionVersion = "";
   private ackWaiters: Array<() => void> = [];
 
   /**
@@ -835,10 +875,14 @@ export default class NativeGitBridgePlugin extends Plugin {
    * (the WebView cannot query other packages; the companion can). Registered
    * in onload.
    */
-  onCompanionAck(src?: string, termux?: string): void {
+  onCompanionAck(src?: string, termux?: string, companionVersion?: string): void {
     this.lastCompanionAckMs = Date.now();
     if (termux === "1") this.lastAckTermuxInstalled = true;
     else if (termux === "0") this.lastAckTermuxInstalled = false;
+    if (companionVersion && /^[0-9.]{1,16}$/.test(companionVersion)) {
+      this.lastCompanionVersion = companionVersion;
+      this.store.setValue("last-companion-version", companionVersion);
+    }
     this.log.add(
       "info",
       "companion",
@@ -912,7 +956,11 @@ export default class NativeGitBridgePlugin extends Plugin {
       return;
     }
     this.log.add("info", "companion", "Opening companion setup checklist.");
-    this.openExternalUri(COMPANION_SETUP_URI);
+    // Version metadata for display only: the companion has no access to the
+    // vault, so it cannot learn the plugin/runner versions any other way.
+    // Numbers only — no paths, no token, nothing the companion acts upon.
+    const q = `?pv=${encodeURIComponent(this.manifest.version)}&rv=${this.lastRunnerVersion}&rmin=${RUNNER_MIN_VERSION}`;
+    this.openExternalUri(COMPANION_SETUP_URI + q);
     if (await this.probeCompanion()) return;
     this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
     new ResultModal(
@@ -922,8 +970,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
         "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
         "Copy the link below and paste it into your browser (Chrome/Firefox). That is the reliable route here: with no companion installed, Obsidian can only open its built-in browser tab, whose downloads are often discarded when the tab closes — so the APK never reaches Downloads.",
-        `Direct APK: ${COMPANION_APK_URL}`,
-        `All assets: ${COMPANION_RELEASES_URL}`,
+        `Latest release (companion APK): ${COMPANION_RELEASES_URL}`,
         "After installing, grant the 'Run commands in Termux environment' permission in the companion, then try again.",
       ],
       {
@@ -933,14 +980,14 @@ export default class NativeGitBridgePlugin extends Plugin {
             cta: true,
             keepOpen: true,
             onClick: () => {
-              void navigator.clipboard.writeText(COMPANION_APK_URL);
-              new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+              void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
+              new Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
             },
           },
           {
             label: "Try opening in browser",
             keepOpen: true,
-            onClick: () => this.openUrlPreferCompanion(COMPANION_DOWNLOAD_APK_URI, COMPANION_APK_URL),
+            onClick: () => this.openUrlPreferCompanion(COMPANION_DOWNLOAD_APK_URI, COMPANION_RELEASES_URL),
           },
         ],
       }
@@ -1584,7 +1631,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       "3. One command pasted into Termux — it installs the runner and pairs this plugin automatically (no token typing).",
       "",
       `Termux: ${TERMUX_SITE_URL} (direct: ${TERMUX_FDROID_URL})`,
-      `Companion APK: ${COMPANION_APK_URL}`,
+      `Companion APK: ${COMPANION_RELEASES_URL}`,
       "",
       "Current state on this device:",
       `Enabled here: ${s.enabledOnThisDevice ? "yes" : "NO (turn it on in settings)"}`,
@@ -1600,11 +1647,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         onClick: () => this.openUrlPreferCompanion(COMPANION_GET_TERMUX_URI, TERMUX_SITE_URL),
       },
       {
-        label: "Copy companion APK link",
+        label: "Copy release link",
         keepOpen: true,
         onClick: () => {
-          void navigator.clipboard.writeText(COMPANION_APK_URL);
-          new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+          void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
+          new Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
         },
       },
       {
@@ -1634,12 +1681,52 @@ export default class NativeGitBridgePlugin extends Plugin {
     new ResultModal(this.app, "Set up Native Git Bridge", lines, { actions }).open();
   }
 
+  /**
+   * Version advice for the three independently updated parts. Until Obsidian
+   * itself offers the update (this plugin is not in the community catalogue
+   * yet), a mismatch can only be reported — never auto-fixed.
+   */
+  versionAdvice(): Array<{ text: string; part: "plugin" | "companion" | "runner" }> {
+    const out: Array<{ text: string; part: "plugin" | "companion" | "runner" }> = [];
+    const plugin = this.manifest.version;
+    const companion = this.lastCompanionVersion;
+    if (companion !== "") {
+      const cmp = compareVersions(plugin, companion);
+      if (cmp < 0) {
+        out.push({
+          part: "plugin",
+          text: `The plugin (${plugin}) is OLDER than the companion app (${companion}). Update the plugin: download main.js, manifest.json and styles.css from the latest release into .obsidian/plugins/native-git-bridge/, then reload the plugin.`,
+        });
+      } else if (cmp > 0) {
+        out.push({
+          part: "companion",
+          text: `The companion app (${companion}) is OLDER than the plugin (${plugin}). Install the newest APK from the latest release (it updates over the current one).`,
+        });
+      }
+    }
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion !== RUNNER_MIN_VERSION) {
+      out.push({
+        part: "runner",
+        text:
+          this.lastRunnerVersion < RUNNER_MIN_VERSION
+            ? `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux — updating the plugin never updates the runner.`
+            : `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin expects (v${RUNNER_MIN_VERSION}). Update the plugin from the latest release.`,
+      });
+    }
+    return out;
+  }
+
   /** The one-line Termux install command (same one settings shows). */
   installCommand(): string {
     const hint = this.deviceSettings.repoPathHint;
     return hint
       ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${hint}"`
       : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+  }
+
+  /** Open the latest release page (companion APK + plugin files live there). */
+  openLatestRelease(): void {
+    this.openUrlPreferCompanion(COMPANION_DOWNLOAD_APK_URI, COMPANION_RELEASES_URL);
   }
 
   /** Copy the install command, then bring Termux to the front (via the companion). */
@@ -1665,6 +1752,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
       `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
     );
+    for (const a of this.versionAdvice()) lines.push("", a.text);
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
 
     // One-tap fixes instead of prose. Which buttons appear depends on what the
@@ -1705,11 +1793,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         // No companion has answered: it cannot fetch its own update, so hand
         // the user a link they can paste into a real browser.
         actions.push({
-          label: "Copy companion APK link",
+          label: "Copy release link",
           keepOpen: true,
           onClick: () => {
-            void navigator.clipboard.writeText(COMPANION_APK_URL);
-            new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+            void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
+            new Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
           },
         });
       } else {
@@ -1864,6 +1952,22 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     this.activeCancel.cancel();
   }
+}
+
+/**
+ * Compare dotted numeric versions ("0.5.2"). Returns <0 if a is older, 0 if
+ * equal, >0 if newer. Non-numeric parts count as 0, so a malformed value can
+ * never make the plugin claim a mismatch it cannot justify.
+ */
+export function compareVersions(a: string, b: string): number {
+  const pa = a.split(".");
+  const pb = b.split(".");
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const na = Number.parseInt(pa[i] ?? "0", 10) || 0;
+    const nb = Number.parseInt(pb[i] ?? "0", 10) || 0;
+    if (na !== nb) return na < nb ? -1 : 1;
+  }
+  return 0;
 }
 
 function getLocalStorageBackend(): KeyValueBackend | null {

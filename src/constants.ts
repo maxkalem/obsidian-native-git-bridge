@@ -37,14 +37,12 @@ export const PAIRING_FILE = "pairing.json";
 export const COMPANION_SETUP_URI = "nativegitbridge://setup";
 
 /**
- * Direct download of the newest signed companion APK. GitHub keeps this URL
- * stable across releases ("latest/download/<asset>"); it 404s only when the
- * latest release lacks a signed APK — the releases page below is the fallback.
+ * The latest release page — where the companion APK (and the plugin files)
+ * live. A direct asset link was tried and dropped: Obsidian opens https in a
+ * Chrome Custom Tab whose download session is discarded when the tab closes,
+ * so the APK never arrived. The release page works everywhere, needs no
+ * fixed asset name, and lets the user pick the versioned APK.
  */
-export const COMPANION_APK_URL =
-  "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/git-bridge-companion.apk";
-
-/** Fallback: the releases page (always exists, lists every asset). */
 export const COMPANION_RELEASES_URL =
   "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
 
@@ -52,7 +50,7 @@ export const COMPANION_RELEASES_URL =
 export const COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
 
 /**
- * Asks the companion to open its own APK download in the REAL default browser.
+ * Asks the companion to open the release page in the REAL default browser.
  * Carries no payload — the companion holds the URL itself, so the URI keeps
  * its "no content, only intent" property. Needed because a download started
  * inside Obsidian's Chrome Custom Tab is frequently discarded when the tab

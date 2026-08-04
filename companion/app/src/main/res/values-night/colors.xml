@@ -9,4 +9,5 @@
     <color name="on_accent">#FFFFFF</color>
     <color name="success">#3FB950</color>
     <color name="border">#363636</color>
+    <color name="danger">#FF6B7A</color>
 </resources>

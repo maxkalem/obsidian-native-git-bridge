@@ -68,7 +68,7 @@ jobs:
           else
             gradle -p companion :app:assembleDebug
             cp companion/app/build/outputs/apk/debug/app-debug.apk \
-               git-bridge-companion-DEBUG-SIGNATURE.apk
+               "git-bridge-companion-${GITHUB_REF_NAME}-DEBUG-SIGNATURE.apk"
           fi
 
       # Signing runs only when the keystore secrets are configured — see
@@ -93,6 +93,10 @@ jobs:
             git-bridge-companion.apk
           "$BT/apksigner" verify git-bridge-companion.apk
           rm -f /tmp/ngb-release.jks
+          # Versioned name only: the plugin links to the RELEASE PAGE, not to a
+          # fixed asset (Obsidian's in-app browser tab discards direct APK
+          # downloads anyway), so no stable-name copy is needed.
+          mv git-bridge-companion.apk "git-bridge-companion-${GITHUB_REF_NAME}.apk"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -111,7 +115,6 @@ jobs:
             native-git-bridge/termux/native-git-bridge-runner.sh
             native-git-bridge/termux/install.sh
             native-git-bridge/termux/bootstrap.sh
-            git-bridge-companion-DEBUG-SIGNATURE.apk
-            git-bridge-companion.apk
+            git-bridge-companion-*.apk
         # The signed APK is only present when signing ran; softprops tolerates
         # missing patterns with fail_on_unmatched_files unset.

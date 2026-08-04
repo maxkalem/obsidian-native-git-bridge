@@ -1,6 +1,13 @@
 <resources>
     <string name="app_name">Git Bridge Companion</string>
     <string name="setup_title">Setup</string>
+    <string name="ver_line">Plugin %1$s · Runner %2$s</string>
+    <string name="ver_unknown">unknown</string>
+    <string name="ver_runner_stale">v%1$s (needs v%2$s)</string>
+    <string name="ver_update_plugin">⚠ The Obsidian plugin (%1$s) is older than this app (%2$s). Update the plugin from the latest GitHub release (main.js, manifest.json, styles.css), then reload it in Obsidian.</string>
+    <string name="ver_update_companion">⚠ This app (%1$s) is older than the Obsidian plugin (%2$s). Install the newest APK from the latest GitHub release — it updates over this one.</string>
+    <string name="ver_update_runner">⚠ The Termux runner (v%1$s) is older than the plugin needs (v%2$s). Tap step 3 above and run the install command in Termux — updating the plugin never updates the runner.</string>
+    <string name="ver_update_plugin_for_runner">⚠ The Termux runner (v%1$s) is newer than the plugin expects (v%2$s). Update the Obsidian plugin from the latest GitHub release.</string>
     <string name="section_actions">Actions</string>
     <string name="check_termux">Termux is installed</string>
     <string name="check_permission">Permission “Run commands in Termux environment” granted</string>
@@ -21,6 +28,8 @@
     <string name="probe_timeout">Termux did not answer within 15 s. Most likely allow-external-apps is not enabled yet — run step 3, then fully restart Termux (Exit in its notification).</string>
     <string name="setup_command">curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash</string>
     <string name="setup_command_copied">Command copied. In Termux: long-press → Paste → Enter. It finds your vault and sets up everything by itself.</string>
+    <string name="btn_update_companion">Download the newer version of this app</string>
+    <string name="update_hint">Opening the release page. Download the APK named git-bridge-companion-&lt;version&gt;.apk and install it over this app.</string>
     <string name="btn_test">Test: trigger the runner now</string>
     <string name="btn_app_settings">Open Android app settings</string>
     <string name="setup_help">One-time Termux step: tap step 3 above — it copies the install command and opens Termux; you only paste (long-press → Paste) and press Enter. The command finds your vault automatically, installs the runner, enables allow-external-apps and pairs with the Obsidian plugin.</string>

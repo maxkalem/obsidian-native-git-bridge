@@ -23,7 +23,7 @@ freshness check into noise.
 | `versions.json` | new `"x.y.z": "minAppVersion"` entry | Obsidian update mechanism (the build fails if the manifest version is missing here) |
 | `native-git-bridge/termux/native-git-bridge-runner.sh` | `RUNNER_VERSION` | handshake (bump only when the runner changes) |
 | `src/constants.ts` | `RUNNER_MIN_VERSION` | handshake (bump together with `RUNNER_VERSION`) |
-| `companion/app/build.gradle.kts` | `versionCode` / `versionName` | Android (bump only when the companion changes) |
+| `companion/app/build.gradle.kts` | — | derived automatically from the root `manifest.json` (`versionName` = release version, `versionCode` = major×10000 + minor×100 + patch); nothing to bump by hand |
 
 The `build-plugin` workflow fails if the first three disagree.
 

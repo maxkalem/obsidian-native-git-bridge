@@ -6,7 +6,7 @@ import {
   __resetObsidianMock,
   __setPlatformAndroid,
 } from "./mocks/obsidian";
-import NativeGitBridgePlugin from "../src/main";
+import NativeGitBridgePlugin, { compareVersions } from "../src/main";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
 
@@ -354,10 +354,14 @@ describe("runOperation round trip through the transport seam", () => {
     expect(__openedModals).toContain("ResultModal");
     expect(h.plugin.lock.active).toBeNull();
     // The companion setup checklist was opened to show which link is broken…
-    expect(h.runner.uris).toContain("nativegitbridge://setup");
+    expect(h.runner.uris.some((u: string) => u.startsWith("nativegitbridge://setup"))).toBe(true);
     // …but only once per session: a second timeout must not reopen it.
     await h.plugin.cmdStatus(true);
-    expect(h.runner.uris.filter((u) => u === "nativegitbridge://setup")).toHaveLength(1);
+    // The URI carries display-only version params (pv/rv/rmin), never content.
+    const setupUris = h.runner.uris.filter((u: string) => u.startsWith("nativegitbridge://setup"));
+    expect(setupUris).toHaveLength(1);
+    expect(setupUris[0]).toMatch(/[?&]pv=/);
+    expect(setupUris[0]).not.toContain("a1b2c3d4"); // never the token
     // Companion answered (app switch happened): drain the probe cleanly.
     (globalThis as Any).document.__goHidden();
     await new Promise((r) => setTimeout(r, 1));
@@ -367,7 +371,7 @@ describe("runOperation round trip through the transport seam", () => {
     const h = await loadPlugin();
     h.plugin.companionProbeMs = 5; // nobody will answer
     await h.plugin.openCompanionSetup();
-    expect(h.runner.uris).toContain("nativegitbridge://setup");
+    expect(h.runner.uris.some((u: string) => u.startsWith("nativegitbridge://setup"))).toBe(true);
     // A ResultModal with copy/open actions (a plain confirm cannot offer both).
     expect(__openedModals).toContain("ResultModal");
   });
@@ -409,7 +413,7 @@ describe("runOperation round trip through the transport seam", () => {
     // Companion is alive and acks the trigger, but Termux never answers.
     h.runner.onTrigger = () => h.plugin.onCompanionAck("run");
     await h.plugin.cmdStatus(true);
-    expect(h.runner.uris.filter((u) => u === "nativegitbridge://setup")).toHaveLength(0);
+    expect(h.runner.uris.filter((u: string) => u.startsWith("nativegitbridge://setup"))).toHaveLength(0);
     expect(__openedModals).toContain("ResultModal"); // the local self-check still surfaced
   });
 
@@ -510,6 +514,83 @@ describe("protected paths derived from sparse", () => {
     expect(h.plugin.effectiveProtectedPaths()).toEqual(["Manual/Pin", "Private/Hidden"]);
     await h.plugin.updateDeviceSettings({ protectedPaths: ["Manual/Pin"] });
     expect(h.plugin.effectiveProtectedPaths()).toEqual(["Manual/Pin"]);
+  });
+});
+
+describe("version advice across the three parts", () => {
+  it("stays silent when everything matches", async () => {
+    const h = await loadPlugin();
+    // manifest version in the harness is 0.4.0; make the companion match and
+    // the runner the expected one.
+    h.plugin.onCompanionAck("run", "1", "0.4.0");
+    h.plugin.lastRunnerVersion = 4;
+    expect(h.plugin.versionAdvice()).toEqual([]);
+  });
+
+  it("tells the user to update the PLUGIN when the companion is newer", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "1", "9.9.9");
+    const advice = h.plugin.versionAdvice();
+    expect(advice.map((a) => a.part)).toContain("plugin");
+    expect(advice.find((a) => a.part === "plugin")!.text).toMatch(/OLDER than the companion/);
+  });
+
+  it("tells the user to update the COMPANION when it is older", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "1", "0.1.0");
+    const advice = h.plugin.versionAdvice();
+    expect(advice.map((a) => a.part)).toContain("companion");
+  });
+
+  it("tells the user to re-run the Termux installer for a mismatched runner", async () => {
+    const h = await loadPlugin();
+    h.plugin.lastRunnerVersion = 3; // older than RUNNER_MIN_VERSION
+    const runner = h.plugin.versionAdvice().find((a) => a.part === "runner");
+    expect(runner!.text).toMatch(/Re-run the install command in Termux/);
+    // A newer-than-expected runner points at the plugin instead.
+    h.plugin.lastRunnerVersion = 99;
+    expect(h.plugin.versionAdvice().find((a) => a.part === "runner")!.text).toMatch(/NEWER/);
+  });
+
+  it("says nothing about the runner before one has ever answered", async () => {
+    const h = await loadPlugin();
+    expect(h.plugin.lastRunnerVersion).toBe(0);
+    expect(h.plugin.versionAdvice().some((a) => a.part === "runner")).toBe(false);
+  });
+});
+
+describe("outdated runner", () => {
+  it("refuses v4-only actions up front with a fix button, spending no round trip", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.plugin.lastRunnerVersion = 3; // pre-config-management runner
+    // "un-hide" takes no confirmation, so this reaches the guard directly.
+    await h.plugin.cmdSparseExclude("Notes/Sub", false);
+    expect(__openedModals).toContain("ResultModal");
+    expect(requestFiles(h.adapter)).toHaveLength(0); // never queued
+    expect(h.runner.uris).toHaveLength(0); // never triggered
+  });
+
+  it("still allows the ordinary actions an old runner does support", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.plugin.lastRunnerVersion = 3;
+    h.useFastClient();
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, 3));
+    };
+    await h.plugin.cmdStatus(true);
+    expect(h.runner.uris.some((u: string) => u.includes("run?id="))).toBe(true);
+  });
+});
+
+describe("compareVersions", () => {
+  it("orders dotted numeric versions and tolerates junk", () => {
+    expect(compareVersions("0.5.2", "0.5.2")).toBe(0);
+    expect(compareVersions("0.5.1", "0.5.2")).toBeLessThan(0);
+    expect(compareVersions("0.10.0", "0.9.9")).toBeGreaterThan(0);
+    expect(compareVersions("1.0", "1.0.0")).toBe(0);
+    expect(compareVersions("junk", "0.0.0")).toBe(0); // never invents a mismatch
   });
 });
 
