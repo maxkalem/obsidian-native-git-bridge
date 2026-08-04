@@ -110,9 +110,10 @@
 /* Directional thirds animation for pull/fetch (down) and push (up):
    a bright accent layer is clipped to one third of the glyph and steps along. */
 .ngb-sweep { position: relative; display: inline-flex; width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
-.ngb-sweep-base, .ngb-sweep-lit { position: absolute; inset: 0; display: inline-flex; }
+.ngb-sweep-base { position: absolute; inset: 0; display: inline-flex; }
+.ngb-sweep-lit  { position: absolute; left: 0; right: 0; display: inline-flex; }
 .ngb-sweep-base { color: var(--text-faint); }
-.ngb-sweep-base svg, .ngb-sweep-lit svg { width: 100% !important; height: 100% !important; }
+.ngb-sweep .ngb-sweep-base > svg, .ngb-sweep .ngb-sweep-lit > svg { width: 100%; height: 100%; }
 .ngb-sweep-base, .ngb-sweep-lit { align-items: center; justify-content: center; }
 .ngb-sweep-lit {
   color: var(--interactive-accent);
@@ -121,17 +122,22 @@
   animation-timing-function: steps(1, end);
   animation-iteration-count: infinite;
 }
+/* The lit layer lives inside a one-third-tall window that steps along the
+   glyph; the icon inside is offset so the visible slice changes. `overflow`
+   and `transform` are supported everywhere, unlike clip-path. */
+.ngb-sweep-lit { overflow: hidden; height: 33.34%; }
+.ngb-sweep-lit > svg { height: 300%; }
 .ngb-sweep-down { animation-name: ngb-thirds-down; }
 @keyframes ngb-thirds-down {
-  0%,   32.9% { clip-path: inset(0 0 66.7% 0); }
-  33.3%, 65.9% { clip-path: inset(33.3% 0 33.3% 0); }
-  66.6%, 100% { clip-path: inset(66.7% 0 0 0); }
+  0%,   32.9%  { top: 0;      }
+  33.3%, 65.9% { top: 33.33%; }
+  66.6%, 100%  { top: 66.66%; }
 }
 .ngb-sweep-up   { animation-name: ngb-thirds-up; }
 @keyframes ngb-thirds-up {
-  0%,   32.9% { clip-path: inset(66.7% 0 0 0); }
-  33.3%, 65.9% { clip-path: inset(33.3% 0 33.3% 0); }
-  66.6%, 100% { clip-path: inset(0 0 66.7% 0); }
+  0%,   32.9%  { top: 66.66%; }
+  33.3%, 65.9% { top: 33.33%; }
+  66.6%, 100%  { top: 0;      }
 }
 @media (prefers-reduced-motion: reduce) {
   .ngb-sweep-lit { animation-duration: 1.8s; }
@@ -193,3 +199,6 @@
   padding: 2px var(--size-4-2);
 }
 .ngb-version-stale { color: var(--color-red, #e93147); }
+
+/* Full-width textarea (was an inline style, which themes cannot override). */
+.ngb-textarea-full { width: 100%; }

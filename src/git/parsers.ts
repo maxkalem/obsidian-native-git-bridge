@@ -23,7 +23,7 @@ export function unquoteGitPath(raw: string): string {
       a: 7, b: 8, f: 12, n: 10, r: 13, t: 9, v: 11, "\\": 92, '"': 34,
     };
     if (simple[n] !== undefined) {
-      bytes.push(simple[n]!);
+      bytes.push(simple[n]);
       i += 2;
       continue;
     }

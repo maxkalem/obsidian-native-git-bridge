@@ -16,9 +16,8 @@ export class CommitMessageModal extends Modal {
     this.modalEl.addClass("ngb-modal");
     this.titleEl.setText(this.opts.title);
     const c = this.contentEl;
-    const ta = c.createEl("textarea", { cls: "ngb-mono" });
+    const ta = c.createEl("textarea", { cls: "ngb-mono ngb-textarea-full" });
     ta.rows = 3;
-    ta.style.width = "100%";
     ta.placeholder = this.opts.placeholder;
     ta.value = this.opts.initial ?? "";
     const note = c.createDiv({ cls: "ngb-invalid" });

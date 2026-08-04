@@ -104,10 +104,10 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "'Set up Termux' button that copies this command and opens Termux for you."
       )
       .addButton((b) =>
-        b.setButtonText("Copy command").setCta().onClick(async () => {
+        b.setButtonText("Copy command").setCta().onClick(() => { void (async () => {
           await navigator.clipboard.writeText(cmd);
           new Notice("Install command copied.");
-        })
+        })(); })
       );
 
     new Setting(containerEl)
@@ -133,19 +133,22 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .setName("Enable on this device")
       .setDesc("Master switch. Off by default on every new device.")
       .addToggle((t) =>
-        t.setValue(s.enabledOnThisDevice).onChange(async (v) => {
+        t.setValue(s.enabledOnThisDevice).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ enabledOnThisDevice: v });
-          this.display();
-        })
+          // Structure changes (the whole tab is hidden when disabled), so a
+          // full refresh is needed. Prefer update(): on 1.13+ re-calling the
+          // deprecated display() does not refresh declarative settings.
+          this.refreshTab();
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Termux integration")
       .setDesc("Allow this plugin to queue requests for the Termux runner.")
       .addToggle((t) =>
-        t.setValue(s.termuxIntegrationEnabled).onChange(async (v) => {
+        t.setValue(s.termuxIntegrationEnabled).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ termuxIntegrationEnabled: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
@@ -158,18 +161,18 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         t.inputEl.type = "password";
         t.setPlaceholder("token from installer")
           .setValue(s.authToken)
-          .onChange(async (v) => {
+          .onChange((v) => { void (async () => {
             await this.plugin.updateDeviceSettings({ authToken: v.trim() });
-          });
+          })(); });
       });
 
     new Setting(containerEl)
       .setName("Repository path (informational)")
       .setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.")
       .addText((t) =>
-        t.setValue(s.repoPathHint).onChange(async (v) => {
+        t.setValue(s.repoPathHint).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ repoPathHint: v.trim() });
-        })
+        })(); })
       );
 
     new Setting(containerEl).setName("Repository rules").setHeading();
@@ -197,27 +200,27 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .setName("Show .gitignore commands")
       .setDesc("Add to / remove from .gitignore (shared, synced through git).")
       .addToggle((t) =>
-        t.setValue(s.menuGitignore).onChange(async (v) => {
+        t.setValue(s.menuGitignore).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ menuGitignore: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Show sparse commands")
       .setDesc("Hide on this device / show again (sparse checkout exclusions).")
       .addToggle((t) =>
-        t.setValue(s.menuSparse).onChange(async (v) => {
+        t.setValue(s.menuSparse).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ menuSparse: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Show .git exclude commands")
       .setDesc("Add to / remove from .git/info/exclude (this clone only, never synced).")
       .addToggle((t) =>
-        t.setValue(s.menuExclude).onChange(async (v) => {
+        t.setValue(s.menuExclude).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ menuExclude: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl).setName("Notifications").setHeading();
@@ -229,9 +232,9 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "Failures, conflicts and safety blocks are always shown as a window."
       )
       .addToggle((t) =>
-        t.setValue(s.showSuccessModals).onChange(async (v) => {
+        t.setValue(s.showSuccessModals).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ showSuccessModals: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
@@ -246,11 +249,11 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           .addOption("status-only", "Status panel only")
           .addOption("log-only", "Operation log only")
           .setValue(s.notificationMode)
-          .onChange(async (v) => {
+          .onChange((v) => { void (async () => {
             await this.plugin.updateDeviceSettings({
               notificationMode: v as "notice" | "status-only" | "log-only",
             });
-          })
+          })(); })
       );
 
     new Setting(containerEl).setName("Automatic actions").setHeading();
@@ -258,53 +261,53 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Pull when Obsidian opens")
       .addToggle((t) =>
-        t.setValue(s.autoPullOnOpen).onChange(async (v) => {
+        t.setValue(s.autoPullOnOpen).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ autoPullOnOpen: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Sync when Obsidian closes / goes to background")
       .setDesc("Queues a sync request during the close transition; Termux may finish it after Obsidian is gone.")
       .addToggle((t) =>
-        t.setValue(s.autoSyncOnClose).onChange(async (v) => {
+        t.setValue(s.autoSyncOnClose).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Periodic sync while Obsidian is open (minutes, 0 = off)")
       .addText((t) =>
-        t.setValue(String(s.periodicSyncMinutes)).onChange(async (v) => {
+        t.setValue(String(s.periodicSyncMinutes)).onChange((v) => { void (async () => {
           const n = Math.max(0, Math.floor(Number(v) || 0));
           await this.plugin.updateDeviceSettings({ periodicSyncMinutes: n });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Minimum interval between automatic syncs (minutes)")
       .addText((t) =>
-        t.setValue(String(s.minAutoSyncIntervalMinutes)).onChange(async (v) => {
+        t.setValue(String(s.minAutoSyncIntervalMinutes)).onChange((v) => { void (async () => {
           const n = Math.max(1, Math.floor(Number(v) || 15));
           await this.plugin.updateDeviceSettings({ minAutoSyncIntervalMinutes: n });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Only sync on Wi-Fi (best effort)")
       .setDesc("Uses the WebView network API when available; skipped silently when the API is missing.")
       .addToggle((t) =>
-        t.setValue(s.wifiOnly).onChange(async (v) => {
+        t.setValue(s.wifiOnly).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ wifiOnly: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Skip automatic sync when battery is low (best effort)")
       .addToggle((t) =>
-        t.setValue(s.skipOnLowBattery).onChange(async (v) => {
+        t.setValue(s.skipOnLowBattery).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ skipOnLowBattery: v });
-        })
+        })(); })
       );
 
     new Setting(containerEl).setName("Advanced").setHeading();
@@ -312,26 +315,26 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Operation timeout (seconds)")
       .addText((t) =>
-        t.setValue(String(s.opTimeoutSeconds)).onChange(async (v) => {
+        t.setValue(String(s.opTimeoutSeconds)).onChange((v) => { void (async () => {
           const n = Math.min(3600, Math.max(10, Math.floor(Number(v) || DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds)));
           await this.plugin.updateDeviceSettings({ opTimeoutSeconds: n });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Companion intent URI template")
       .setDesc('Advanced. "{id}" is replaced by the request id; change it only if the companion app uses a custom scheme.')
       .addText((t) =>
-        t.setValue(s.companionUriTemplate).onChange(async (v) => {
+        t.setValue(s.companionUriTemplate).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ companionUriTemplate: v.trim() });
-        })
+        })(); })
       );
 
     new Setting(containerEl)
       .setName("Reset device-local settings")
       .setDesc("Restores all settings on this device to defaults. The vault and repository are not touched.")
       .addButton((b) =>
-        b.setButtonText("Reset").setWarning().onClick(() => {
+        b.setButtonText("Reset").setDestructive().onClick(() => {
           new ConfirmModal(
             this.app,
             {
@@ -346,11 +349,21 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
             async (confirmed) => {
               if (!confirmed) return;
               await this.plugin.resetDeviceSettings();
-              this.display();
+              this.refreshTab();
             }
           ).open();
         })
       );
+  }
+
+  /**
+   * Re-render the whole tab. `update()` is the 1.13+ entry point; `display()`
+   * remains as the fallback for older builds (and is what this tab implements).
+   */
+  private refreshTab(): void {
+    const anyThis = this as unknown as { update?: () => void };
+    if (typeof anyThis.update === "function") anyThis.update();
+    else this.display();
   }
 
   // ------------------------------------------------ collapsible rule managers
@@ -415,10 +428,10 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .setName("Auto-protect sparse exclusions")
       .setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).")
       .addToggle((t) =>
-        t.setValue(s.autoProtectSparse).onChange(async (v) => {
+        t.setValue(s.autoProtectSparse).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ autoProtectSparse: v });
           refresh();
-        })
+        })(); })
       );
     const derivedNote = body.createEl("p", { cls: "ngb-settings-note" });
     const list = body.createDiv();

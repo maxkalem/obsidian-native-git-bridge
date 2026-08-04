@@ -10,10 +10,11 @@ const prod = process.argv[2] === "production";
 
 /**
  * Single source of truth lives at the repository ROOT (Obsidian sample-plugin
- * convention): manifest.json and styles.css are edited there. Every build
- * copies them into native-git-bridge/ — the folder users copy into
- * .obsidian/plugins/ — so manual install, BRAT and community-plugin releases
- * all ship byte-identical files. CI fails when the copies drift.
+ * convention): main.js is built there, manifest.json and styles.css are edited
+ * there. Every build copies all three into native-git-bridge/ — the folder
+ * users copy into .obsidian/plugins/ — so manual install, BRAT and
+ * community-plugin releases all ship byte-identical files. CI fails when the
+ * copies drift.
  */
 function syncStaticFiles() {
   for (const f of ["manifest.json", "styles.css"]) {
@@ -38,14 +39,20 @@ const ctx = await esbuild.context({
   logLevel: "info",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
-  outfile: "native-git-bridge/main.js",
+  // Obsidian's convention (and its release verification) expects main.js in
+  // the repository root; the copy under native-git-bridge/ is for manual
+  // installs and is written after each build.
+  outfile: "main.js",
 });
 
 syncStaticFiles();
 
 if (prod) {
   await ctx.rebuild();
+  fs.copyFileSync("main.js", "native-git-bridge/main.js");
   process.exit(0);
 } else {
-  await ctx.watch();
+  await ctx.watch({
+    onEnd: () => fs.copyFileSync("main.js", "native-git-bridge/main.js"),
+  });
 }

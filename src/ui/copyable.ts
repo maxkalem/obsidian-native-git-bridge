@@ -11,25 +11,17 @@ export function addCopyButton(
   const iconEl = btn.createSpan();
   setIcon(iconEl, "copy");
   btn.createSpan({ text: ` ${label}` });
-  btn.addEventListener("click", async () => {
-    const text = getText();
-    try {
-      await navigator.clipboard.writeText(text);
-      new Notice(noticeText);
-    } catch {
-      // Clipboard API can be unavailable; fall back to a hidden textarea.
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
+  btn.addEventListener("click", () => {
+    // The old document.execCommand fallback is gone: it is deprecated, and
+    // Obsidian ships a Clipboard API on every platform this plugin supports.
+    void (async () => {
       try {
-        document.execCommand("copy");
+        await navigator.clipboard.writeText(getText());
         new Notice(noticeText);
       } catch {
         new Notice("Could not access the clipboard.");
       }
-      ta.remove();
-    }
+    })();
   });
   return btn;
 }

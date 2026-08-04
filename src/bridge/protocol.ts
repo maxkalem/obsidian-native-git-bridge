@@ -13,7 +13,9 @@ export function makeRequestId(now: Date, rand: string): string {
 export function randomSuffix(len = 6): string {
   const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789";
   const arr = new Uint8Array(len);
-  const c = (globalThis as { crypto?: Crypto }).crypto;
+  // activeWindow is Obsidian's current-window global (popout-safe); in a
+  // non-browser context (tests) it is absent, and Math.random is the fallback.
+  const c = typeof activeWindow !== "undefined" ? activeWindow.crypto : undefined;
   if (c?.getRandomValues) c.getRandomValues(arr);
   else for (let i = 0; i < len; i++) arr[i] = Math.floor(Math.random() * 256);
   let s = "";

@@ -43,7 +43,9 @@ export class BridgeClient {
 
   private sleep(ms: number): Promise<void> {
     if (this.opts.sleep) return this.opts.sleep(ms);
-    return new Promise((r) => setTimeout(r, ms));
+    // window.setTimeout, not the bare global: Obsidian popout windows have
+    // their own timer scope.
+    return new Promise((r) => activeWindow.setTimeout(r, ms));
   }
 
   async ensureRuntimeDirs(): Promise<void> {

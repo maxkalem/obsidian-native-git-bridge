@@ -1,7 +1,6 @@
 import { Menu, Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
 import {
   DEFAULT_TIMEOUT_SECONDS,
-  PLUGIN_ID,
   SPARSE_SAFETY_WARNING,
   STORAGE_PREFIX,
 } from "./constants";
@@ -30,7 +29,11 @@ import {
   sparseExclusionPaths,
 } from "./git/parsers";
 import { evaluateSparseSafety } from "./git/sparseSafety";
-import { validateProtectedPaths, validateRepoRelativePath } from "./settings/pathValidation";
+import {
+  hasControlChars,
+  validateProtectedPaths,
+  validateRepoRelativePath,
+} from "./settings/pathValidation";
 import { OperationLock, isMarkerStale } from "./ops/OperationLock";
 import { OperationLog } from "./ops/OperationLog";
 import { StatusBarController } from "./ui/StatusBarController";
@@ -860,10 +863,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       opened = null;
     }
     if (!opened) {
-      const a = document.createElement("a");
-      a.href = uri;
-      a.rel = "noopener";
-      document.body.appendChild(a);
+      const a = activeDocument.body.createEl("a", { href: uri, attr: { rel: "noopener" } });
       a.click();
       a.remove();
     }
@@ -1157,8 +1157,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   // .gitignore is a plain tracked file in the vault: edited directly, no Termux.
 
-  // Built via the RegExp constructor so this source file contains no raw control bytes.
-  private static readonly CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F]");
+
 
   async loadGitignore(): Promise<string[]> {
     try {
@@ -1176,7 +1175,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async gitignoreAdd(entry: string): Promise<void> {
-    if (entry.trim() === "" || NativeGitBridgePlugin.CONTROL_CHARS.test(entry)) {
+    if (entry.trim() === "" || hasControlChars(entry)) {
       new Notice("Invalid .gitignore entry.");
       return;
     }
@@ -1980,7 +1979,10 @@ export function compareVersions(a: string, b: string): number {
 
 function getLocalStorageBackend(): KeyValueBackend | null {
   try {
-    const ls = (globalThis as { localStorage?: KeyValueBackend }).localStorage;
+    // activeWindow is Obsidian's current-window global (popout-safe); absent
+    // outside a browser context (tests), where the volatile fallback applies.
+    const ls: KeyValueBackend | undefined =
+      typeof activeWindow !== "undefined" ? activeWindow.localStorage : undefined;
     if (!ls) return null;
     const probe = "__ngb_probe__";
     ls.setItem(probe, "1");

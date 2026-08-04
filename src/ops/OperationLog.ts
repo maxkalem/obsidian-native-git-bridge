@@ -22,8 +22,10 @@ export class OperationLog {
     const raw = store.getValue(OperationLog.KEY);
     if (raw) {
       try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) this.entries = parsed.slice(-LOG_MAX_ENTRIES);
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.entries = (parsed as LogEntry[]).slice(-LOG_MAX_ENTRIES);
+        }
       } catch {
         /* start fresh */
       }

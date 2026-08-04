@@ -49,6 +49,35 @@ shows a single explanation instead of settings, since all settings are
 device-local and could not do anything there. Desktop users are pointed at
 plain Git or obsidian-git.
 
+## Answers to the automated review's recommendations
+
+### Clipboard access
+
+Used in exactly one direction — **writing** — for three things the user asked
+for: the Termux install command, a download link, and a "copy details" button on
+result windows (so a failure can be pasted into an issue). The plugin never
+reads the clipboard.
+
+### `localStorage` instead of the plugin data API
+
+Deliberate, and load-bearing. The plugin folder itself is synced through Git in
+this workflow, so `data.json` reaches every device. Anything device-specific
+(the enable flag, the pairing token, protected paths, timeouts, the last seen
+runner/companion versions) must **not** travel: a token or an absolute Termux
+path from another phone is at best useless and at worst dangerous.
+`data.json` therefore holds only cosmetic shared preferences. The store is
+scoped by vault identity, degrades to an in-memory map when storage is
+unavailable, and reports that state in diagnostics.
+
+### Extra files in the release
+
+`bootstrap.sh`, `install.sh`, `native-git-bridge-runner.sh` and the companion
+APK are attached on purpose. Obsidian ignores them; the **Termux installer**
+does not: the one-line install command fetches the scripts from the release
+matching the plugin version, which is what keeps plugin and runner in step (see
+[update.md](update.md)). Removing them would leave the installer pulling from a
+moving branch instead.
+
 ## Deviations from the guidelines, and why
 
 ### Adapter API instead of Vault API
@@ -74,13 +103,15 @@ degrades silently if the API changes:
 | `app.plugins.enabledPlugins` | Detects an **active** obsidian-git on the same Android device and warns once — this is the data-loss scenario described above, not a rivalry. The plugin never disables another plugin. | No warning is shown |
 | `app.loadLocalStorage` | Reads obsidian-git's own device-local "disabled on this device" flag, so the warning is not shown when the user already took the recommended action. | Falls back to `window.localStorage`, then to showing the warning |
 
-### `localStorage` for settings
+### The settings tab still implements `display()`
 
-Device-scoped state (enable flag, pairing token, protected paths, timeouts)
-must **not** be synced, because the plugin folder itself is synced through Git
-in this workflow. `data.json` therefore holds only cosmetic shared
-preferences. The store falls back to an in-memory map when storage is
-unavailable and surfaces that state in diagnostics rather than failing quietly.
+The declarative settings API (`getSettingDefinitions`, 1.13.0+) is the intended
+direction and this tab has not migrated yet. Its four rule managers are
+per-item editors with live lists, and the version panel renders warnings with
+action buttons; porting them to definitions with `render` callbacks is a
+focused change that deserves its own release and on-device testing rather than
+being bundled with a lint pass. Internal refreshes already call `update()`
+where it exists, falling back to `display()` on older builds.
 
 ## Security posture
 

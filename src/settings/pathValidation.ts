@@ -2,8 +2,18 @@ export type PathValidationResult =
   | { ok: true; normalized: string }
   | { ok: false; reason: string };
 
-// Built via RegExp constructor so the source file contains no raw control bytes.
-const CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F]");
+/**
+ * True when the string contains a C0 control character or DEL. Written as a
+ * code-point scan rather than a regex: a character class of control bytes is
+ * flagged by linters (and unreadable), while this is explicit.
+ */
+export function hasControlChars(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c <= 0x1f || c === 0x7f) return true;
+  }
+  return false;
+}
 
 /**
  * Validate and normalize a repository-relative path (protected sparse paths,
@@ -14,7 +24,7 @@ export function validateRepoRelativePath(input: string): PathValidationResult {
   if (typeof input !== "string") return { ok: false, reason: "Not a string." };
   let p = input.trim();
   if (p === "") return { ok: false, reason: "Empty path." };
-  if (CONTROL_CHARS.test(p)) return { ok: false, reason: "Control characters are not allowed." };
+  if (hasControlChars(p)) return { ok: false, reason: "Control characters are not allowed." };
   p = p.replace(/\\/g, "/");
   if (/^[A-Za-z]:/.test(p)) return { ok: false, reason: "Absolute (drive) paths are not allowed." };
   if (p.startsWith("/")) return { ok: false, reason: "Absolute paths are not allowed." };

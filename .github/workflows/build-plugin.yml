@@ -37,7 +37,7 @@ jobs:
       - name: Committed artifacts must match the build exactly
         run: |
           git diff --exit-code -- \
-            manifest.json styles.css versions.json \
+            main.js manifest.json styles.css versions.json \
             native-git-bridge/main.js \
             native-git-bridge/manifest.json \
             native-git-bridge/styles.css \
@@ -56,7 +56,7 @@ jobs:
         with:
           name: native-git-bridge-plugin
           path: |
-            native-git-bridge/main.js
-            native-git-bridge/manifest.json
-            native-git-bridge/styles.css
+            main.js
+            manifest.json
+            styles.css
             native-git-bridge/termux/

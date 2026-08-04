@@ -122,7 +122,7 @@ export class StatusView extends ItemView {
     if (this.progressEl) {
       this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
       this.progressEl.setText(
-        running ? progress! : activeOperation ? `${activeOperation} pending…` : "Idle"
+        running ? progress : activeOperation ? `${activeOperation} pending…` : "Idle"
       );
     }
   }

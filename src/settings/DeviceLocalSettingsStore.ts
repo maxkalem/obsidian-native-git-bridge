@@ -206,13 +206,15 @@ function pickKnown(obj: Record<string, unknown>): Partial<DeviceLocalSettings> {
       out[k] = obj[k];
     }
   }
-  return out as Partial<DeviceLocalSettings>;
+  return out;
 }
 
 /** Generate a URL-safe random token (used if the user asks the plugin to create one). */
 export function generateToken(bytes = 24): string {
   const arr = new Uint8Array(bytes);
-  const c = (globalThis as { crypto?: Crypto }).crypto;
+  // activeWindow is Obsidian's current-window global (popout-safe); in a
+  // non-browser context (tests) it is absent, and Math.random is the fallback.
+  const c = typeof activeWindow !== "undefined" ? activeWindow.crypto : undefined;
   if (c?.getRandomValues) c.getRandomValues(arr);
   else for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256);
   let s = "";

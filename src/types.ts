@@ -70,16 +70,27 @@ export interface BridgeRequest {
   args: Record<string, unknown>;
 }
 
+/** Codes this plugin knows how to explain; the runner may add new ones. */
+export type KnownBridgeErrorCode =
+  | "AUTH"
+  | "BAD_REQUEST"
+  | "GIT_FAILED"
+  | "CANCELLED"
+  | "SAFETY_BLOCKED"
+  | "TIMEOUT"
+  | "PROTOCOL"
+  | "CONFLICT"
+  | "EXPIRED"
+  | "RUNNER_INTERNAL"
+  | "FILE_ABSENT"
+  | "TOO_LARGE";
+
+/**
+ * `(string & {})` keeps the literals visible to autocompletion while still
+ * accepting a code from a newer runner. A plain `| string` union erased them.
+ */
 export interface BridgeErrorInfo {
-  code:
-    | "AUTH"
-    | "BAD_REQUEST"
-    | "GIT_FAILED"
-    | "CANCELLED"
-    | "SAFETY_BLOCKED"
-    | "TIMEOUT"
-    | "PROTOCOL"
-    | string;
+  code: KnownBridgeErrorCode | (string & {});
   message: string;
   stdout?: string;
   stderr?: string;

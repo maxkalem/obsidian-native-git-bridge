@@ -9,6 +9,10 @@ on:
 
 permissions:
   contents: write
+  # Artifact attestations let users cryptographically verify that the release
+  # assets were built from this repository by this workflow.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -42,10 +46,18 @@ jobs:
       - name: Committed artifacts must match the build exactly
         run: |
           git diff --exit-code -- \
-            manifest.json styles.css versions.json \
+            main.js manifest.json styles.css versions.json \
             native-git-bridge/main.js \
             native-git-bridge/manifest.json \
             native-git-bridge/styles.css
+
+      - name: Attest build provenance for the plugin assets
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
 
       # ---- companion APK -----------------------------------------------------
       - uses: actions/setup-java@v5
@@ -109,9 +121,9 @@ jobs:
             vault does **not** update the Termux runner — re-run the install
             command in Termux after updating (see docs/update.md).
           files: |
-            native-git-bridge/main.js
-            native-git-bridge/manifest.json
-            native-git-bridge/styles.css
+            main.js
+            manifest.json
+            styles.css
             native-git-bridge/termux/native-git-bridge-runner.sh
             native-git-bridge/termux/install.sh
             native-git-bridge/termux/bootstrap.sh
