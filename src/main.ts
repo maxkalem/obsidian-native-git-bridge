@@ -27,8 +27,10 @@ import {
   parseLastCommit,
   parseSparseState,
   parseStatusPorcelainV2,
+  sparseExclusionPaths,
 } from "./git/parsers";
 import { evaluateSparseSafety } from "./git/sparseSafety";
+import { validateProtectedPaths, validateRepoRelativePath } from "./settings/pathValidation";
 import { OperationLock, isMarkerStale } from "./ops/OperationLock";
 import { OperationLog } from "./ops/OperationLog";
 import { StatusBarController } from "./ui/StatusBarController";
@@ -134,11 +136,96 @@ export default class NativeGitBridgePlugin extends Plugin {
 
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
+    this.registerFileMenu();
 
     this.app.workspace.onLayoutReady(() => {
       void this.startupChecks();
     });
     this.registerAutomaticActions();
+  }
+
+  /**
+   * Right-click / long-tap entries on files and folders: stage/unstage,
+   * .gitignore, sparse hide/show, .git/info/exclude. All decisions come from
+   * in-memory caches (last status, .gitignore, exclude list) because menu
+   * building is synchronous — no Termux round trip here.
+   */
+  private registerFileMenu(): void {
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!Platform.isAndroidApp) return;
+        if (!this.deviceSettings.enabledOnThisDevice) return;
+        const path = file.path;
+        const v = validateRepoRelativePath(path);
+        if (!v.ok) return;
+        const p = v.normalized;
+
+        const st = this.lastStatus?.status;
+        const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
+        const unstaged =
+          (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) ||
+          (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
+
+        if (unstaged || !st) {
+          menu.addItem((i) =>
+            i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
+          );
+        }
+        if (staged) {
+          menu.addItem((i) =>
+            i.setTitle("Git: Unstage").setIcon("minus-circle").onClick(() => void this.cmdUnstageFile(p))
+          );
+        }
+
+        if (this.deviceSettings.menuGitignore) {
+          if (this.isGitignored(p)) {
+            menu.addItem((i) =>
+              i.setTitle("Git: Remove from .gitignore").setIcon("eye").onClick(() => void this.gitignoreRemove(`/${p}`))
+            );
+          } else {
+            menu.addItem((i) =>
+              i.setTitle("Git: Add to .gitignore").setIcon("eye-off").onClick(() => void this.gitignoreAdd(`/${p}`))
+            );
+          }
+        }
+
+        if (!this.deviceSettings.menuSparse) {
+          /* sparse entries hidden by settings */
+        } else if (this.isSparseExcluded(p)) {
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Show again (remove sparse exclusion)")
+              .setIcon("eye")
+              .onClick(() => void this.cmdSparseExclude(p, false))
+          );
+        } else {
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Hide on this device (sparse)")
+              .setIcon("eye-off")
+              .onClick(() => void this.cmdSparseExclude(p, true))
+          );
+        }
+
+        if (!this.deviceSettings.menuExclude) {
+          /* exclude entries hidden by settings */
+        } else if (this.isExcluded(p)) {
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Remove from .git exclude")
+              .setIcon("eye")
+              .onClick(() => void this.cmdExcludeChange(p, false))
+          );
+        } else {
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Add to .git exclude (local ignore)")
+              .setIcon("eye-off")
+              .onClick(() => void this.cmdExcludeChange(p, true))
+          );
+        }
+      })
+    );
   }
 
   private lastAutoSyncMs = 0;
@@ -185,7 +272,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     try {
       const req = createRequest(
         "sync",
-        { protectedPaths: s.protectedPaths, message: "vault sync on close (native git bridge)" },
+        { protectedPaths: this.effectiveProtectedPaths(), message: "vault sync on close (native git bridge)" },
         s.authToken,
         s.opTimeoutSeconds
       );
@@ -276,6 +363,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.warnIfObsidianGitEnabledOnAndroid();
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
+    await this.loadGitignore(); // warm the cache so the file menu decides synchronously
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", "Auto pull on open.");
@@ -819,6 +907,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       lsFilesV: d.lsFilesV,
     });
     const lastCommit = parseLastCommit(d.lastCommit ?? "");
+    this.absorbSparsePatterns(sparse);
     this.lastStatus = { status, sparse, lastCommit, fetchedAt: new Date().toLocaleString() };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -847,7 +936,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdVerifySparseSafety(): Promise<void> {
-    const protectedPaths = this.deviceSettings.protectedPaths;
+    const protectedPaths = this.effectiveProtectedPaths();
     if (protectedPaths.length === 0) {
       new Notice("No protected sparse paths configured (see settings).");
       return;
@@ -867,6 +956,136 @@ export default class NativeGitBridgePlugin extends Plugin {
     const report = evaluateSparseSafety(d.statusProtected ?? "", d.stagedProtected ?? "", protectedPaths);
     if (!report.safe) this.statusBar?.set("error");
     new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+  }
+
+  // -------------------- repo config management (sparse / gitignore / exclude)
+
+  /** In-memory caches so the file context menu can decide add-vs-remove synchronously. */
+  private gitignoreLines: string[] = [];
+  private excludeLines: string[] = [];
+
+  /** Hide (exclude=true) or materialize a path via non-cone sparse patterns. */
+  async cmdSparseExclude(path: string, exclude: boolean): Promise<void> {
+    const go = async () => {
+      const result = await this.runOperation(exclude ? "sparse-exclude-add" : "sparse-exclude-remove", { path });
+      if (!result) return;
+      if (!result.ok) {
+        new ResultModal(this.app, "Sparse change failed", [result.error?.message ?? "Unknown error."], {
+          stdout: result.error?.stdout,
+          stderr: result.error?.stderr,
+          isError: true,
+        }).open();
+        return;
+      }
+      this.absorbStatusData(result.data ?? {});
+      new Notice(exclude ? `Hidden via sparse checkout: ${path}` : `Materialized again: ${path}`);
+    };
+    if (exclude) {
+      new ConfirmModal(
+        this.app,
+        {
+          title: "Hide via sparse checkout?",
+          body: [
+            `'${path}' will be removed from THIS device's working tree (git sparse-checkout exclusion).`,
+            "Nothing is deleted from the repository or other devices, and the path automatically joins the protected set, so it can never be committed as a deletion from here.",
+          ],
+          confirmLabel: "Hide on this device",
+        },
+        async (ok) => {
+          if (ok) await go();
+        }
+      ).open();
+    } else {
+      await go();
+    }
+  }
+
+  /** Add/remove a line in .git/info/exclude (device-local ignore, via the runner). */
+  async cmdExcludeChange(path: string, add: boolean): Promise<void> {
+    const result = await this.runOperation(add ? "exclude-add" : "exclude-remove", { path });
+    if (!result) return;
+    if (!result.ok) {
+      new ResultModal(this.app, "Exclude change failed", [result.error?.message ?? "Unknown error."], {
+        stdout: result.error?.stdout,
+        stderr: result.error?.stderr,
+        isError: true,
+      }).open();
+      return;
+    }
+    this.absorbExcludeList(result.data?.excludeList);
+    new Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
+  }
+
+  async refreshExcludeList(): Promise<string[] | null> {
+    const result = await this.runOperation("exclude-list");
+    if (!result?.ok) return null;
+    this.absorbExcludeList(result.data?.excludeList);
+    return this.excludeLines;
+  }
+
+  private absorbExcludeList(raw: string | undefined): void {
+    if (raw === undefined) return;
+    this.excludeLines = raw.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  }
+
+  isExcluded(path: string): boolean {
+    return [`/${path}`, path, `/${path}/`, `${path}/`].some((v) => this.excludeLines.includes(v));
+  }
+
+  // .gitignore is a plain tracked file in the vault: edited directly, no Termux.
+
+  // Built via the RegExp constructor so this source file contains no raw control bytes.
+  private static readonly CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F]");
+
+  async loadGitignore(): Promise<string[]> {
+    try {
+      const raw = await this.app.vault.adapter.read(".gitignore");
+      this.gitignoreLines = raw.split(/\r?\n/);
+    } catch {
+      this.gitignoreLines = [];
+    }
+    return this.gitignoreLines.filter((l) => l.trim() !== "");
+  }
+
+  isGitignored(path: string): boolean {
+    const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
+    return this.gitignoreLines.some((l) => variants.includes(l.trim()));
+  }
+
+  async gitignoreAdd(entry: string): Promise<void> {
+    if (entry.trim() === "" || NativeGitBridgePlugin.CONTROL_CHARS.test(entry)) {
+      new Notice("Invalid .gitignore entry.");
+      return;
+    }
+    await this.loadGitignore();
+    if (this.gitignoreLines.some((l) => l.trim() === entry.trim())) return;
+    while (this.gitignoreLines.length > 0 && this.gitignoreLines[this.gitignoreLines.length - 1] === "") {
+      this.gitignoreLines.pop();
+    }
+    this.gitignoreLines.push(entry.trim());
+    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
+    new Notice(`Added to .gitignore: ${entry.trim()}`);
+  }
+
+  async gitignoreRemove(entry: string): Promise<void> {
+    await this.loadGitignore();
+    const before = this.gitignoreLines.length;
+    this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry.trim());
+    if (this.gitignoreLines.length === before) return;
+    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
+    new Notice(`Removed from .gitignore: ${entry.trim()}`);
+  }
+
+  isSparseExcluded(path: string): boolean {
+    return this.deviceSettings.derivedProtectedPaths.includes(path);
+  }
+
+  lastKnownSparse(): SparseStateSummary | null {
+    return this.lastStatus?.sparse ?? null;
+  }
+
+  currentExcludeLines(): string[] {
+    return [...this.excludeLines];
   }
 
   async cmdReapplySparse(): Promise<void> {
@@ -918,6 +1137,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       skipWorktreeCount: d.skipWorktreeCount,
       lsFilesV: d.lsFilesV,
     });
+    this.absorbSparsePatterns(sparse);
     this.lastStatus = {
       status,
       sparse,
@@ -928,6 +1148,41 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.pushStatusToView();
   }
 
+  /**
+   * Refresh the DERIVED protected paths from the repository's own sparse
+   * exclusions, so the safety gate follows the repo configuration instead of
+   * a hardcoded list. Persisted device-locally: protection must hold from the
+   * very first operation after a restart, before any fresh status arrives.
+   */
+  private absorbSparsePatterns(sparse: SparseStateSummary): void {
+    if (!sparse.enabled) return;
+    const candidates = sparseExclusionPaths(sparse.patterns);
+    const validated = validateProtectedPaths(candidates);
+    const derived = validated.ok ? validated.normalized : [];
+    const prev = this.deviceSettings.derivedProtectedPaths;
+    if (derived.length === prev.length && derived.every((p, i) => p === prev[i])) return;
+    this.deviceSettings = this.store.write({ derivedProtectedPaths: derived });
+    this.log.add(
+      "info",
+      "sparse",
+      `Derived protected paths refreshed from sparse exclusions: ${derived.join(", ") || "(none)"}.`
+    );
+  }
+
+  /**
+   * The protected set actually enforced: manual paths plus (unless disabled)
+   * the exclusions git itself reports. Every operation argument goes through
+   * here — never through deviceSettings.protectedPaths directly.
+   */
+  effectiveProtectedPaths(): string[] {
+    const s = this.deviceSettings;
+    const merged = [...s.protectedPaths];
+    if (s.autoProtectSparse) {
+      for (const p of s.derivedProtectedPaths) if (!merged.includes(p)) merged.push(p);
+    }
+    return merged;
+  }
+
   /** Shared error rendering for mutating operations. Never a bare "failed". */
   private renderMutationError(title: string, result: BridgeResult): void {
     const err = result.error;
@@ -936,7 +1191,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       const report = evaluateSparseSafety(
         d.statusProtected ?? err.stdout ?? "",
         d.stagedProtected ?? err.stderr ?? "",
-        this.deviceSettings.protectedPaths
+        this.effectiveProtectedPaths()
       );
       this.statusBar?.set("error");
       new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
@@ -976,7 +1231,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   async cmdPull(silent = false): Promise<void> {
     const result = await this.runOperation("pull", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: pull failed", result);
@@ -993,7 +1248,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       async (message) => {
         if (message === null) return;
         const result = await this.runOperation("commit", {
-          protectedPaths: this.deviceSettings.protectedPaths,
+          protectedPaths: this.effectiveProtectedPaths(),
           message,
         });
         if (!result) return;
@@ -1015,7 +1270,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   async cmdPush(): Promise<void> {
     const result = await this.runOperation("push", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: push failed", result);
@@ -1025,7 +1280,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   async cmdSync(message?: string, silent = false): Promise<void> {
     const result = await this.runOperation("sync", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
       message: message ?? "",
     });
     if (!result) return;
@@ -1175,7 +1430,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         const result = await this.runOperation("restore-file", {
           path: currentPath,
           commit: e.hash,
-          protectedPaths: this.deviceSettings.protectedPaths,
+          protectedPaths: this.effectiveProtectedPaths(),
         });
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
@@ -1269,7 +1524,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   async cmdStageAll(): Promise<void> {
     const result = await this.runOperation("stage-all", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
@@ -1279,7 +1534,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   async cmdUnstageAll(): Promise<void> {
     const result = await this.runOperation("unstage-all", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
@@ -1290,7 +1545,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   async cmdStageFile(path: string): Promise<void> {
     const result = await this.runOperation("stage-file", {
       path,
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
@@ -1300,7 +1555,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   async cmdUnstageFile(path: string): Promise<void> {
     const result = await this.runOperation("unstage-file", {
       path,
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage failed", result);
@@ -1324,7 +1579,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!confirmed) return;
         const result = await this.runOperation("discard-file", {
           path,
-          protectedPaths: this.deviceSettings.protectedPaths,
+          protectedPaths: this.effectiveProtectedPaths(),
         });
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
@@ -1342,7 +1597,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
-    report.pluginSide["Protected paths"] = s.protectedPaths.join(", ") || "(none)";
+    report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
+    report.pluginSide["Protected paths (derived from sparse)"] =
+      (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";
+    report.pluginSide["Protected paths (effective)"] = this.effectiveProtectedPaths().join(", ") || "(none)";
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";
     report.pluginSide["Pending requests"] = String(await this.client.pendingRequestCount());
     report.pluginSide["Active operation"] = this.lock.active ? `${this.lock.active.action} (${this.lock.active.id})` : "none";
@@ -1353,7 +1611,11 @@ export default class NativeGitBridgePlugin extends Plugin {
       );
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
-    if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
+    if (this.effectiveProtectedPaths().length === 0)
+      report.problems.push(
+        "No protected sparse paths (neither manual nor derived from sparse exclusions). " +
+          "Fine for full checkouts; risky if this repo uses sparse checkout."
+      );
     if (Platform.isAndroidApp) {
       if (this.isObsidianGitActiveOnDevice()) {
         report.problems.push(

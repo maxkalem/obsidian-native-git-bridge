@@ -20,11 +20,11 @@ git clone -q "$ROOT/remote.git" "$ROOT/vault" 2>/dev/null
 cd "$ROOT/vault"
 git config user.email test@example.com
 git config user.name Test
-mkdir -p Notes "Private/AgentsMemory" "Projects/Backus"
+mkdir -p Notes "Private/Hidden" "Projects/Archive"
 echo "note" > Notes/note.md
 echo "note with space" > "Notes/unicode nøte.md"
-echo "secret memory" > Private/AgentsMemory/mem.md
-echo "backus spec" > Projects/Backus/spec.md
+echo "hidden note" > Private/Hidden/mem.md
+echo "archive spec" > Projects/Archive/spec.md
 git add -A && git commit -qm "initial" && git push -q origin HEAD
 
 echo "# setup: non-cone sparse checkout excluding protected dirs"
@@ -32,11 +32,11 @@ echo "# setup: non-cone sparse checkout excluding protected dirs"
 # exclusion patterns ("specify directories rather than patterns") and would
 # silently leave the cone default `/* !/*/` in place. Request pattern mode
 # explicitly — the user's real vault uses non-cone rules.
-git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' 2>/dev/null
+git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2>/dev/null
 check '[ "$(git config core.sparseCheckout)" = "true" ]' "core.sparseCheckout enabled"
 check '[ "$(git config core.sparseCheckoutCone 2>/dev/null || echo false)" != "true" ]' "non-cone (pattern) mode active"
-check '[ ! -e Private/AgentsMemory/mem.md ]' "protected file removed from worktree by sparse checkout"
-check 'git ls-files -v | grep -q "^S Private/AgentsMemory/mem.md"' "skip-worktree bit set on protected file"
+check '[ ! -e Private/Hidden/mem.md ]' "protected file removed from worktree by sparse checkout"
+check 'git ls-files -v | grep -q "^S Private/Hidden/mem.md"' "skip-worktree bit set on protected file"
 check '[ -z "$(git status --porcelain=v1)" ]' "sparse omission does NOT appear as a change (not a deletion)"
 
 echo "# setup: runner config"
@@ -86,11 +86,11 @@ RES="$RUNTIME/results/r-20260803T100003Z-stat01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok"
 check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "status contains porcelain v2 branch header"
 check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "status reports sparse enabled"
-check 'jq -er ".data.sparseList" "$RES" | grep -q "AgentsMemory"' "status lists sparse patterns"
+check 'jq -er ".data.sparseList" "$RES" | grep -q "Hidden"' "status lists sparse patterns"
 check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 1 ]' "status reports skip-worktree count"
 
 echo "# test: verify-sparse-safety - clean tree is SAFE (omissions are not deletions)"
-req "r-20260803T100004Z-safe01" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260803T100004Z-safe01" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100004Z-safe01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "safety action ok"
@@ -100,13 +100,13 @@ check '[ -z "$(jq -r ".data.stagedProtected" "$RES")" ]' "no staged changes repo
 echo "# test: verify-sparse-safety detects a real staged deletion of a protected path"
 # Use plumbing to stage a deletion of a protected path (porcelain git rm is
 # blocked by the sparse rules; a buggy tool or isomorphic-git would not be).
-git update-index --force-remove Private/AgentsMemory/mem.md
-req "r-20260803T100005Z-safe02" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+git update-index --force-remove Private/Hidden/mem.md
+req "r-20260803T100005Z-safe02" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100005Z-safe02.json"
 check 'jq -er ".data.stagedProtected" "$RES" | grep -q "^D.*mem.md"' "staged deletion of protected path detected"
 # restore index and sparse bits
-git reset -q -- Private/AgentsMemory/mem.md
+git reset -q -- Private/Hidden/mem.md
 git sparse-checkout reapply 2>/dev/null || true
 
 echo "# test: path traversal in protectedPaths rejected"
@@ -115,7 +115,7 @@ bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-trav01.json" >/dev/null' "traversal path -> BAD_REQUEST"
 
 echo "# test: git pathspec magic in file paths rejected (':/' would address the whole repo)"
-req "r-20260803T100006Z-mag001" stage-file "$TOKEN" '{"path":":/","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260803T100006Z-mag001" stage-file "$TOKEN" '{"path":":/","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-mag001.json" >/dev/null' "stage-file ':/' -> BAD_REQUEST (no repo-wide staging)"
 check 'git diff --cached --quiet' "nothing was staged by the pathspec-magic attempt"
@@ -137,8 +137,8 @@ req "r-20260803T100007Z-reap01" sparse-reapply "$TOKEN"
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100007Z-reap01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "sparse-reapply ok"
-check 'jq -er ".data.sparseList" "$RES" | grep -q "AgentsMemory"' "sparse-reapply returns pattern list"
-check '[ ! -e Private/AgentsMemory/mem.md ]' "protected file hidden again after reapply"
+check 'jq -er ".data.sparseList" "$RES" | grep -q "Hidden"' "sparse-reapply returns pattern list"
+check '[ ! -e Private/Hidden/mem.md ]' "protected file hidden again after reapply"
 
 echo "# test: cancellation flag prevents execution"
 req "r-20260803T100008Z-canc01" status "$TOKEN"
@@ -157,18 +157,18 @@ check 'jq -er ".data.authMethod" "$RES" | grep -q .' "diagnostics reports auth m
 
 echo "# phase 3: commit + push to a real remote"
 echo "more" >> Notes/note.md
-req "r-20260803T100010Z-comm01" commit "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: edit note"}'
+req "r-20260803T100010Z-comm01" commit "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: edit note"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100010Z-comm01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "commit ok"
 check '[ "$(jq -r ".data.committed" "$RES")" = "true" ]' "commit created"
-req "r-20260803T100011Z-push01" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260803T100011Z-push01" push "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260803T100011Z-push01.json" >/dev/null' "push ok"
 check '[ "$(git rev-parse HEAD)" = "$(git -C "$ROOT/remote.git" rev-parse HEAD)" ]' "remote updated by push"
 
 echo "# phase 3: empty commit is a no-op, not an error"
-req "r-20260803T100012Z-comm02" commit "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: nothing"}'
+req "r-20260803T100012Z-comm02" commit "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: nothing"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100012Z-comm02.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "no-op commit ok"
@@ -180,7 +180,7 @@ git -C "$ROOT/other" config user.email o@e; git -C "$ROOT/other" config user.nam
 echo "remote side" > "$ROOT/other/FromOther.md"
 git -C "$ROOT/other" add -A && git -C "$ROOT/other" commit -qm "other: add file" && git -C "$ROOT/other" push -q
 echo "local side" > Notes/local.md
-req "r-20260803T100013Z-sync01" sync "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: sync"}'
+req "r-20260803T100013Z-sync01" sync "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: sync"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100013Z-sync01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "sync ok"
@@ -188,20 +188,20 @@ check '[ -f FromOther.md ]' "remote change merged into worktree"
 check '[ "$(jq -r ".data.pushed" "$RES")" = "true" ]' "local change pushed"
 check 'git -C "$ROOT/remote.git" cat-file -e "$(git rev-parse HEAD)" && [ "$(git rev-parse HEAD)" = "$(git -C "$ROOT/remote.git" rev-parse HEAD)" ]' "remote head equals local after sync"
 check 'jq -er ".data.steps" "$RES" | grep -q "safety-preflight-ok"' "sync recorded safety pre-flight"
-check '[ ! -e Private/AgentsMemory/mem.md ]' "protected dir still sparse-hidden after sync"
+check '[ ! -e Private/Hidden/mem.md ]' "protected dir still sparse-hidden after sync"
 
 echo "# phase 3: sync is blocked when a protected path shows changes"
-mkdir -p Private/AgentsMemory
-echo "accidental" > Private/AgentsMemory/leak.md
+mkdir -p Private/Hidden
+echo "accidental" > Private/Hidden/leak.md
 HEAD_BEFORE="$(git rev-parse HEAD)"
-req "r-20260803T100014Z-sync02" sync "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: should block"}'
+req "r-20260803T100014Z-sync02" sync "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: should block"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100014Z-sync02.json"
 check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RES" >/dev/null' "sync blocked with SAFETY_BLOCKED"
 check 'jq -er ".error.message" "$RES" | grep -q "No commit or push was performed"' "mandated warning text present"
 check '[ "$(git rev-parse HEAD)" = "$HEAD_BEFORE" ]' "no commit was created"
 check 'git diff --cached --quiet' "nothing was staged"
-rm -f Private/AgentsMemory/leak.md; rmdir Private/AgentsMemory 2>/dev/null || true
+rm -f Private/Hidden/leak.md; rmdir Private/Hidden 2>/dev/null || true
 
 echo "# phase 3: conflicting histories stop the sync, nothing is pushed"
 sed -i 's/^note$/local edit/' Notes/note.md 2>/dev/null || printf 'local edit\nmore\n' > Notes/note.md
@@ -210,7 +210,7 @@ sed -i '1s/.*/remote edit/' "$ROOT/other/Notes/note.md"
 git -C "$ROOT/other" pull -q --no-rebase 2>/dev/null || true
 git -C "$ROOT/other" add -A && git -C "$ROOT/other" commit -qm "other: conflicting edit" && git -C "$ROOT/other" push -q
 REMOTE_BEFORE="$(git -C "$ROOT/remote.git" rev-parse HEAD)"
-req "r-20260803T100015Z-sync03" sync "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: conflict"}'
+req "r-20260803T100015Z-sync03" sync "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: conflict"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100015Z-sync03.json"
 check 'jq -e ".error.code == \"CONFLICT\"" "$RES" >/dev/null' "sync reports CONFLICT"
@@ -262,7 +262,7 @@ check 'jq -r ".data.diff" "$RES" | grep -q "^+worktree"' "diff shows worktree ad
 
 echo "# phase 4: restore file from commit after confirmation (runner side)"
 HEAD_HASH="$(git rev-parse HEAD)"
-req "r-20260804T100004Z-rest01" restore-file "$TOKEN" "{\"path\":\"Notes/hist renamed.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/AgentsMemory\",\"Projects/Backus\"]}"
+req "r-20260804T100004Z-rest01" restore-file "$TOKEN" "{\"path\":\"Notes/hist renamed.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/Hidden\",\"Projects/Archive\"]}"
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T100004Z-rest01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "restore ok"
@@ -270,7 +270,7 @@ check '[ "$(cat "Notes/hist renamed.md")" = "v1
 v2" ]' "worktree content restored to committed version"
 
 echo "# phase 4: restore into a protected path is blocked"
-req "r-20260804T100005Z-rest02" restore-file "$TOKEN" "{\"path\":\"Private/AgentsMemory/mem.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/AgentsMemory\",\"Projects/Backus\"]}"
+req "r-20260804T100005Z-rest02" restore-file "$TOKEN" "{\"path\":\"Private/Hidden/mem.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/Hidden\",\"Projects/Archive\"]}"
 bash "$RUNNER"
 check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260804T100005Z-rest02.json" >/dev/null' "protected restore blocked"
 
@@ -285,40 +285,40 @@ check '[ "$(jq -r ".data.contentBase64" "$RES" | base64 -d | od -An -tx1 | tr -d
 
 echo "# source control: stage / unstage / discard per file"
 printf 'staged content\n' > Notes/stage-me.md
-req "r-20260804T130000Z-stg001" stage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T130000Z-stg001" stage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130000Z-stg001.json" >/dev/null' "stage-file ok"
 check 'git diff --cached --name-only | grep -q "Notes/stage-me.md"' "file is staged"
-req "r-20260804T130001Z-uns001" unstage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T130001Z-uns001" unstage-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130001Z-uns001.json" >/dev/null' "unstage-file ok"
 check '! git diff --cached --name-only | grep -q "Notes/stage-me.md"' "file is unstaged"
-req "r-20260804T130002Z-dsc001" discard-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T130002Z-dsc001" discard-file "$TOKEN" '{"path":"Notes/stage-me.md","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T130002Z-dsc001.json" >/dev/null' "discard-file ok (untracked)"
 check '[ ! -e Notes/stage-me.md ]' "untracked file deleted by discard"
 printf 'tracked change\n' >> Notes/note.md
-req "r-20260804T130003Z-dsc002" discard-file "$TOKEN" '{"path":"Notes/note.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T130003Z-dsc002" discard-file "$TOKEN" '{"path":"Notes/note.md","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check '! grep -q "tracked change" Notes/note.md' "tracked file restored by discard"
-req "r-20260804T130004Z-stg002" stage-file "$TOKEN" '{"path":"Private/AgentsMemory/mem.md","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T130004Z-stg002" stage-file "$TOKEN" '{"path":"Private/Hidden/mem.md","protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260804T130004Z-stg002.json" >/dev/null' "staging a protected path is blocked"
 
 echo "# source control: stage all / unstage all (protected paths excluded)"
 printf 'bulk1\n' > Notes/bulk1.md
 printf 'bulk2\n' > Notes/bulk2.md
-mkdir -p Private/AgentsMemory && printf 'leak\n' > Private/AgentsMemory/leak2.md
-req "r-20260804T140000Z-sta001" stage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+mkdir -p Private/Hidden && printf 'leak\n' > Private/Hidden/leak2.md
+req "r-20260804T140000Z-sta001" stage-all "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T140000Z-sta001.json"
 check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RES" >/dev/null' "stage-all blocked while a protected path is dirty"
-rm -f Private/AgentsMemory/leak2.md
-req "r-20260804T140001Z-sta002" stage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+rm -f Private/Hidden/leak2.md
+req "r-20260804T140001Z-sta002" stage-all "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T140001Z-sta002.json" >/dev/null' "stage-all ok once clean"
 check '[ "$(git diff --cached --name-only | grep -c "Notes/bulk")" = "2" ]' "both files staged"
-req "r-20260804T140002Z-uns002" unstage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T140002Z-uns002" unstage-all "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T140002Z-uns002.json" >/dev/null' "unstage-all ok"
 check '[ -z "$(git diff --cached --name-only)" ]' "index empty after unstage-all"
@@ -338,7 +338,7 @@ git add -A >/dev/null 2>&1 && git commit -qm "bulk: many files"
 # (Manual `update-index --skip-worktree` is ignored for worktree-present files
 # when sparse checkout is active on git >= 2.35; real vaults get their S bits
 # from sparse patterns anyway, so this is also the more faithful fixture.)
-git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' '!Bulk/' 2>/dev/null
+git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' '!Bulk/' 2>/dev/null
 SKIP_BYTES="$(git ls-files -v | grep '^S ' | wc -c)"
 check '[ "$SKIP_BYTES" -gt 131072 ]' "test fixture really exceeds the 128KB argument limit ($SKIP_BYTES bytes)"
 req "r-20260804T110000Z-big001" status "$TOKEN"
@@ -350,7 +350,7 @@ check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 3000 ]' "skip-worktree 
 check '! grep -q "ERROR building" "$RUNTIME/runner.log"' "no serialization errors in runner.log"
 # clean up the fixture so later assertions are unaffected: restore the original
 # sparse rules (Bulk reappears in the worktree), then remove it for real
-git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' 2>/dev/null
+git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2>/dev/null
 git rm -rq Bulk >/dev/null 2>&1 || true
 rm -rf Bulk
 git commit -qm "bulk: remove" >/dev/null 2>&1 || true
@@ -365,7 +365,7 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "3" ]' "runnerVersion = 3 reported to the plugin"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "4" ]' "runnerVersion = 4 reported to the plugin"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -387,7 +387,7 @@ check '[ ! -e "$RUNTIME/processing/r-20260804T150101Z-intr02.json.retried" ]' "r
 
 echo "# recovery: stale requests expire instead of executing much later"
 cat > "$RUNTIME/requests/r-20260803T090000Z-exp001.json" <<REQ
-{"protocolVersion":1,"id":"r-20260803T090000Z-exp001","token":"$TOKEN","action":"sync","createdAt":"2026-08-03T09:00:00Z","timeoutSeconds":30,"args":{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"stale sync that must never run"}}
+{"protocolVersion":1,"id":"r-20260803T090000Z-exp001","token":"$TOKEN","action":"sync","createdAt":"2026-08-03T09:00:00Z","timeoutSeconds":30,"args":{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"stale sync that must never run"}}
 REQ
 HEAD_BEFORE_EXP="$(git rev-parse HEAD)"
 bash "$RUNNER"
@@ -403,6 +403,58 @@ REQ
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150102Z-exp002.json" >/dev/null' "unparsable createdAt fails open (broken clock cannot brick the bridge)"
 
+echo "# config: sparse-exclude-add hides a directory without staging deletions"
+mkdir -p Extra && echo "extra" > Extra/e.md
+git add Extra && git commit -qm "add Extra"
+req "r-20260804T151000Z-spx001" sparse-exclude-add "$TOKEN" '{"path":"Extra"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T151000Z-spx001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "sparse-exclude-add ok"
+check '[ ! -e Extra/e.md ]' "excluded directory removed from the worktree"
+check 'git ls-files -v | grep -q "^S Extra/e.md"' "skip-worktree bit set by git itself"
+check '[ -z "$(git status --porcelain=v1)" ]' "exclusion did NOT appear as a change or deletion"
+check 'jq -er ".data.sparseList" "$RES" | grep -qx "!/Extra"' "new pattern reported back to the plugin"
+check '[ ! -e Private/Hidden/mem.md ]' "pre-existing exclusions preserved"
+req "r-20260804T151001Z-spx002" sparse-exclude-add "$TOKEN" '{"path":"Extra"}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T151001Z-spx002.json" >/dev/null' "sparse-exclude-add is idempotent"
+check '[ "$(git sparse-checkout list | grep -cx "!/Extra")" = "1" ]' "no duplicate pattern"
+
+echo "# config: sparse-exclude-remove materializes the directory again"
+req "r-20260804T151002Z-spx003" sparse-exclude-remove "$TOKEN" '{"path":"Extra"}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T151002Z-spx003.json" >/dev/null' "sparse-exclude-remove ok"
+check '[ -f Extra/e.md ]' "files materialized again"
+check '! git sparse-checkout list | grep -qx "!/Extra"' "pattern removed from sparse list"
+git rm -rq Extra >/dev/null 2>&1 && git commit -qm "remove Extra fixture"
+
+echo "# config: .git/info/exclude add / list / remove (local-only ignores)"
+echo "scratch" > scratch-local.md
+req "r-20260804T151003Z-exc001" exclude-add "$TOKEN" '{"path":"scratch-local.md"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T151003Z-exc001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "exclude-add ok"
+check 'grep -qxF "/scratch-local.md" .git/info/exclude' "line written to .git/info/exclude"
+check '! git status --porcelain=v1 | grep -q "scratch-local.md"' "excluded file no longer shows as untracked"
+check 'jq -er ".data.excludeList" "$RES" | grep -qxF "/scratch-local.md"' "exclude list returned to the plugin"
+req "r-20260804T151004Z-exc002" exclude-list "$TOKEN"
+bash "$RUNNER"
+check 'jq -er ".data.excludeList" "$RUNTIME/results/r-20260804T151004Z-exc002.json" | grep -qxF "/scratch-local.md"' "exclude-list reports the entry"
+req "r-20260804T151005Z-exc003" exclude-remove "$TOKEN" '{"path":"scratch-local.md"}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T151005Z-exc003.json" >/dev/null' "exclude-remove ok"
+check '! grep -qxF "/scratch-local.md" .git/info/exclude' "line removed from .git/info/exclude"
+check 'git status --porcelain=v1 | grep -q "scratch-local.md"' "file shows as untracked again"
+rm -f scratch-local.md
+
+echo "# config: path validation also guards the new actions"
+req "r-20260804T151006Z-exc004" sparse-exclude-add "$TOKEN" '{"path":":/"}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T151006Z-exc004.json" >/dev/null' "pathspec magic rejected in sparse-exclude-add"
+req "r-20260804T151007Z-exc005" exclude-add "$TOKEN" '{"path":".git/config"}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T151007Z-exc005.json" >/dev/null' ".git path rejected in exclude-add"
+
 echo "# phase 5: detached HEAD - status works, push refuses (no force, no guessing)"
 MAIN_BRANCH="$(git symbolic-ref --short HEAD)"
 git checkout -q --detach
@@ -411,7 +463,7 @@ bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T160000Z-det001.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok on detached HEAD"
 check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head (detached)"' "detached state reported"
-req "r-20260804T160001Z-det002" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T160001Z-det002" push "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T160001Z-det002.json"
 check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "push on detached HEAD -> GIT_FAILED"
@@ -435,14 +487,14 @@ git -C "$ROOT/other" add -A && git -C "$ROOT/other" commit -qm "other: nff" && g
 REMOTE_NFF="$(git -C "$ROOT/remote.git" rev-parse HEAD)"
 echo "local diverges" > Notes/nff-local.md
 git add Notes/nff-local.md && git commit -qm "local: nff"
-req "r-20260804T160100Z-nff001" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T160100Z-nff001" push "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T160100Z-nff001.json"
 check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "non-ff push -> GIT_FAILED"
 check 'jq -er ".error.stderr" "$RES" | grep -Eqi "rejected|fetch first|non-fast-forward"' "rejection reason surfaced to the user"
 check '[ "$(git -C "$ROOT/remote.git" rev-parse HEAD)" = "$REMOTE_NFF" ]' "remote untouched (no force push)"
 # sync integrates the remote commit (different files: clean merge) and publishes
-req "r-20260804T160101Z-nff002" sync "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: recover from nff"}'
+req "r-20260804T160101Z-nff002" sync "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: recover from nff"}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T160101Z-nff002.json" >/dev/null' "sync recovers from non-ff (merge + push)"
 check '[ "$(git rev-parse HEAD)" = "$(git -C "$ROOT/remote.git" rev-parse HEAD)" ]' "remote equals local after recovery"
@@ -451,7 +503,7 @@ echo "# phase 5: branch without upstream - push -u publishes and binds it"
 git checkout -q -b e2e-no-upstream
 echo "nub" > Notes/nub.md
 git add Notes/nub.md && git commit -qm "nub: local only"
-req "r-20260804T160200Z-nub001" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+req "r-20260804T160200Z-nub001" push "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T160200Z-nub001.json" >/dev/null' "push ok on branch without upstream"
 check 'git -C "$ROOT/remote.git" rev-parse --verify -q refs/heads/e2e-no-upstream >/dev/null' "remote branch created"

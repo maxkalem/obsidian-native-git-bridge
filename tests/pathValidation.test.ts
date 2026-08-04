@@ -9,9 +9,9 @@ import {
 
 describe("validateRepoRelativePath", () => {
   it("accepts and normalizes good paths", () => {
-    expect(validateRepoRelativePath("Private/AgentsMemory")).toEqual({ ok: true, normalized: "Private/AgentsMemory" });
-    expect(validateRepoRelativePath("./Projects//Backus/")).toEqual({ ok: true, normalized: "Projects/Backus" });
-    expect(validateRepoRelativePath("Projects\\Backus")).toEqual({ ok: true, normalized: "Projects/Backus" });
+    expect(validateRepoRelativePath("Private/Hidden")).toEqual({ ok: true, normalized: "Private/Hidden" });
+    expect(validateRepoRelativePath("./Projects//Archive/")).toEqual({ ok: true, normalized: "Projects/Archive" });
+    expect(validateRepoRelativePath("Projects\\Archive")).toEqual({ ok: true, normalized: "Projects/Archive" });
     expect(validateRepoRelativePath("ünïcode/nøte s.md")).toEqual({ ok: true, normalized: "ünïcode/nøte s.md" });
   });
   it("rejects absolute paths", () => {
@@ -55,8 +55,8 @@ describe("validateRepoRelativePath", () => {
 
 describe("validateProtectedPaths", () => {
   it("normalizes and dedupes", () => {
-    const r = validateProtectedPaths(["Private/AgentsMemory/", "./Private/AgentsMemory", "Projects/Backus"]);
-    expect(r).toEqual({ ok: true, normalized: ["Private/AgentsMemory", "Projects/Backus"] });
+    const r = validateProtectedPaths(["Private/Hidden/", "./Private/Hidden", "Projects/Archive"]);
+    expect(r).toEqual({ ok: true, normalized: ["Private/Hidden", "Projects/Archive"] });
   });
   it("reports the offending entry", () => {
     const r = validateProtectedPaths(["good", "/bad"]);

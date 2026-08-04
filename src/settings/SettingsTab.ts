@@ -123,28 +123,53 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Sparse checkout protection" });
-    const desc = containerEl.createEl("p", {
+    containerEl.createEl("h3", { text: "Repository rules" });
+    containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text:
-        "Repository-relative paths excluded by sparse checkout. Before any commit or push these must " +
-        "show no Git changes; otherwise the operation is blocked. One path per line.",
+        "Sparse exclusions, .gitignore and .git/info/exclude, managed per item. " +
+        "Each section is collapsed because these lists can get long.",
     });
-    void desc;
-    const invalidNote = containerEl.createDiv({ cls: "ngb-invalid" });
-    new Setting(containerEl).setName("Protected sparse paths").addTextArea((ta) => {
-      ta.inputEl.rows = 4;
-      ta.setValue(s.protectedPaths.join("\n")).onChange(async (v) => {
-        const lines = v.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-        const res = validateProtectedPaths(lines);
-        if (res.ok) {
-          invalidNote.setText("");
-          await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
-        } else {
-          invalidNote.setText(`Rejected "${res.offending}": ${res.reason} Nothing saved.`);
-        }
-      });
+
+    this.renderProtectedPathsSection(containerEl, s);
+    this.renderSparseSection(containerEl);
+    this.renderGitignoreSection(containerEl);
+    this.renderExcludeSection(containerEl);
+
+    containerEl.createEl("h3", { text: "File context menu" });
+    containerEl.createEl("p", {
+      cls: "ngb-settings-note",
+      text:
+        "Which Git entries appear on right click / long tap of a file or folder. " +
+        "Stage/Unstage is always shown while the bridge is enabled.",
     });
+
+    new Setting(containerEl)
+      .setName("Show .gitignore commands")
+      .setDesc("Add to / remove from .gitignore (shared, synced through git).")
+      .addToggle((t) =>
+        t.setValue(s.menuGitignore).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ menuGitignore: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show sparse commands")
+      .setDesc("Hide on this device / show again (sparse checkout exclusions).")
+      .addToggle((t) =>
+        t.setValue(s.menuSparse).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ menuSparse: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Show .git exclude commands")
+      .setDesc("Add to / remove from .git/info/exclude (this clone only, never synced).")
+      .addToggle((t) =>
+        t.setValue(s.menuExclude).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ menuExclude: v });
+        })
+      );
 
     containerEl.createEl("h3", { text: "Notifications" });
 
@@ -277,5 +302,154 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           ).open();
         })
       );
+  }
+
+  // ------------------------------------------------ collapsible rule managers
+
+  /** Collapsed <details> block with a title; content is built by `fill`. */
+  private detailsSection(containerEl: HTMLElement, title: string, hint: string): HTMLElement {
+    const det = containerEl.createEl("details", { cls: "ngb-details" });
+    const sum = det.createEl("summary");
+    sum.createSpan({ text: title });
+    sum.createSpan({ cls: "ngb-details-hint", text: hint });
+    return det.createDiv({ cls: "ngb-details-body" });
+  }
+
+  /** One removable row: monospace text + a Remove button. */
+  private entryRow(listEl: HTMLElement, text: string, onRemove: (() => void) | null): void {
+    const row = listEl.createDiv({ cls: "ngb-entry-row" });
+    row.createSpan({ cls: "ngb-entry-text", text });
+    if (onRemove) {
+      const btn = row.createEl("button", { text: "Remove" });
+      btn.addEventListener("click", onRemove);
+    }
+  }
+
+  /** Input + Add button; `onAdd` receives the trimmed value. */
+  private addRow(body: HTMLElement, placeholder: string, label: string, onAdd: (v: string) => void): void {
+    const row = body.createDiv({ cls: "ngb-add-row" });
+    const input = row.createEl("input", { type: "text", placeholder });
+    const btn = row.createEl("button", { text: label });
+    btn.addEventListener("click", () => {
+      const v = input.value.trim();
+      if (v !== "") onAdd(v);
+      input.value = "";
+    });
+  }
+
+  private renderProtectedPathsSection(containerEl: HTMLElement, s: { protectedPaths: string[]; derivedProtectedPaths: string[]; autoProtectSparse: boolean }): void {
+    const body = this.detailsSection(
+      containerEl,
+      "Protected paths",
+      `${this.plugin.effectiveProtectedPaths().length} effective`
+    );
+    new Setting(body)
+      .setName("Auto-protect sparse exclusions")
+      .setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).")
+      .addToggle((t) =>
+        t.setValue(s.autoProtectSparse).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ autoProtectSparse: v });
+          this.display();
+        })
+      );
+    if (s.autoProtectSparse) {
+      body.createEl("p", {
+        cls: "ngb-settings-note",
+        text: s.derivedProtectedPaths.length
+          ? `Derived from sparse checkout: ${s.derivedProtectedPaths.join(", ")}`
+          : "Derived from sparse checkout: none yet (run Status once to read them from git).",
+      });
+    }
+    const list = body.createDiv();
+    for (const p of s.protectedPaths) {
+      this.entryRow(list, p, async () => {
+        await this.plugin.updateDeviceSettings({
+          protectedPaths: s.protectedPaths.filter((x) => x !== p),
+        });
+        this.display();
+      });
+    }
+    const invalidNote = body.createDiv({ cls: "ngb-invalid" });
+    this.addRow(body, "Folder/Subfolder", "Add manual path", async (v) => {
+      const res = validateProtectedPaths([...s.protectedPaths, v]);
+      if (!res.ok) {
+        invalidNote.setText(`Rejected "${res.offending}": ${res.reason}`);
+        return;
+      }
+      await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
+      this.display();
+    });
+  }
+
+  private renderSparseSection(containerEl: HTMLElement): void {
+    const sparse = this.plugin.lastKnownSparse();
+    const excls = this.plugin.deviceSettings.derivedProtectedPaths;
+    const body = this.detailsSection(
+      containerEl,
+      "Sparse checkout exclusions",
+      sparse ? `${excls.length} hidden` : "run Status to load"
+    );
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text:
+        "Paths hidden from THIS device's working tree (non-cone sparse checkout, applied by git in Termux). " +
+        "Hiding never deletes anything from the repository; removing an exclusion materializes the files again.",
+    });
+    if (sparse && sparse.enabled === false) {
+      body.createEl("p", { cls: "ngb-invalid", text: "Sparse checkout is not enabled in this repository." });
+    }
+    const list = body.createDiv();
+    for (const p of excls) {
+      this.entryRow(list, p, () => void this.plugin.cmdSparseExclude(p, false).then(() => this.display()));
+    }
+    this.addRow(body, "Folder/Subfolder", "Hide path", (v) =>
+      void this.plugin.cmdSparseExclude(v, true).then(() => this.display())
+    );
+  }
+
+  private renderGitignoreSection(containerEl: HTMLElement): void {
+    const body = this.detailsSection(containerEl, ".gitignore", "shared, synced through git");
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text: ".gitignore is a tracked file: entries apply to ALL devices once the change is committed and synced.",
+    });
+    const list = body.createDiv();
+    void this.plugin.loadGitignore().then((entries) => {
+      for (const e of entries) {
+        this.entryRow(list, e, () => void this.plugin.gitignoreRemove(e).then(() => this.display()));
+      }
+    });
+    this.addRow(body, "pattern, e.g. /Scratch/ or *.tmp", "Add entry", (v) =>
+      void this.plugin.gitignoreAdd(v).then(() => this.display())
+    );
+  }
+
+  private renderExcludeSection(containerEl: HTMLElement): void {
+    const body = this.detailsSection(containerEl, ".git/info/exclude", "this clone only, never synced");
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text:
+        "Local ignore rules stored inside .git — they never reach the remote or other devices. " +
+        "Managed through the Termux runner; press Load to read the current file.",
+    });
+    const list = body.createDiv();
+    const render = (entries: string[]) => {
+      list.empty();
+      for (const e of entries) {
+        const path = e.replace(/^\//, "").replace(/\/$/, "");
+        this.entryRow(list, e, () => void this.plugin.cmdExcludeChange(path, false).then(() => this.display()));
+      }
+    };
+    render(this.plugin.currentExcludeLines());
+    new Setting(body).addButton((b) =>
+      b.setButtonText("Load from Termux").onClick(() =>
+        void this.plugin.refreshExcludeList().then((entries) => {
+          if (entries) render(entries);
+        })
+      )
+    );
+    this.addRow(body, "Folder/Subfolder", "Add to exclude", (v) =>
+      void this.plugin.cmdExcludeChange(v, true).then(() => this.display())
+    );
   }
 }

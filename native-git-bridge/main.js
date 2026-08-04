@@ -31,8 +31,8 @@ var import_obsidian12 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 3;
-var DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
+var RUNNER_MIN_VERSION = 4;
+var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
 var REQUESTS_DIR = "requests";
 var RESULTS_DIR = "results";
@@ -77,6 +77,8 @@ var DEFAULT_DEVICE_SETTINGS = {
   repoPathHint: "",
   authToken: "",
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
+  derivedProtectedPaths: [],
+  autoProtectSparse: true,
   opTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
   autoPullOnOpen: false,
   autoSyncOnClose: false,
@@ -87,7 +89,10 @@ var DEFAULT_DEVICE_SETTINGS = {
   companionUriTemplate: "nativegitbridge://run?id={id}",
   showSuccessModals: false,
   notificationMode: "notice",
-  suppressObsidianGitWarning: false
+  suppressObsidianGitWarning: false,
+  menuGitignore: true,
+  menuSparse: true,
+  menuExclude: true
 };
 var DeviceLocalSettingsStore = class {
   constructor(backend, scopeId) {
@@ -166,6 +171,9 @@ var DeviceLocalSettingsStore = class {
     };
     if (!Array.isArray(merged.protectedPaths) || merged.protectedPaths.some((p) => typeof p !== "string")) {
       merged.protectedPaths = [...DEFAULT_PROTECTED_PATHS];
+    }
+    if (!Array.isArray(merged.derivedProtectedPaths) || merged.derivedProtectedPaths.some((p) => typeof p !== "string")) {
+      merged.derivedProtectedPaths = [];
     }
     return merged;
   }
@@ -533,25 +541,35 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ repoPathHint: v.trim() });
       })
     );
-    containerEl.createEl("h3", { text: "Sparse checkout protection" });
-    const desc = containerEl.createEl("p", {
+    containerEl.createEl("h3", { text: "Repository rules" });
+    containerEl.createEl("p", {
       cls: "ngb-settings-note",
-      text: "Repository-relative paths excluded by sparse checkout. Before any commit or push these must show no Git changes; otherwise the operation is blocked. One path per line."
+      text: "Sparse exclusions, .gitignore and .git/info/exclude, managed per item. Each section is collapsed because these lists can get long."
     });
-    const invalidNote = containerEl.createDiv({ cls: "ngb-invalid" });
-    new import_obsidian3.Setting(containerEl).setName("Protected sparse paths").addTextArea((ta) => {
-      ta.inputEl.rows = 4;
-      ta.setValue(s.protectedPaths.join("\n")).onChange(async (v) => {
-        const lines = v.split("\n").map((l) => l.trim()).filter((l) => l !== "");
-        const res = validateProtectedPaths(lines);
-        if (res.ok) {
-          invalidNote.setText("");
-          await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
-        } else {
-          invalidNote.setText(`Rejected "${res.offending}": ${res.reason} Nothing saved.`);
-        }
-      });
+    this.renderProtectedPathsSection(containerEl, s);
+    this.renderSparseSection(containerEl);
+    this.renderGitignoreSection(containerEl);
+    this.renderExcludeSection(containerEl);
+    containerEl.createEl("h3", { text: "File context menu" });
+    containerEl.createEl("p", {
+      cls: "ngb-settings-note",
+      text: "Which Git entries appear on right click / long tap of a file or folder. Stage/Unstage is always shown while the bridge is enabled."
     });
+    new import_obsidian3.Setting(containerEl).setName("Show .gitignore commands").setDesc("Add to / remove from .gitignore (shared, synced through git).").addToggle(
+      (t) => t.setValue(s.menuGitignore).onChange(async (v) => {
+        await this.plugin.updateDeviceSettings({ menuGitignore: v });
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Show sparse commands").setDesc("Hide on this device / show again (sparse checkout exclusions).").addToggle(
+      (t) => t.setValue(s.menuSparse).onChange(async (v) => {
+        await this.plugin.updateDeviceSettings({ menuSparse: v });
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Show .git exclude commands").setDesc("Add to / remove from .git/info/exclude (this clone only, never synced).").addToggle(
+      (t) => t.setValue(s.menuExclude).onChange(async (v) => {
+        await this.plugin.updateDeviceSettings({ menuExclude: v });
+      })
+    );
     containerEl.createEl("h3", { text: "Notifications" });
     new import_obsidian3.Setting(containerEl).setName("Show a result window on success").setDesc(
       "Off: successful operations only update the status panel (and the log). Failures, conflicts and safety blocks are always shown as a window."
@@ -634,6 +652,147 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
           }
         ).open();
       })
+    );
+  }
+  // ------------------------------------------------ collapsible rule managers
+  /** Collapsed <details> block with a title; content is built by `fill`. */
+  detailsSection(containerEl, title, hint) {
+    const det = containerEl.createEl("details", { cls: "ngb-details" });
+    const sum = det.createEl("summary");
+    sum.createSpan({ text: title });
+    sum.createSpan({ cls: "ngb-details-hint", text: hint });
+    return det.createDiv({ cls: "ngb-details-body" });
+  }
+  /** One removable row: monospace text + a Remove button. */
+  entryRow(listEl, text, onRemove) {
+    const row = listEl.createDiv({ cls: "ngb-entry-row" });
+    row.createSpan({ cls: "ngb-entry-text", text });
+    if (onRemove) {
+      const btn = row.createEl("button", { text: "Remove" });
+      btn.addEventListener("click", onRemove);
+    }
+  }
+  /** Input + Add button; `onAdd` receives the trimmed value. */
+  addRow(body, placeholder, label2, onAdd) {
+    const row = body.createDiv({ cls: "ngb-add-row" });
+    const input = row.createEl("input", { type: "text", placeholder });
+    const btn = row.createEl("button", { text: label2 });
+    btn.addEventListener("click", () => {
+      const v = input.value.trim();
+      if (v !== "") onAdd(v);
+      input.value = "";
+    });
+  }
+  renderProtectedPathsSection(containerEl, s) {
+    const body = this.detailsSection(
+      containerEl,
+      "Protected paths",
+      `${this.plugin.effectiveProtectedPaths().length} effective`
+    );
+    new import_obsidian3.Setting(body).setName("Auto-protect sparse exclusions").setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).").addToggle(
+      (t) => t.setValue(s.autoProtectSparse).onChange(async (v) => {
+        await this.plugin.updateDeviceSettings({ autoProtectSparse: v });
+        this.display();
+      })
+    );
+    if (s.autoProtectSparse) {
+      body.createEl("p", {
+        cls: "ngb-settings-note",
+        text: s.derivedProtectedPaths.length ? `Derived from sparse checkout: ${s.derivedProtectedPaths.join(", ")}` : "Derived from sparse checkout: none yet (run Status once to read them from git)."
+      });
+    }
+    const list = body.createDiv();
+    for (const p of s.protectedPaths) {
+      this.entryRow(list, p, async () => {
+        await this.plugin.updateDeviceSettings({
+          protectedPaths: s.protectedPaths.filter((x) => x !== p)
+        });
+        this.display();
+      });
+    }
+    const invalidNote = body.createDiv({ cls: "ngb-invalid" });
+    this.addRow(body, "Folder/Subfolder", "Add manual path", async (v) => {
+      const res = validateProtectedPaths([...s.protectedPaths, v]);
+      if (!res.ok) {
+        invalidNote.setText(`Rejected "${res.offending}": ${res.reason}`);
+        return;
+      }
+      await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
+      this.display();
+    });
+  }
+  renderSparseSection(containerEl) {
+    const sparse = this.plugin.lastKnownSparse();
+    const excls = this.plugin.deviceSettings.derivedProtectedPaths;
+    const body = this.detailsSection(
+      containerEl,
+      "Sparse checkout exclusions",
+      sparse ? `${excls.length} hidden` : "run Status to load"
+    );
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text: "Paths hidden from THIS device's working tree (non-cone sparse checkout, applied by git in Termux). Hiding never deletes anything from the repository; removing an exclusion materializes the files again."
+    });
+    if (sparse && sparse.enabled === false) {
+      body.createEl("p", { cls: "ngb-invalid", text: "Sparse checkout is not enabled in this repository." });
+    }
+    const list = body.createDiv();
+    for (const p of excls) {
+      this.entryRow(list, p, () => void this.plugin.cmdSparseExclude(p, false).then(() => this.display()));
+    }
+    this.addRow(
+      body,
+      "Folder/Subfolder",
+      "Hide path",
+      (v) => void this.plugin.cmdSparseExclude(v, true).then(() => this.display())
+    );
+  }
+  renderGitignoreSection(containerEl) {
+    const body = this.detailsSection(containerEl, ".gitignore", "shared, synced through git");
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text: ".gitignore is a tracked file: entries apply to ALL devices once the change is committed and synced."
+    });
+    const list = body.createDiv();
+    void this.plugin.loadGitignore().then((entries) => {
+      for (const e of entries) {
+        this.entryRow(list, e, () => void this.plugin.gitignoreRemove(e).then(() => this.display()));
+      }
+    });
+    this.addRow(
+      body,
+      "pattern, e.g. /Scratch/ or *.tmp",
+      "Add entry",
+      (v) => void this.plugin.gitignoreAdd(v).then(() => this.display())
+    );
+  }
+  renderExcludeSection(containerEl) {
+    const body = this.detailsSection(containerEl, ".git/info/exclude", "this clone only, never synced");
+    body.createEl("p", {
+      cls: "ngb-settings-note",
+      text: "Local ignore rules stored inside .git \u2014 they never reach the remote or other devices. Managed through the Termux runner; press Load to read the current file."
+    });
+    const list = body.createDiv();
+    const render = (entries) => {
+      list.empty();
+      for (const e of entries) {
+        const path = e.replace(/^\//, "").replace(/\/$/, "");
+        this.entryRow(list, e, () => void this.plugin.cmdExcludeChange(path, false).then(() => this.display()));
+      }
+    };
+    render(this.plugin.currentExcludeLines());
+    new import_obsidian3.Setting(body).addButton(
+      (b) => b.setButtonText("Load from Termux").onClick(
+        () => void this.plugin.refreshExcludeList().then((entries) => {
+          if (entries) render(entries);
+        })
+      )
+    );
+    this.addRow(
+      body,
+      "Folder/Subfolder",
+      "Add to exclude",
+      (v) => void this.plugin.cmdExcludeChange(v, true).then(() => this.display())
     );
   }
 };
@@ -1044,6 +1203,19 @@ function countSkipWorktree(text) {
     if (line.startsWith("S ")) n++;
   }
   return n;
+}
+function sparseExclusionPaths(patterns) {
+  const out = [];
+  for (const raw of patterns) {
+    let p = raw.trim();
+    if (!p.startsWith("!")) continue;
+    p = p.slice(1).trim();
+    if (p.startsWith("/")) p = p.slice(1);
+    p = p.replace(/\/+$/, "");
+    if (p === "" || /[*?[\]]/.test(p)) continue;
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
 }
 function parseSparseState(fields) {
   const enabled = fields.sparseEnabled.trim() === "true";
@@ -1968,7 +2140,7 @@ var OperationLogModal = class extends import_obsidian11.Modal {
 var DEFAULT_SHARED_PREFS = { showStatusBar: true, showRibbonIcon: true };
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
-var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
+var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
@@ -1991,6 +2163,10 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     /** Time of the last obsidian://native-git-bridge-ack from the companion. */
     this.lastCompanionAckMs = 0;
     this.ackWaiters = [];
+    // -------------------- repo config management (sparse / gitignore / exclude)
+    /** In-memory caches so the file context menu can decide add-vs-remove synchronously. */
+    this.gitignoreLines = [];
+    this.excludeLines = [];
   }
   async onload() {
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
@@ -2032,10 +2208,73 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     );
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
+    this.registerFileMenu();
     this.app.workspace.onLayoutReady(() => {
       void this.startupChecks();
     });
     this.registerAutomaticActions();
+  }
+  /**
+   * Right-click / long-tap entries on files and folders: stage/unstage,
+   * .gitignore, sparse hide/show, .git/info/exclude. All decisions come from
+   * in-memory caches (last status, .gitignore, exclude list) because menu
+   * building is synchronous — no Termux round trip here.
+   */
+  registerFileMenu() {
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!import_obsidian12.Platform.isAndroidApp) return;
+        if (!this.deviceSettings.enabledOnThisDevice) return;
+        const path = file.path;
+        const v = validateRepoRelativePath(path);
+        if (!v.ok) return;
+        const p = v.normalized;
+        const st = this.lastStatus?.status;
+        const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
+        const unstaged = (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) || (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
+        if (unstaged || !st) {
+          menu.addItem(
+            (i) => i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
+          );
+        }
+        if (staged) {
+          menu.addItem(
+            (i) => i.setTitle("Git: Unstage").setIcon("minus-circle").onClick(() => void this.cmdUnstageFile(p))
+          );
+        }
+        if (this.deviceSettings.menuGitignore) {
+          if (this.isGitignored(p)) {
+            menu.addItem(
+              (i) => i.setTitle("Git: Remove from .gitignore").setIcon("eye").onClick(() => void this.gitignoreRemove(`/${p}`))
+            );
+          } else {
+            menu.addItem(
+              (i) => i.setTitle("Git: Add to .gitignore").setIcon("eye-off").onClick(() => void this.gitignoreAdd(`/${p}`))
+            );
+          }
+        }
+        if (!this.deviceSettings.menuSparse) {
+        } else if (this.isSparseExcluded(p)) {
+          menu.addItem(
+            (i) => i.setTitle("Git: Show again (remove sparse exclusion)").setIcon("eye").onClick(() => void this.cmdSparseExclude(p, false))
+          );
+        } else {
+          menu.addItem(
+            (i) => i.setTitle("Git: Hide on this device (sparse)").setIcon("eye-off").onClick(() => void this.cmdSparseExclude(p, true))
+          );
+        }
+        if (!this.deviceSettings.menuExclude) {
+        } else if (this.isExcluded(p)) {
+          menu.addItem(
+            (i) => i.setTitle("Git: Remove from .git exclude").setIcon("eye").onClick(() => void this.cmdExcludeChange(p, false))
+          );
+        } else {
+          menu.addItem(
+            (i) => i.setTitle("Git: Add to .git exclude (local ignore)").setIcon("eye-off").onClick(() => void this.cmdExcludeChange(p, true))
+          );
+        }
+      })
+    );
   }
   registerAutomaticActions() {
     const s = this.deviceSettings;
@@ -2075,7 +2314,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     try {
       const req = createRequest(
         "sync",
-        { protectedPaths: s.protectedPaths, message: "vault sync on close (native git bridge)" },
+        { protectedPaths: this.effectiveProtectedPaths(), message: "vault sync on close (native git bridge)" },
         s.authToken,
         s.opTimeoutSeconds
       );
@@ -2153,6 +2392,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     this.warnIfObsidianGitEnabledOnAndroid();
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
+    await this.loadGitignore();
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", "Auto pull on open.");
@@ -2620,6 +2860,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       lsFilesV: d.lsFilesV
     });
     const lastCommit = parseLastCommit(d.lastCommit ?? "");
+    this.absorbSparsePatterns(sparse);
     this.lastStatus = { status, sparse, lastCommit, fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString() };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -2645,7 +2886,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     }
   }
   async cmdVerifySparseSafety() {
-    const protectedPaths = this.deviceSettings.protectedPaths;
+    const protectedPaths = this.effectiveProtectedPaths();
     if (protectedPaths.length === 0) {
       new import_obsidian12.Notice("No protected sparse paths configured (see settings).");
       return;
@@ -2665,6 +2906,113 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     const report = evaluateSparseSafety(d.statusProtected ?? "", d.stagedProtected ?? "", protectedPaths);
     if (!report.safe) this.statusBar?.set("error");
     new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+  }
+  /** Hide (exclude=true) or materialize a path via non-cone sparse patterns. */
+  async cmdSparseExclude(path, exclude) {
+    const go = async () => {
+      const result = await this.runOperation(exclude ? "sparse-exclude-add" : "sparse-exclude-remove", { path });
+      if (!result) return;
+      if (!result.ok) {
+        new ResultModal(this.app, "Sparse change failed", [result.error?.message ?? "Unknown error."], {
+          stdout: result.error?.stdout,
+          stderr: result.error?.stderr,
+          isError: true
+        }).open();
+        return;
+      }
+      this.absorbStatusData(result.data ?? {});
+      new import_obsidian12.Notice(exclude ? `Hidden via sparse checkout: ${path}` : `Materialized again: ${path}`);
+    };
+    if (exclude) {
+      new ConfirmModal(
+        this.app,
+        {
+          title: "Hide via sparse checkout?",
+          body: [
+            `'${path}' will be removed from THIS device's working tree (git sparse-checkout exclusion).`,
+            "Nothing is deleted from the repository or other devices, and the path automatically joins the protected set, so it can never be committed as a deletion from here."
+          ],
+          confirmLabel: "Hide on this device"
+        },
+        async (ok) => {
+          if (ok) await go();
+        }
+      ).open();
+    } else {
+      await go();
+    }
+  }
+  /** Add/remove a line in .git/info/exclude (device-local ignore, via the runner). */
+  async cmdExcludeChange(path, add) {
+    const result = await this.runOperation(add ? "exclude-add" : "exclude-remove", { path });
+    if (!result) return;
+    if (!result.ok) {
+      new ResultModal(this.app, "Exclude change failed", [result.error?.message ?? "Unknown error."], {
+        stdout: result.error?.stdout,
+        stderr: result.error?.stderr,
+        isError: true
+      }).open();
+      return;
+    }
+    this.absorbExcludeList(result.data?.excludeList);
+    new import_obsidian12.Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
+  }
+  async refreshExcludeList() {
+    const result = await this.runOperation("exclude-list");
+    if (!result?.ok) return null;
+    this.absorbExcludeList(result.data?.excludeList);
+    return this.excludeLines;
+  }
+  absorbExcludeList(raw) {
+    if (raw === void 0) return;
+    this.excludeLines = raw.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+  }
+  isExcluded(path) {
+    return [`/${path}`, path, `/${path}/`, `${path}/`].some((v) => this.excludeLines.includes(v));
+  }
+  async loadGitignore() {
+    try {
+      const raw = await this.app.vault.adapter.read(".gitignore");
+      this.gitignoreLines = raw.split(/\r?\n/);
+    } catch {
+      this.gitignoreLines = [];
+    }
+    return this.gitignoreLines.filter((l) => l.trim() !== "");
+  }
+  isGitignored(path) {
+    const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
+    return this.gitignoreLines.some((l) => variants.includes(l.trim()));
+  }
+  async gitignoreAdd(entry2) {
+    if (entry2.trim() === "" || _NativeGitBridgePlugin.CONTROL_CHARS.test(entry2)) {
+      new import_obsidian12.Notice("Invalid .gitignore entry.");
+      return;
+    }
+    await this.loadGitignore();
+    if (this.gitignoreLines.some((l) => l.trim() === entry2.trim())) return;
+    while (this.gitignoreLines.length > 0 && this.gitignoreLines[this.gitignoreLines.length - 1] === "") {
+      this.gitignoreLines.pop();
+    }
+    this.gitignoreLines.push(entry2.trim());
+    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
+    new import_obsidian12.Notice(`Added to .gitignore: ${entry2.trim()}`);
+  }
+  async gitignoreRemove(entry2) {
+    await this.loadGitignore();
+    const before = this.gitignoreLines.length;
+    this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry2.trim());
+    if (this.gitignoreLines.length === before) return;
+    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
+    new import_obsidian12.Notice(`Removed from .gitignore: ${entry2.trim()}`);
+  }
+  isSparseExcluded(path) {
+    return this.deviceSettings.derivedProtectedPaths.includes(path);
+  }
+  lastKnownSparse() {
+    return this.lastStatus?.sparse ?? null;
+  }
+  currentExcludeLines() {
+    return [...this.excludeLines];
   }
   async cmdReapplySparse() {
     new ConfirmModal(
@@ -2713,6 +3061,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       skipWorktreeCount: d.skipWorktreeCount,
       lsFilesV: d.lsFilesV
     });
+    this.absorbSparsePatterns(sparse);
     this.lastStatus = {
       status,
       sparse,
@@ -2722,6 +3071,39 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
   }
+  /**
+   * Refresh the DERIVED protected paths from the repository's own sparse
+   * exclusions, so the safety gate follows the repo configuration instead of
+   * a hardcoded list. Persisted device-locally: protection must hold from the
+   * very first operation after a restart, before any fresh status arrives.
+   */
+  absorbSparsePatterns(sparse) {
+    if (!sparse.enabled) return;
+    const candidates = sparseExclusionPaths(sparse.patterns);
+    const validated = validateProtectedPaths(candidates);
+    const derived = validated.ok ? validated.normalized : [];
+    const prev = this.deviceSettings.derivedProtectedPaths;
+    if (derived.length === prev.length && derived.every((p, i) => p === prev[i])) return;
+    this.deviceSettings = this.store.write({ derivedProtectedPaths: derived });
+    this.log.add(
+      "info",
+      "sparse",
+      `Derived protected paths refreshed from sparse exclusions: ${derived.join(", ") || "(none)"}.`
+    );
+  }
+  /**
+   * The protected set actually enforced: manual paths plus (unless disabled)
+   * the exclusions git itself reports. Every operation argument goes through
+   * here — never through deviceSettings.protectedPaths directly.
+   */
+  effectiveProtectedPaths() {
+    const s = this.deviceSettings;
+    const merged = [...s.protectedPaths];
+    if (s.autoProtectSparse) {
+      for (const p of s.derivedProtectedPaths) if (!merged.includes(p)) merged.push(p);
+    }
+    return merged;
+  }
   /** Shared error rendering for mutating operations. Never a bare "failed". */
   renderMutationError(title, result) {
     const err = result.error;
@@ -2730,7 +3112,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       const report = evaluateSparseSafety(
         d.statusProtected ?? err.stdout ?? "",
         d.stagedProtected ?? err.stderr ?? "",
-        this.deviceSettings.protectedPaths
+        this.effectiveProtectedPaths()
       );
       this.statusBar?.set("error");
       new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
@@ -2767,7 +3149,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   }
   async cmdPull(silent = false) {
     const result = await this.runOperation("pull", {
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: pull failed", result);
@@ -2783,7 +3165,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       async (message) => {
         if (message === null) return;
         const result = await this.runOperation("commit", {
-          protectedPaths: this.deviceSettings.protectedPaths,
+          protectedPaths: this.effectiveProtectedPaths(),
           message
         });
         if (!result) return;
@@ -2802,7 +3184,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   }
   async cmdPush() {
     const result = await this.runOperation("push", {
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: push failed", result);
@@ -2811,7 +3193,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   }
   async cmdSync(message, silent = false) {
     const result = await this.runOperation("sync", {
-      protectedPaths: this.deviceSettings.protectedPaths,
+      protectedPaths: this.effectiveProtectedPaths(),
       message: message ?? ""
     });
     if (!result) return;
@@ -2948,7 +3330,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
         const result = await this.runOperation("restore-file", {
           path: currentPath,
           commit: e.hash,
-          protectedPaths: this.deviceSettings.protectedPaths
+          protectedPaths: this.effectiveProtectedPaths()
         });
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
@@ -3035,7 +3417,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   // ------------------------------------------------- per-file staging actions
   async cmdStageAll() {
     const result = await this.runOperation("stage-all", {
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
@@ -3044,7 +3426,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   }
   async cmdUnstageAll() {
     const result = await this.runOperation("unstage-all", {
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
@@ -3054,7 +3436,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   async cmdStageFile(path) {
     const result = await this.runOperation("stage-file", {
       path,
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
@@ -3063,7 +3445,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   async cmdUnstageFile(path) {
     const result = await this.runOperation("unstage-file", {
       path,
-      protectedPaths: this.deviceSettings.protectedPaths
+      protectedPaths: this.effectiveProtectedPaths()
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage failed", result);
@@ -3086,7 +3468,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
         if (!confirmed) return;
         const result = await this.runOperation("discard-file", {
           path,
-          protectedPaths: this.deviceSettings.protectedPaths
+          protectedPaths: this.effectiveProtectedPaths()
         });
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
@@ -3103,7 +3485,9 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
-    report.pluginSide["Protected paths"] = s.protectedPaths.join(", ") || "(none)";
+    report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
+    report.pluginSide["Protected paths (derived from sparse)"] = (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";
+    report.pluginSide["Protected paths (effective)"] = this.effectiveProtectedPaths().join(", ") || "(none)";
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";
     report.pluginSide["Pending requests"] = String(await this.client.pendingRequestCount());
     report.pluginSide["Active operation"] = this.lock.active ? `${this.lock.active.action} (${this.lock.active.id})` : "none";
@@ -3113,7 +3497,10 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       );
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
-    if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
+    if (this.effectiveProtectedPaths().length === 0)
+      report.problems.push(
+        "No protected sparse paths (neither manual nor derived from sparse exclusions). Fine for full checkouts; risky if this repo uses sparse checkout."
+      );
     if (import_obsidian12.Platform.isAndroidApp) {
       if (this.isObsidianGitActiveOnDevice()) {
         report.problems.push(
@@ -3149,6 +3536,10 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     this.activeCancel.cancel();
   }
 };
+// .gitignore is a plain tracked file in the vault: edited directly, no Termux.
+// Built via the RegExp constructor so this source file contains no raw control bytes.
+_NativeGitBridgePlugin.CONTROL_CHARS = new RegExp("[\\u0000-\\u001F\\u007F]");
+var NativeGitBridgePlugin = _NativeGitBridgePlugin;
 function getLocalStorageBackend() {
   try {
     const ls = globalThis.localStorage;

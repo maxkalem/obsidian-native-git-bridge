@@ -23,7 +23,11 @@ describe("DeviceLocalSettingsStore", () => {
     expect(s).toEqual(DEFAULT_DEVICE_SETTINGS);
     expect(s.enabledOnThisDevice).toBe(false);
     expect(s.autoPullOnOpen).toBe(false);
-    expect(s.protectedPaths).toEqual(["Private/AgentsMemory", "Projects/Backus"]);
+    // No baked-in personal defaults: protection derives from the repo's own
+    // sparse exclusions (plus whatever the user pins manually).
+    expect(s.protectedPaths).toEqual([]);
+    expect(s.derivedProtectedPaths).toEqual([]);
+    expect(s.autoProtectSparse).toBe(true);
   });
 
   it("persists patches under a vault-scoped key", () => {

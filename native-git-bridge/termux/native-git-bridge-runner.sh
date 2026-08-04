@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=3
+RUNNER_VERSION=4
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -734,6 +734,96 @@ action_discard_file() {
   DATA=$(merge_data "$DATA" "$(obj_from_fields discarded "$path" wasTracked "$tracked")")
 }
 
+# ---- sparse / exclude management ----------------------------------------------
+# The bridge edits CONFIG (sparse patterns, .git/info/exclude), never history.
+# Only non-cone (pattern) sparse mode is supported for exclusions: cone mode
+# cannot express "hide this directory" as a pattern.
+
+require_noncone_sparse() {
+  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
+    ERROR=$(err_json GIT_FAILED "Sparse checkout is not enabled in this repository. In Termux run: git sparse-checkout set --no-cone '/*'  (then retry)." "" "")
+    return 1
+  fi
+  if [ "$(git config --get core.sparseCheckoutCone 2>/dev/null || true)" = "true" ]; then
+    ERROR=$(err_json GIT_FAILED "This repository uses cone-mode sparse checkout; per-path exclusions need pattern (non-cone) mode." "" "")
+    return 1
+  fi
+  return 0
+}
+
+# `!/path` (no trailing slash) matches the path whether it is a file or a
+# directory; trailing-slash variants are still recognized when REMOVING.
+action_sparse_exclude_add() {
+  local req_file="$1" path
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  require_noncone_sparse || return 1
+  local tmpf; tmpf="$(mktemp)"
+  git sparse-checkout list > "$tmpf" 2>/dev/null || true
+  if ! grep -qxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf"; then
+    printf '!/%s\n' "$path" >> "$tmpf"
+    if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf"; then
+      rm -f "$tmpf"
+      ERROR=$(err_json GIT_FAILED "git sparse-checkout set failed." "$GIT_OUT" "$GIT_ERR")
+      return 1
+    fi
+  fi
+  rm -f "$tmpf"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields sparseExcluded "$path")")
+}
+
+action_sparse_exclude_remove() {
+  local req_file="$1" path
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  require_noncone_sparse || return 1
+  local tmpf; tmpf="$(mktemp)"
+  git sparse-checkout list > "$tmpf" 2>/dev/null || true
+  grep -vxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf" > "$tmpf.new" || true
+  if ! cmp -s "$tmpf" "$tmpf.new"; then
+    if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf.new"; then
+      rm -f "$tmpf" "$tmpf.new"
+      ERROR=$(err_json GIT_FAILED "git sparse-checkout set failed." "$GIT_OUT" "$GIT_ERR")
+      return 1
+    fi
+  fi
+  rm -f "$tmpf" "$tmpf.new"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields sparseUnexcluded "$path")")
+}
+
+exclude_file_path() { git rev-parse --git-path info/exclude; }
+
+emit_exclude_list() { # DATA <- current exclude file content
+  local xf; xf="$(exclude_file_path)"
+  DATA=$(obj_from_fields excludeList "$(cat "$xf" 2>/dev/null || true)")
+}
+
+action_exclude_list() { emit_exclude_list; }
+
+action_exclude_add() {
+  local req_file="$1" path xf
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  xf="$(exclude_file_path)"
+  mkdir -p "$(dirname "$xf")"
+  grep -qxF "/$path" "$xf" 2>/dev/null || printf '/%s\n' "$path" >> "$xf"
+  emit_exclude_list
+}
+
+action_exclude_remove() {
+  local req_file="$1" path xf
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  xf="$(exclude_file_path)"
+  if [ -f "$xf" ]; then
+    grep -vxF -e "/$path" -e "$path" -e "/$path/" -e "$path/" "$xf" > "$xf.tmp" || true
+    mv "$xf.tmp" "$xf"
+  fi
+  emit_exclude_list
+}
+
 # ---- request processing ------------------------------------------------------
 
 process_request() {
@@ -812,6 +902,11 @@ process_request() {
     discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
     stage-all)             action_stage_all "$req_file" || { ok=false; ec=1; } ;;
     unstage-all)           action_unstage_all "$req_file" || { ok=false; ec=1; } ;;
+    sparse-exclude-add)    action_sparse_exclude_add "$req_file" || { ok=false; ec=1; } ;;
+    sparse-exclude-remove) action_sparse_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
+    exclude-add)           action_exclude_add "$req_file" || { ok=false; ec=1; } ;;
+    exclude-remove)        action_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
+    exclude-list)          action_exclude_list || { ok=false; ec=1; } ;;
     *)
       ok=false; ec=1
       ERROR=$(err_json "BAD_REQUEST" "Action not allowed: $action" "" "")

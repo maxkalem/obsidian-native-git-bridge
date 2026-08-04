@@ -96,3 +96,13 @@ The **plugin** computes the verdict; the runner additionally refuses `commit`/`p
   Termux must not linger), and the runner sweeps orphaned `.retried` markers.
 - The runner processes requests oldest-first, one at a time, and exits when the
   queue is empty. It never daemonizes.
+
+## Config-management actions (runner ≥ 4)
+`sparse-exclude-add` / `sparse-exclude-remove` edit non-cone sparse patterns
+(`!/<path>` appended / removed, full list re-applied via
+`git sparse-checkout set --no-cone --stdin`); cone-mode repos are refused.
+`exclude-add` / `exclude-remove` / `exclude-list` manage literal lines in
+`$GIT_DIR/info/exclude`. All take a validated repo-relative `path`; all return
+fresh status fields (and `excludeList`) so the plugin can refresh its caches.
+`.gitignore` is a tracked vault file and is edited by the plugin directly —
+no runner action exists for it.

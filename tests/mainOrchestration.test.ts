@@ -52,6 +52,7 @@ type MemAdapter = ReturnType<typeof memAdapter>;
 
 function makeApp(adapter: MemAdapter): Any {
   let layoutReady: (() => void) | null = null;
+  const fileMenuHandlers: Array<(menu: Any, file: Any) => void> = [];
   return {
     appId: "test-app-id",
     vault: {
@@ -70,7 +71,30 @@ function makeApp(adapter: MemAdapter): Any {
       revealLeaf: () => undefined,
       getLeaf: () => ({ openFile: async () => undefined }),
       getActiveFile: () => null,
-      on: () => ({}),
+      on: (name: string, cb: Any) => {
+        if (name === "file-menu") fileMenuHandlers.push(cb);
+        return {};
+      },
+      /** Test hook: simulate a right click / long tap; returns the item titles. */
+      fireFileMenu: (path: string): string[] => {
+        const titles: string[] = [];
+        const menu = {
+          addItem: (fn: (i: Any) => void) => {
+            const item: Any = {
+              setTitle: (t: string) => {
+                titles.push(t);
+                return item;
+              },
+              setIcon: () => item,
+              onClick: () => item,
+            };
+            fn(item);
+            return menu;
+          },
+        };
+        for (const h of fileMenuHandlers) h(menu, { path });
+        return titles;
+      },
     },
   };
 }
@@ -84,7 +108,7 @@ interface FakeRunner {
   onTrigger: ((id: string) => void) | null;
 }
 
-function okStatusResult(id: string, runnerVersion = 3) {
+function okStatusResult(id: string, runnerVersion = 4) {
   return JSON.stringify({
     protocolVersion: 1,
     id,
@@ -96,7 +120,7 @@ function okStatusResult(id: string, runnerVersion = 3) {
       branchInfo: "# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0",
       sparseEnabled: "true",
       sparseCone: "false",
-      sparseList: "/*\n!Private/AgentsMemory/",
+      sparseList: "/*\n!Private/Hidden/",
       skipWorktreeCount: "3900",
       lastCommit: "0123abc4567890def\t2026-08-01T10:00:00Z\tlast subject",
       remoteUrl: "https://***@example.com/vault.git",
@@ -440,6 +464,69 @@ describe("startup reconciliation", () => {
   });
 });
 
+describe("protected paths derived from sparse", () => {
+  it("absorbs sparse exclusions from a status round trip into the effective protected set", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id)); // sparseList: /* + !Private/Hidden/
+    };
+    expect(h.plugin.effectiveProtectedPaths()).toEqual([]);
+    await h.plugin.cmdStatus(true);
+    expect(h.plugin.effectiveProtectedPaths()).toEqual(["Private/Hidden"]);
+    // The derived set survives a reload (persisted device-locally, protection
+    // must hold before the first fresh status).
+    expect(h.plugin.deviceSettings.derivedProtectedPaths).toEqual(["Private/Hidden"]);
+    // Manual paths merge in on top, deduplicated.
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Manual/Pin", "Private/Hidden"] });
+    expect(h.plugin.effectiveProtectedPaths()).toEqual(["Manual/Pin", "Private/Hidden"]);
+    // Turning auto-protect off leaves only manual pins.
+    await h.plugin.updateDeviceSettings({ autoProtectSparse: false });
+    expect(h.plugin.effectiveProtectedPaths()).toEqual(["Manual/Pin", "Private/Hidden"]);
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Manual/Pin"] });
+    expect(h.plugin.effectiveProtectedPaths()).toEqual(["Manual/Pin"]);
+  });
+});
+
+describe("file context menu", () => {
+  it("works for folders and shows exactly one of Add/Remove per group, by state", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id));
+    };
+    await h.plugin.cmdStatus(true); // derives the Private/Hidden sparse exclusion
+    // A FOLDER that is currently sparse-hidden:
+    const titles = h.app.workspace.fireFileMenu("Private/Hidden");
+    expect(titles).toContain("Git: Show again (remove sparse exclusion)");
+    expect(titles).not.toContain("Git: Hide on this device (sparse)");
+    // Not in .gitignore / exclude -> only the Add variants:
+    expect(titles).toContain("Git: Add to .gitignore");
+    expect(titles).not.toContain("Git: Remove from .gitignore");
+    expect(titles).toContain("Git: Add to .git exclude (local ignore)");
+    expect(titles).not.toContain("Git: Remove from .git exclude");
+  });
+
+  it("per-group toggles remove their entries from the menu", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ menuGitignore: false, menuSparse: false, menuExclude: false });
+    const titles = h.app.workspace.fireFileMenu("Notes/a.md");
+    expect(titles.filter((t: string) => t.includes("gitignore"))).toHaveLength(0);
+    expect(titles.filter((t: string) => t.toLowerCase().includes("sparse"))).toHaveLength(0);
+    expect(titles.filter((t: string) => t.includes("exclude"))).toHaveLength(0);
+  });
+
+  it("adds nothing on non-Android platforms", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    __setPlatformAndroid(false);
+    expect(h.app.workspace.fireFileMenu("Notes/a.md")).toHaveLength(0);
+  });
+});
+
 describe("sync on close (fire and forget)", () => {
   it("queues the request and triggers the transport without polling", async () => {
     const h = await loadPlugin();
@@ -450,7 +537,8 @@ describe("sync on close (fire and forget)", () => {
     expect(h.runner.uris).toHaveLength(1);
     const req = JSON.parse([...h.adapter.files.values()].find((v) => v.includes('"sync"'))!);
     expect(req.action).toBe("sync");
-    expect(req.args.protectedPaths).toEqual(["Private/AgentsMemory", "Projects/Backus"]);
+    // The protected set is the EFFECTIVE one: manual + derived-from-sparse.
+    expect(req.args.protectedPaths).toEqual(h.plugin.effectiveProtectedPaths());
   });
 
   it("respects the minimum auto-sync gap", async () => {

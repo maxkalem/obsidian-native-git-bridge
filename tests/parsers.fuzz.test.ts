@@ -233,7 +233,7 @@ describe("parseStatusPorcelainV1 fuzz", () => {
 
   it("never throws on garbage or truncation", () => {
     const rnd = mulberry32(0x1234);
-    const sample = ' D Private/AgentsMemory/x.md\nR  "old n\\303\\270te.md" -> new.md\n?? a.md\n';
+    const sample = ' D Private/Hidden/x.md\nR  "old n\\303\\270te.md" -> new.md\n?? a.md\n';
     for (let cut = 0; cut <= sample.length; cut++) {
       expect(() => parseStatusPorcelainV1(sample.slice(0, cut))).not.toThrow();
     }

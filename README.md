@@ -72,16 +72,23 @@ instead of hanging, and diagnostics reports the detected auth method.
 
 ## Sparse checkout safety
 
-Configure protected paths (defaults: `Private/AgentsMemory`, `Projects/Backups`)
-in the settings. Before any commit or push the bridge runs
+Protected paths are **derived from the repository's own sparse-checkout
+exclusions** (read from git through the runner on every status) and can be
+extended manually in the settings — there are no baked-in defaults. Before any
+commit or push the bridge runs
 
 ```
-git status --porcelain=v1 -- "Private/AgentsMemory" "Projects/Backups"
-git diff --cached --name-status -- "Private/AgentsMemory" "Projects/Backups"
+git status --porcelain=v1 -- "<protected>" …
+git diff --cached --name-status -- "<protected>" …
 ```
 
 and blocks the operation if either reports anything. Sparse omissions are never
 treated as deletions, and there is no automatic destructive "repair".
+
+Sparse exclusions, `.gitignore` entries and `.git/info/exclude` entries can be
+managed per item from the settings (collapsible sections) and from the file
+context menu (long tap / right click): stage/unstage, add/remove in
+`.gitignore`, hide/show via sparse, add/remove in the local exclude file.
 
 ## Device-local by design
 

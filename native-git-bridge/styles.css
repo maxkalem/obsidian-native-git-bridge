@@ -170,3 +170,17 @@
 }
 .ngb-sv-kv-key { color: var(--text-muted); flex: 0 1 auto; }
 .ngb-sv-kv-val { color: var(--text-normal); text-align: right; overflow-wrap: anywhere; }
+
+/* ---- settings: collapsible rule managers (sparse / gitignore / exclude) ---- */
+.ngb-details { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); margin: var(--size-4-2) 0; padding: 0 var(--size-4-2); }
+.ngb-details > summary { cursor: pointer; padding: var(--size-4-2) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--size-4-2); font-weight: var(--font-medium); }
+.ngb-details-hint { color: var(--text-muted); font-size: var(--font-ui-small); font-weight: normal; }
+.ngb-details-body { padding-bottom: var(--size-4-2); }
+.ngb-entry-row { display: flex; align-items: center; justify-content: space-between; gap: var(--size-4-2); padding: var(--size-2-2) 0; border-top: 1px solid var(--background-modifier-border); }
+.ngb-entry-text { font-family: var(--font-monospace); font-size: var(--font-smaller); overflow-wrap: anywhere; }
+.ngb-entry-row button, .ngb-add-row button { font-size: var(--font-ui-small); }
+.ngb-add-row { display: flex; gap: var(--size-4-2); margin-top: var(--size-4-2); }
+.ngb-add-row input { flex: 1 1 auto; }
+.ngb-invalid { color: var(--color-red, #e93147); font-size: var(--font-ui-small); }
+.ngb-settings-note { color: var(--text-muted); font-size: var(--font-ui-small); }
+.ngb-warning { border: 1px solid var(--color-red, #e93147); border-radius: var(--radius-s); padding: var(--size-4-2); margin: var(--size-4-2) 0; }

@@ -1,8 +1,13 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 3;
+export const RUNNER_MIN_VERSION = 4;
 
-export const DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
+/**
+ * No baked-in defaults: protected paths are derived from the repository's own
+ * sparse-checkout exclusions (read from git through the runner) plus whatever
+ * the user adds manually in settings.
+ */
+export const DEFAULT_PROTECTED_PATHS: string[] = [];
 
 export const RUNTIME_DIR_NAME = "runtime";
 export const REQUESTS_DIR = "requests";

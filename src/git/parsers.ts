@@ -197,6 +197,27 @@ export function countSkipWorktree(text: string): number {
   return n;
 }
 
+/**
+ * Repo-relative paths hidden by non-cone sparse EXCLUSION patterns
+ * (e.g. `!/Private/Hidden/` -> `Private/Hidden`). Only clean
+ * literal exclusions qualify: wildcard patterns cannot be mapped to a single
+ * protectable path and are skipped — deriving protection from them would give
+ * a false sense of safety.
+ */
+export function sparseExclusionPaths(patterns: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of patterns) {
+    let p = raw.trim();
+    if (!p.startsWith("!")) continue;
+    p = p.slice(1).trim();
+    if (p.startsWith("/")) p = p.slice(1);
+    p = p.replace(/\/+$/, "");
+    if (p === "" || /[*?[\]]/.test(p)) continue;
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+
 export function parseSparseState(fields: {
   sparseEnabled: string;
   sparseCone: string;

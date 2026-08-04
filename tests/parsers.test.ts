@@ -6,6 +6,7 @@ import {
   parseSparseState,
   parseStatusPorcelainV1,
   parseStatusPorcelainV2,
+  sparseExclusionPaths,
   unquoteGitPath,
 } from "../src/git/parsers";
 
@@ -71,10 +72,10 @@ describe("parseStatusPorcelainV2", () => {
 
 describe("parseStatusPorcelainV1", () => {
   it("parses simple entries", () => {
-    const es = parseStatusPorcelainV1(" D Private/AgentsMemory/x.md\nM  Projects/Backus/y.md\n?? new.md\n");
+    const es = parseStatusPorcelainV1(" D Private/Hidden/x.md\nM  Projects/Archive/y.md\n?? new.md\n");
     expect(es).toHaveLength(3);
-    expect(es[0]).toMatchObject({ path: "Private/AgentsMemory/x.md", index: ".", worktree: "D" });
-    expect(es[1]).toMatchObject({ path: "Projects/Backus/y.md", index: "M", worktree: "." });
+    expect(es[0]).toMatchObject({ path: "Private/Hidden/x.md", index: ".", worktree: "D" });
+    expect(es[1]).toMatchObject({ path: "Projects/Archive/y.md", index: "M", worktree: "." });
     expect(es[2]).toMatchObject({ path: "new.md", index: "?", worktree: "?" });
   });
   it("parses renames", () => {
@@ -85,8 +86,8 @@ describe("parseStatusPorcelainV1", () => {
 
 describe("parseNameStatus", () => {
   it("parses deletions and renames", () => {
-    const es = parseNameStatus("D\tPrivate/AgentsMemory/a.md\nR100\told.md\tnew.md\n");
-    expect(es[0]).toMatchObject({ path: "Private/AgentsMemory/a.md", index: "D" });
+    const es = parseNameStatus("D\tPrivate/Hidden/a.md\nR100\told.md\tnew.md\n");
+    expect(es[0]).toMatchObject({ path: "Private/Hidden/a.md", index: "D" });
     expect(es[1]).toMatchObject({ path: "new.md", origPath: "old.md", index: "R" });
   });
 });
@@ -99,12 +100,12 @@ describe("sparse state", () => {
     const st = parseSparseState({
       sparseEnabled: "true\n",
       sparseCone: "false",
-      sparseList: "/*\n!Private/AgentsMemory/\n",
+      sparseList: "/*\n!Private/Hidden/\n",
       lsFilesV: "S hidden.md\n",
     });
     expect(st.enabled).toBe(true);
     expect(st.coneMode).toBe(false);
-    expect(st.patterns).toEqual(["/*", "!Private/AgentsMemory/"]);
+    expect(st.patterns).toEqual(["/*", "!Private/Hidden/"]);
     expect(st.skipWorktreeCount).toBe(1);
   });
 });
@@ -125,5 +126,19 @@ describe("untracked directory paths from porcelain v2", () => {
   it("keeps the trailing slash so the UI can show a folder name", () => {
     const s = parseStatusPorcelainV2("? Private/Work/\n? note.md\n");
     expect(s.untracked).toEqual(["Private/Work/", "note.md"]);
+  });
+});
+
+describe("sparseExclusionPaths", () => {
+  it("maps literal non-cone exclusions to repo-relative paths", () => {
+    expect(
+      sparseExclusionPaths(["/*", "!/Private/Hidden/", "!/Projects/Archive/", "!Plain/Dir"])
+    ).toEqual(["Private/Hidden", "Projects/Archive", "Plain/Dir"]);
+  });
+  it("skips include patterns and wildcard exclusions (no false protection)", () => {
+    expect(sparseExclusionPaths(["/*", "!*.secret", "!/Notes/**/tmp", "!/x[0-9]/", "!"])).toEqual([]);
+  });
+  it("deduplicates and trims slash variants", () => {
+    expect(sparseExclusionPaths(["!/A/B/", "!A/B", "! /A/B".trim()])).toEqual(["A/B"]);
   });
 });
