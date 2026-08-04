@@ -6,9 +6,13 @@
     <string name="check_permission">Permission “Run commands in Termux environment” granted</string>
     <string name="setup_ready">All steps done ✅ — the bridge answered. Close this screen and use the commands in Obsidian.</string>
     <string name="setup_not_ready">Not ready yet — fix the [MISSING] items above.</string>
+    <string name="fail_allow_external_apps">Step 3 is not done yet: Termux still has allow-external-apps disabled, so it refuses commands from this app. Tap step 3 above — it copies the install command and opens Termux; paste it (long-press → Paste) and press Enter. The command enables the property, installs the runner and pairs the plugin. If it still fails afterwards, fully restart Termux (Exit in its notification) and press Test again.</string>
+    <string name="fail_runner_missing">Termux accepted the command, but the runner script is not installed yet. Tap step 3 above and run the install command in Termux.</string>
+    <string name="fail_permission">Termux rejected the command as unauthorized. Grant the permission in step 2, and make sure step 3 (the install command) has been run — it enables allow-external-apps in Termux.</string>
+    <string name="fail_generic">Termux did not complete the test. Tap step 3 above to (re-)run the install command, then press Test again. Details below.</string>
     <string name="btn_grant">Grant Termux permission</string>
     <string name="btn_grant_done">Permission granted</string>
-    <string name="btn_setup_termux">Set up Termux (copy command &amp; open Termux)</string>
+    <string name="btn_setup_termux">Tap here: copy the install command &amp; open Termux</string>
     <string name="btn_setup_termux_done">Termux configured</string>
     <string name="probe_running">Checking the bridge: asking Termux to run the runner…</string>
     <string name="probe_ok_toast">Test passed ✅ — Termux ran the runner and answered.</string>
@@ -19,7 +23,7 @@
     <string name="setup_command_copied">Command copied. In Termux: long-press → Paste → Enter. It finds your vault and sets up everything by itself.</string>
     <string name="btn_test">Test: trigger the runner now</string>
     <string name="btn_app_settings">Open Android app settings</string>
-    <string name="setup_help">One-time Termux step: tap “Set up Termux” above — it copies the install command and opens Termux; you only paste (long-press) and press Enter. The command finds your vault automatically, installs the runner, enables allow-external-apps and pairs with the Obsidian plugin.</string>
+    <string name="setup_help">One-time Termux step: tap step 3 above — it copies the install command and opens Termux; you only paste (long-press → Paste) and press Enter. The command finds your vault automatically, installs the runner, enables allow-external-apps and pairs with the Obsidian plugin.</string>
     <string name="perm_denied_hint">Permission denied. If the dialog no longer appears, grant it via “Open Android app settings” → Permissions → Additional permissions.</string>
     <string name="err_unknown_action">Git Bridge Companion: unknown action in URI.</string>
     <string name="err_termux_missing">Git Bridge Companion: Termux is not installed (or not visible).</string>

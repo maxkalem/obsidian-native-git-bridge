@@ -71,6 +71,15 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Setup guide")
+      .setDesc(
+        "The three parts in order (Termux, companion app, one pasted command) with the current state of this device and one-tap actions."
+      )
+      .addButton((b) =>
+        b.setButtonText("Open setup guide").setCta().onClick(() => this.plugin.openSetupGuide("Setup guide."))
+      );
+
+    new Setting(containerEl)
       .setName("Companion app checklist")
       .setDesc(
         "Opens the Git Bridge Companion setup screen: Termux detected, 'Run commands in Termux' " +

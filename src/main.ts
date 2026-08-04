@@ -372,6 +372,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
     await this.loadGitignore(); // warm the cache so the file menu decides synchronously
+    // Fresh install: nothing works yet and nothing explains why. Show the
+    // guide once (device-local flag), and only on Android, where the bridge
+    // can actually exist.
+    if (
+      Platform.isAndroidApp &&
+      !this.deviceSettings.authToken &&
+      !this.store.getValue("setup-guide-shown")
+    ) {
+      this.store.setValue("setup-guide-shown", "1");
+      this.openSetupGuide("First run: this device is not set up yet.");
+    }
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", "Auto pull on open.");
@@ -597,6 +608,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "open-status-panel", name: "Native Git: Open status panel", cb: () => void this.openStatusPanel() },
       { id: "bridge-self-check", name: "Native Git: Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "open-companion-setup", name: "Native Git: Open companion app setup", cb: () => void this.openCompanionSetup() },
+      { id: "setup-guide", name: "Native Git: Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
       { id: "cancel-operation", name: "Native Git: Cancel current operation when possible", cb: () => void this.cmdCancel() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -626,16 +638,20 @@ export default class NativeGitBridgePlugin extends Plugin {
       );
       return null;
     }
+    // Not configured yet: show the actionable setup guide instead of a dead-end
+    // notice. A fresh install has no token, and the old message ("run the
+    // installer, then paste the token") never mentioned that the companion app
+    // and Termux come first.
     if (!s.enabledOnThisDevice) {
-      new Notice("Native Git Bridge is disabled on this device (see settings).");
+      this.openSetupGuide("Native Git Bridge is not enabled on this device yet.");
       return null;
     }
     if (!s.termuxIntegrationEnabled) {
-      new Notice("Termux integration is disabled on this device (see settings).");
+      this.openSetupGuide("Termux integration is switched off on this device.");
       return null;
     }
     if (!s.authToken) {
-      new Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
+      this.openSetupGuide("This device is not paired with a Termux runner yet.");
       return null;
     }
 
@@ -767,6 +783,24 @@ export default class NativeGitBridgePlugin extends Plugin {
     );
   }
 
+  /**
+   * Open an https URL the most reliable way available.
+   *
+   * Obsidian routes https to a Chrome Custom Tab, whose download session is
+   * ephemeral — APK downloads started there frequently never reach Downloads.
+   * The companion, being a real app, can fire a plain ACTION_VIEW that lands
+   * in the default browser, where downloads behave normally. So: if a
+   * companion has answered at least once, ask IT to open the URL; otherwise
+   * fall back to Obsidian's own handling.
+   *
+   * `companionUri` must be a fixed companion host (the URL itself lives in the
+   * companion), which keeps the "URI carries intent, never payload" property.
+   */
+  private openUrlPreferCompanion(companionUri: string, directUrl: string): void {
+    if (this.lastCompanionAckMs > 0) this.openExternalUri(companionUri);
+    else this.openExternalUri(directUrl);
+  }
+
   private openExternalUri(uri: string): void {
     // Primary path; some WebViews return null without dispatching, so fall
     // back to a synthetic anchor click, which Obsidian routes to Android.
@@ -887,7 +921,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       [
         "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
         "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
-        "Copy the link below and paste it into your browser (Chrome/Firefox). That is the reliable route: a download started inside Obsidian's built-in browser tab is often discarded when the tab closes, so the APK never reaches Downloads.",
+        "Copy the link below and paste it into your browser (Chrome/Firefox). That is the reliable route here: with no companion installed, Obsidian can only open its built-in browser tab, whose downloads are often discarded when the tab closes — so the APK never reaches Downloads.",
         `Direct APK: ${COMPANION_APK_URL}`,
         `All assets: ${COMPANION_RELEASES_URL}`,
         "After installing, grant the 'Run commands in Termux environment' permission in the companion, then try again.",
@@ -906,7 +940,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           {
             label: "Try opening in browser",
             keepOpen: true,
-            onClick: () => this.openExternalUri(COMPANION_APK_URL),
+            onClick: () => this.openUrlPreferCompanion(COMPANION_DOWNLOAD_APK_URI, COMPANION_APK_URL),
           },
         ],
       }
@@ -1529,6 +1563,77 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /** Local bridge diagnosis that works even when nothing comes back from Termux. */
+  /**
+   * The setup guide: three parts in order, each with a one-tap action. Shown
+   * whenever an operation is attempted before the bridge is usable — on a
+   * fresh install that is the FIRST thing the user sees, so it must name the
+   * companion app and Termux, not just the missing token.
+   */
+  openSetupGuide(reason: string): void {
+    const s = this.deviceSettings;
+    if (!Platform.isAndroidApp) {
+      new Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return;
+    }
+    const lines = [
+      reason,
+      "",
+      "Three parts are needed, in this order:",
+      "1. Termux (runs the real git) — the F-Droid build.",
+      "2. Git Bridge Companion app (the only way Obsidian can trigger Termux).",
+      "3. One command pasted into Termux — it installs the runner and pairs this plugin automatically (no token typing).",
+      "",
+      `Termux: ${TERMUX_SITE_URL} (direct: ${TERMUX_FDROID_URL})`,
+      `Companion APK: ${COMPANION_APK_URL}`,
+      "",
+      "Current state on this device:",
+      `Enabled here: ${s.enabledOnThisDevice ? "yes" : "NO (turn it on in settings)"}`,
+      `Termux integration: ${s.termuxIntegrationEnabled ? "on" : "OFF (turn it on in settings)"}`,
+      `Paired with a runner: ${s.authToken ? "yes" : "NO (step 3 pairs it automatically)"}`,
+      `Companion seen so far: ${this.lastCompanionAckMs > 0 ? "yes" : "not yet"}`,
+      `Termux installed: ${this.lastAckTermuxInstalled === null ? "unknown (the companion reports this)" : this.lastAckTermuxInstalled ? "yes" : "NO"}`,
+    ];
+    const actions: ResultModalAction[] = [
+      {
+        label: "Get Termux",
+        keepOpen: true,
+        onClick: () => this.openUrlPreferCompanion(COMPANION_GET_TERMUX_URI, TERMUX_SITE_URL),
+      },
+      {
+        label: "Copy companion APK link",
+        keepOpen: true,
+        onClick: () => {
+          void navigator.clipboard.writeText(COMPANION_APK_URL);
+          new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+        },
+      },
+      {
+        label: "Open companion setup",
+        keepOpen: true,
+        onClick: () => void this.openCompanionSetup(),
+      },
+      {
+        label: "Copy command & open Termux",
+        cta: true,
+        keepOpen: true,
+        onClick: () => this.copyCommandAndOpenTermux(),
+      },
+    ];
+    if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled) {
+      actions.unshift({
+        label: "Enable on this device",
+        keepOpen: true,
+        onClick: () => {
+          void this.updateDeviceSettings({ enabledOnThisDevice: true, termuxIntegrationEnabled: true }).then(() =>
+            new Notice("Enabled. Now do steps 1-3 if you have not yet.")
+          );
+        },
+      });
+    }
+    this.log.add("info", "setup", `Setup guide shown: ${reason}`);
+    new ResultModal(this.app, "Set up Native Git Bridge", lines, { actions }).open();
+  }
+
   /** The one-line Termux install command (same one settings shows). */
   installCommand(): string {
     const hint = this.deviceSettings.repoPathHint;
@@ -1586,9 +1691,9 @@ export default class NativeGitBridgePlugin extends Plugin {
         // page in the real browser) — an in-app Custom Tab download tends to
         // vanish. The plain link stays as a copyable fallback below.
         actions.push({
-          label: "Get Termux (F-Droid)",
+          label: "Get Termux",
           keepOpen: true,
-          onClick: () => this.openExternalUri(COMPANION_GET_TERMUX_URI),
+          onClick: () => this.openUrlPreferCompanion(COMPANION_GET_TERMUX_URI, TERMUX_SITE_URL),
         });
         lines.push(
           "",

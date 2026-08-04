@@ -253,20 +253,34 @@ describe("runOperation guards", () => {
     expect(h.runner.uris).toHaveLength(0);
   });
 
-  it("refuses when the bridge is disabled on this device and queues nothing", async () => {
+  it("refuses when the bridge is disabled on this device and shows the setup guide", async () => {
     const h = await loadPlugin();
     await h.plugin.cmdStatus(true);
-    expect(__notices.join(" ")).toContain("disabled on this device");
+    // A dead-end notice would leave a fresh install stuck; the guide names the
+    // companion app and Termux and offers one-tap actions.
+    expect(__openedModals).toContain("ResultModal");
     expect(requestFiles(h.adapter)).toHaveLength(0);
     expect(h.runner.uris).toHaveLength(0);
   });
 
-  it("refuses without a pairing token", async () => {
+  it("refuses without a pairing token and shows the setup guide", async () => {
     const h = await loadPlugin();
     await h.plugin.updateDeviceSettings({ enabledOnThisDevice: true, termuxIntegrationEnabled: true });
     await h.plugin.cmdStatus(true);
-    expect(__notices.join(" ")).toContain("pairing token");
+    expect(__openedModals).toContain("ResultModal");
     expect(requestFiles(h.adapter)).toHaveLength(0);
+  });
+
+  it("shows the setup guide once on a fresh unpaired install, not on later starts", async () => {
+    const h = await loadPlugin();
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(__openedModals.filter((m) => m === "ResultModal")).toHaveLength(1);
+    // Second start (same device store): no repeat.
+    __openedModals.length = 0;
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(__openedModals).toHaveLength(0);
   });
 
   it("refuses a mutating op while another mutating op holds the lock", async () => {

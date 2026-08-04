@@ -43,6 +43,8 @@ class SetupActivity : Activity() {
     private lateinit var step2: StepRow
     private lateinit var step3: StepRow
     private lateinit var detail: TextView
+    /** Raw Termux error, kept small and secondary (for bug reports only). */
+    private lateinit var technical: TextView
 
     private var probeInFlight = false
     /** True when the current probe was started by the Test button: its outcome is toasted. */
@@ -134,6 +136,14 @@ class SetupActivity : Activity() {
             setPadding(dp(4f), dp(12f), dp(4f), dp(12f))
         }
         root.addView(detail)
+
+        technical = TextView(this).apply {
+            textSize = 11f
+            setTextColor(c(R.color.text_muted))
+            alpha = 0.7f
+            setPadding(dp(4f), 0, dp(4f), dp(8f))
+        }
+        root.addView(technical)
 
         root.addView(sectionHeader(R.string.section_actions))
         root.addView(actionButton(R.string.btn_test, primary = true) { startProbe(manual = true) })
@@ -262,9 +272,27 @@ class SetupActivity : Activity() {
         detail.text = when {
             probeOk -> getString(R.string.setup_ready)
             probeInFlight -> getString(R.string.probe_running)
-            probeMsg.isNotEmpty() -> getString(R.string.setup_not_ready) + "\n" + probeMsg
+            probeMsg.isNotEmpty() -> explainProbeFailure(probeMsg)
             else -> getString(R.string.setup_help)
         }
+        technical.text = if (!probeOk && probeMsg.isNotEmpty()) probeMsg else ""
+    }
+
+    /**
+     * Turn a raw Termux error into the single action that fixes it. Dumping
+     * `errmsg=Error Code: 2 ...` next to "fix the [MISSING] items above" was
+     * doubly unhelpful: the items above were green, and the real cause (one
+     * property in termux.properties) was buried in the noise.
+     */
+    private fun explainProbeFailure(msg: String): String = when {
+        msg.contains("allow-external-apps", ignoreCase = true) ->
+            getString(R.string.fail_allow_external_apps)
+        msg.contains("No such file", ignoreCase = true) ||
+            msg.contains("runner.sh", ignoreCase = true) ->
+            getString(R.string.fail_runner_missing)
+        msg.contains("Permission", ignoreCase = true) ->
+            getString(R.string.fail_permission)
+        else -> getString(R.string.fail_generic)
     }
 
     // ---- probe (unchanged logic) ------------------------------------------
