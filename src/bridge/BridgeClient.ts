@@ -96,7 +96,7 @@ export class BridgeClient {
     }
   }
 
-  /** How many requests are queued and unprocessed (widget mode surfacing). */
+  /** How many requests are queued and not processed yet (shown in diagnostics). */
   async pendingRequestCount(): Promise<number> {
     if (!(await this.fs.exists(this.paths.requestsDir))) return 0;
     return (await this.fs.listFiles(this.paths.requestsDir)).filter((f) => f.endsWith(".json")).length;

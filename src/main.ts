@@ -22,11 +22,7 @@ import { NativeGitBridgeSettingTab } from "./settings/SettingsTab";
 import { BridgeClient, CancelToken, type RuntimeFS } from "./bridge/BridgeClient";
 import { RuntimePaths } from "./bridge/runtimePaths";
 import { createRequest } from "./bridge/protocol";
-import {
-  CompanionIntentTransport,
-  WidgetManualTransport,
-  type TriggerTransport,
-} from "./bridge/transport";
+import { CompanionIntentTransport, type TriggerTransport } from "./bridge/transport";
 import {
   parseLastCommit,
   parseSparseState,
@@ -398,7 +394,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.log.add(
         "warn",
         marker.action,
-        `Operation ${marker.id} from the previous session has no result yet; it may still run when you tap the widget. Its result will be cleaned up automatically.`
+        `Operation ${marker.id} from the previous session has no result yet; it may still be running in Termux. Its result will be cleaned up automatically.`
       );
     }
     await this.client.cleanupOld();
@@ -521,12 +517,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
     try {
       await this.client.submit(req);
-      const transport = this.makeTransport();
-      const outcome = transport.trigger(req.id);
-      if (outcome.kind === "manual" && outcome.instruction) {
-        this.statusBar?.set("waiting-tap");
-        new Notice(outcome.instruction, 10000);
-      }
+      this.makeTransport().trigger(req.id);
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1000, cancel);
       if (waited.kind === "timeout") {
         this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
@@ -565,27 +556,24 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   private makeTransport(): TriggerTransport {
-    if (this.deviceSettings.integrationType === "companion-intent") {
-      return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
-        // Primary path; some WebViews return null without dispatching, so fall
-        // back to a synthetic anchor click, which Obsidian routes to Android.
-        let opened: Window | null = null;
-        try {
-          opened = window.open(uri);
-        } catch {
-          opened = null;
-        }
-        if (!opened) {
-          const a = document.createElement("a");
-          a.href = uri;
-          a.rel = "noopener";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        }
-      });
-    }
-    return new WidgetManualTransport();
+    return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
+      // Primary path; some WebViews return null without dispatching, so fall
+      // back to a synthetic anchor click, which Obsidian routes to Android.
+      let opened: Window | null = null;
+      try {
+        opened = window.open(uri);
+      } catch {
+        opened = null;
+      }
+      if (!opened) {
+        const a = document.createElement("a");
+        a.href = uri;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    });
   }
 
   // ------------------------------------------------------------- command impls
@@ -625,9 +613,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparse: this.lastStatus?.sparse,
       lastCommit: this.lastStatus?.lastCommit,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
-      bridgeAvailable: this.deviceSettings.termuxIntegrationEnabled
-        ? `enabled (${this.deviceSettings.integrationType})`
-        : "disabled",
+      bridgeAvailable: this.deviceSettings.termuxIntegrationEnabled ? "enabled (companion app)" : "disabled",
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
     }).open();
@@ -1013,9 +999,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       runningAction: this.runningAction ?? undefined,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
-      bridge: this.deviceSettings.termuxIntegrationEnabled
-        ? `${this.deviceSettings.integrationType}`
-        : "disabled",
+      bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled",
     };
     for (const leaf of leaves) {
       const view = leaf.view;
@@ -1132,7 +1116,6 @@ export default class NativeGitBridgePlugin extends Plugin {
     report.pluginSide["Platform"] = Platform.isAndroidApp ? "Android app" : Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
-    report.pluginSide["Integration type"] = s.integrationType;
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
     report.pluginSide["Protected paths"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";

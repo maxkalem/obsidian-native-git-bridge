@@ -40,7 +40,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Install command")
       .setDesc(
-        "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. " +
+        "Install Termux (F-Droid) and the Git Bridge Companion app, then paste this single command into Termux. " +
           "It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, " +
           "verifies the repo and pairs with this plugin — no manual token copying. The Companion app has a " +
           "'Set up Termux' button that copies this command and opens Termux for you."
@@ -69,24 +69,6 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         t.setValue(s.termuxIntegrationEnabled).onChange(async (v) => {
           await this.plugin.updateDeviceSettings({ termuxIntegrationEnabled: v });
         })
-      );
-
-    new Setting(containerEl)
-      .setName("Android integration type")
-      .setDesc(
-        "widget-manual: you tap the Termux widget shortcut to run queued requests (documented, reliable). " +
-          "companion-intent: experimental; requires the companion app."
-      )
-      .addDropdown((d) =>
-        d
-          .addOption("widget-manual", "Termux widget (manual tap)")
-          .addOption("companion-intent", "Companion app intent (experimental)")
-          .setValue(s.integrationType)
-          .onChange(async (v) => {
-            await this.plugin.updateDeviceSettings({
-              integrationType: v as "widget-manual" | "companion-intent",
-            });
-          })
       );
 
     new Setting(containerEl)
@@ -148,7 +130,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync when Obsidian closes / goes to background")
-      .setDesc("Queues a sync request during the close transition; in widget mode it runs at your next tap.")
+      .setDesc("Queues a sync request during the close transition; Termux may finish it after Obsidian is gone.")
       .addToggle((t) =>
         t.setValue(s.autoSyncOnClose).onChange(async (v) => {
           await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
@@ -203,7 +185,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Companion intent URI template")
-      .setDesc('Experimental. "{id}" is replaced by the request id. Only used with the companion-intent type.')
+      .setDesc('Advanced. "{id}" is replaced by the request id; change it only if the companion app uses a custom scheme.')
       .addText((t) =>
         t.setValue(s.companionUriTemplate).onChange(async (v) => {
           await this.plugin.updateDeviceSettings({ companionUriTemplate: v.trim() });

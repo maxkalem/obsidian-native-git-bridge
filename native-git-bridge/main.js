@@ -70,7 +70,6 @@ var DEFAULT_DEVICE_SETTINGS = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
   enabledOnThisDevice: false,
   termuxIntegrationEnabled: false,
-  integrationType: "widget-manual",
   repoPathHint: "",
   authToken: "",
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
@@ -482,7 +481,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     const cmdBox = containerEl.createDiv({ cls: "ngb-output" });
     cmdBox.createEl("pre", { text: cmd, cls: "ngb-mono" });
     new import_obsidian3.Setting(containerEl).setName("Install command").setDesc(
-      "Install Termux (F-Droid) and the Git Bridge Companion APK, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you."
+      "Install Termux (F-Droid) and the Git Bridge Companion app, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you."
     ).addButton(
       (b) => b.setButtonText("Copy command").setCta().onClick(async () => {
         await navigator.clipboard.writeText(cmd);
@@ -498,15 +497,6 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     new import_obsidian3.Setting(containerEl).setName("Termux integration").setDesc("Allow this plugin to queue requests for the Termux runner.").addToggle(
       (t) => t.setValue(s.termuxIntegrationEnabled).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ termuxIntegrationEnabled: v });
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Android integration type").setDesc(
-      "widget-manual: you tap the Termux widget shortcut to run queued requests (documented, reliable). companion-intent: experimental; requires the companion app."
-    ).addDropdown(
-      (d) => d.addOption("widget-manual", "Termux widget (manual tap)").addOption("companion-intent", "Companion app intent (experimental)").setValue(s.integrationType).onChange(async (v) => {
-        await this.plugin.updateDeviceSettings({
-          integrationType: v
-        });
       })
     );
     new import_obsidian3.Setting(containerEl).setName("Pairing token").setDesc(
@@ -547,7 +537,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ autoPullOnOpen: v });
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Sync when Obsidian closes / goes to background").setDesc("Queues a sync request during the close transition; in widget mode it runs at your next tap.").addToggle(
+    new import_obsidian3.Setting(containerEl).setName("Sync when Obsidian closes / goes to background").setDesc("Queues a sync request during the close transition; Termux may finish it after Obsidian is gone.").addToggle(
       (t) => t.setValue(s.autoSyncOnClose).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
       })
@@ -581,7 +571,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ opTimeoutSeconds: n });
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Companion intent URI template").setDesc('Experimental. "{id}" is replaced by the request id. Only used with the companion-intent type.').addText(
+    new import_obsidian3.Setting(containerEl).setName("Companion intent URI template").setDesc('Advanced. "{id}" is replaced by the request id; change it only if the companion app uses a custom scheme.').addText(
       (t) => t.setValue(s.companionUriTemplate).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ companionUriTemplate: v.trim() });
       })
@@ -722,7 +712,7 @@ var BridgeClient = class {
       }
     }
   }
-  /** How many requests are queued and unprocessed (widget mode surfacing). */
+  /** How many requests are queued and not processed yet (shown in diagnostics). */
   async pendingRequestCount() {
     if (!await this.fs.exists(this.paths.requestsDir)) return 0;
     return (await this.fs.listFiles(this.paths.requestsDir)).filter((f) => f.endsWith(".json")).length;
@@ -815,22 +805,10 @@ var RuntimePaths = class {
 };
 
 // src/bridge/transport.ts
-var WidgetManualTransport = class {
-  constructor() {
-    this.type = "widget-manual";
-  }
-  trigger(_requestId) {
-    return {
-      kind: "manual",
-      instruction: 'Request queued. Tap the "GitBridge" shortcut in your Termux widget to run it.'
-    };
-  }
-};
 var CompanionIntentTransport = class {
   constructor(uriTemplate, openUri) {
     this.uriTemplate = uriTemplate;
     this.openUri = openUri;
-    this.type = "companion-intent";
   }
   trigger(requestId) {
     const safeId = encodeURIComponent(requestId);
@@ -1172,7 +1150,6 @@ var STATE_META = {
   disabled: { cls: "ngb-status-clean", label: "git: off" },
   clean: { cls: "ngb-status-clean", label: "git: clean" },
   changed: { cls: "ngb-status-changed", label: "git: changes" },
-  "waiting-tap": { cls: "ngb-status-waiting", label: "git: tap widget" },
   syncing: { cls: "ngb-status-syncing", label: "git: working\u2026" },
   conflict: { cls: "ngb-status-conflict", label: "git: conflict" },
   error: { cls: "ngb-status-error", label: "git: error" }
@@ -1786,7 +1763,7 @@ function stateLabel(state) {
       return "Local changes";
     case "syncing":
       return "Working\u2026";
-    case "waiting-tap":
+    case "waiting":
       return "Waiting for Termux";
     case "conflict":
       return "Conflict";
@@ -2209,7 +2186,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       this.log.add(
         "warn",
         marker.action,
-        `Operation ${marker.id} from the previous session has no result yet; it may still run when you tap the widget. Its result will be cleaned up automatically.`
+        `Operation ${marker.id} from the previous session has no result yet; it may still be running in Termux. Its result will be cleaned up automatically.`
       );
     }
     await this.client.cleanupOld();
@@ -2312,12 +2289,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     }, 1e3);
     try {
       await this.client.submit(req);
-      const transport = this.makeTransport();
-      const outcome = transport.trigger(req.id);
-      if (outcome.kind === "manual" && outcome.instruction) {
-        this.statusBar?.set("waiting-tap");
-        new import_obsidian12.Notice(outcome.instruction, 1e4);
-      }
+      this.makeTransport().trigger(req.id);
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1e3, cancel);
       if (waited.kind === "timeout") {
         this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
@@ -2354,25 +2326,22 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     }
   }
   makeTransport() {
-    if (this.deviceSettings.integrationType === "companion-intent") {
-      return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
-        let opened = null;
-        try {
-          opened = window.open(uri);
-        } catch {
-          opened = null;
-        }
-        if (!opened) {
-          const a = document.createElement("a");
-          a.href = uri;
-          a.rel = "noopener";
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-        }
-      });
-    }
-    return new WidgetManualTransport();
+    return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
+      let opened = null;
+      try {
+        opened = window.open(uri);
+      } catch {
+        opened = null;
+      }
+      if (!opened) {
+        const a = document.createElement("a");
+        a.href = uri;
+        a.rel = "noopener";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    });
   }
   // ------------------------------------------------------------- command impls
   async cmdStatus(silent = false) {
@@ -2409,7 +2378,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       sparse: this.lastStatus?.sparse,
       lastCommit: this.lastStatus?.lastCommit,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? void 0,
-      bridgeAvailable: this.deviceSettings.termuxIntegrationEnabled ? `enabled (${this.deviceSettings.integrationType})` : "disabled",
+      bridgeAvailable: this.deviceSettings.termuxIntegrationEnabled ? "enabled (companion app)" : "disabled",
       activeOperation: this.lock.active ? this.lock.active.action : void 0,
       fetchedAt: this.lastStatus?.fetchedAt
     }).open();
@@ -2762,7 +2731,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       runningAction: this.runningAction ?? void 0,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? void 0,
       fetchedAt: this.lastStatus?.fetchedAt,
-      bridge: this.deviceSettings.termuxIntegrationEnabled ? `${this.deviceSettings.integrationType}` : "disabled"
+      bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled"
     };
     for (const leaf of leaves) {
       const view = leaf.view;
@@ -2871,7 +2840,6 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     report.pluginSide["Platform"] = import_obsidian12.Platform.isAndroidApp ? "Android app" : import_obsidian12.Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
-    report.pluginSide["Integration type"] = s.integrationType;
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
     report.pluginSide["Protected paths"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";

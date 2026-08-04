@@ -1,11 +1,11 @@
 # Known limitations (honest list, Phase 1–2)
 
-1. **No tap-free automation without a companion app.** A pure Obsidian plugin cannot
-   send Termux's RUN_COMMAND intent (sender must hold `com.termux.permission.RUN_COMMAND`
-   in its manifest). Default mode therefore needs one Termux:Widget tap per operation
-   batch. This also constrains "sync on close": the request is written on close, but
-   in widget mode it executes at the next tap.
-2. **Transport B is implemented but unverified on-device.** The thin companion app
+1. **The companion app is required.** A pure Obsidian plugin cannot send Termux's
+   RUN_COMMAND intent (the sender must hold `com.termux.permission.RUN_COMMAND` in its
+   own manifest), so the small companion app is mandatory. The Termux:Widget variant was
+   dropped because it needed a manual tap per operation. Running
+   `~/.config/native-git-bridge/runner.sh` in Termux by hand remains a recovery path.
+2. **Companion transport verified on-device; still device-specific caveats.** The thin companion app
    (`companion/`) is complete and CI-buildable (`.github/workflows/build-companion.yml`),
    but two things still need a real device: (a) that Obsidian's Android WebView
    dispatches `window.open("nativegitbridge://…")` — a synthetic-anchor-click fallback

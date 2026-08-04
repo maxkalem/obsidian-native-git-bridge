@@ -224,16 +224,6 @@ CONF
 chmod 600 "$CONF_DIR/config"
 say "-- Runner installed to $CONF_DIR/runner.sh (config chmod 600)."
 
-# Widget shortcut (background task).
-mkdir -p "$HOME/.shortcuts/tasks"
-chmod 700 "$HOME/.shortcuts" "$HOME/.shortcuts/tasks"
-cat > "$HOME/.shortcuts/tasks/GitBridge" <<'WIDGET'
-#!/data/data/com.termux/files/usr/bin/bash
-exec "$HOME/.config/native-git-bridge/runner.sh"
-WIDGET
-chmod 700 "$HOME/.shortcuts/tasks/GitBridge"
-say "-- Widget task created: ~/.shortcuts/tasks/GitBridge"
-
 # 6. Exclude the runtime dir locally (never synced).
 GIT_DIR_PATH="$(git -C "$REPO_DIR" rev-parse --git-dir)"
 case "$GIT_DIR_PATH" in
@@ -273,11 +263,11 @@ say ""
 say "== Done. What is left (outside Termux) =="
 say "1. Open Obsidian -> Settings -> Native Git Bridge -> enable on this device."
 say "   The pairing token is imported automatically on plugin start."
-say "2. If you use the companion app: set integration type to 'Companion app intent'"
-say "   and grant it the 'Run commands in Termux environment' permission in Android settings."
-say "   Without the companion: pin the 'GitBridge' Termux:Widget task instead."
+say "2. In the Git Bridge Companion app: grant the 'Run commands in Termux environment'"
+say "   permission (step 2 there) - all three checkmarks must be green."
 say "3. Authentication: whatever you already use in Termux (PAT via credential helper,"
 say "   token in URL, or SSH key) keeps working - see the auth check result above."
 say ""
 say "Manual pairing token (only needed if auto-import fails): $TOKEN"
 say "Note: nothing runs in the background; the runner executes only when triggered."
+say "Recovery: you can always run it by hand with  ~/.config/native-git-bridge/runner.sh"

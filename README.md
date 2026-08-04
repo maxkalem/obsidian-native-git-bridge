@@ -25,12 +25,10 @@ in which protected sparse paths appear as changes.
 1. You run a command (e.g. *Native Git: Status*).
 2. The plugin writes `runtime/requests/<id>.json` inside the plugin folder
    (locally excluded from Git via `.git/info/exclude`).
-3. Depending on the integration type:
-   - **Termux widget (default, documented):** you tap the pinned *GitBridge*
-     shortcut; Termux runs the runner script once as a background task.
-   - **Companion intent (experimental):** a custom-scheme URI starts a minimal
-     companion app that forwards a RUN_COMMAND intent to Termux (see
-     `docs/ADR-001-android-invocation.md` for why this needs a companion app).
+3. The plugin opens `nativegitbridge://run`; the companion app (the only
+   supported trigger) forwards a RUN_COMMAND intent to Termux, which executes
+   the fixed runner script once in the background. See
+   `docs/ADR-001-android-invocation.md` for why a companion app is required.
 4. The runner validates the pairing token, the action allow-list and all paths,
    runs git with argv arrays, writes `runtime/results/<id>.json` atomically and
    **exits**.

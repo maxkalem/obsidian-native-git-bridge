@@ -1,6 +1,6 @@
 # ADR-001: Android invocation mechanism for native Git via Termux
 
-Status: Accepted · Date: 2026-08-03
+Status: Accepted · Date: 2026-08-03 · Amended 2026-08-04
 
 ## Context
 
@@ -108,3 +108,18 @@ reconciles the persisted "operation in flight" marker against the results direct
   `.git/info/exclude` (local-only, never synced).
 - All git execution and argument handling happens in bash on the Termux side with an
   action allow-list; the plugin never composes shell strings.
+
+## Amendment (2026-08-04): widget transport dropped
+
+Transport A (`widget-manual`) was implemented and worked, but it required a
+manual Termux:Widget tap for **every** operation, which defeats the "press a
+button in Obsidian and it runs" requirement. Once the companion app
+(`companion/`) was verified end-to-end on-device — including the RUN_COMMAND
+result coming back through a PendingIntent — the widget transport was removed
+together with the integration-type setting: there is now exactly one supported
+mechanism, so there is nothing for the user to choose.
+
+The runner remains a plain one-shot script, so running
+`~/.config/native-git-bridge/runner.sh` by hand in Termux is still a valid
+recovery path if the companion app is unavailable. That is documented as
+recovery, not as a mode.

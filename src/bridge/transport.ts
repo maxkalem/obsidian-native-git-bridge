@@ -1,42 +1,25 @@
-import type { BridgeIntegrationType } from "../types";
-
+/**
+ * Trigger transport: the companion app is the only supported mechanism.
+ *
+ * The plugin opens a custom-scheme URI; the companion app (which holds
+ * com.termux.permission.RUN_COMMAND) forwards a RUN_COMMAND intent to Termux
+ * that executes the fixed runner script. Only the request id travels in the
+ * URI — never the pairing token, never command content.
+ *
+ * The Termux:Widget "tap a shortcut" variant was dropped: it required a manual
+ * tap for every operation. The runner can still be launched by hand from
+ * Termux (~/.config/native-git-bridge/runner.sh) if the companion app is
+ * unavailable, which is documented as a recovery path only.
+ */
 export interface TriggerOutcome {
-  kind: "manual" | "intent";
-  /** Human instruction to show when the trigger needs a user action. */
-  instruction?: string;
+  kind: "intent";
 }
 
-/** Strategy for getting the Termux-side runner started for a queued request. */
 export interface TriggerTransport {
-  readonly type: BridgeIntegrationType;
   trigger(requestId: string): TriggerOutcome;
 }
 
-/**
- * Default, fully documented transport: the user taps the pinned Termux:Widget
- * shortcut which runs the runner once as a Termux background task.
- */
-export class WidgetManualTransport implements TriggerTransport {
-  readonly type = "widget-manual" as const;
-
-  trigger(_requestId: string): TriggerOutcome {
-    return {
-      kind: "manual",
-      instruction:
-        'Request queued. Tap the "GitBridge" shortcut in your Termux widget to run it.',
-    };
-  }
-}
-
-/**
- * Experimental transport: opens a custom-scheme URI handled by the optional
- * companion app, which holds com.termux.permission.RUN_COMMAND and forwards a
- * fixed runner invocation to Termux. Only the request id travels in the URI —
- * never the token, never command content.
- */
 export class CompanionIntentTransport implements TriggerTransport {
-  readonly type = "companion-intent" as const;
-
   constructor(
     private uriTemplate: string,
     private openUri: (uri: string) => void

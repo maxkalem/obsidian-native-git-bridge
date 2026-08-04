@@ -127,8 +127,6 @@ export interface SparseSafetyReport {
   checkedAt: string;
 }
 
-export type BridgeIntegrationType = "widget-manual" | "companion-intent";
-
 export interface OperationMarker {
   id: string;
   action: string;

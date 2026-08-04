@@ -2,7 +2,6 @@ export type BridgeUiState =
   | "disabled"
   | "clean"
   | "changed"
-  | "waiting-tap"
   | "syncing"
   | "conflict"
   | "error";
@@ -11,7 +10,6 @@ const STATE_META: Record<BridgeUiState, { cls: string; label: string }> = {
   disabled: { cls: "ngb-status-clean", label: "git: off" },
   clean: { cls: "ngb-status-clean", label: "git: clean" },
   changed: { cls: "ngb-status-changed", label: "git: changes" },
-  "waiting-tap": { cls: "ngb-status-waiting", label: "git: tap widget" },
   syncing: { cls: "ngb-status-syncing", label: "git: working…" },
   conflict: { cls: "ngb-status-conflict", label: "git: conflict" },
   error: { cls: "ngb-status-error", label: "git: error" },

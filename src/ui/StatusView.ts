@@ -333,7 +333,7 @@ function stateLabel(state: string): string {
       return "Local changes";
     case "syncing":
       return "Working…";
-    case "waiting-tap":
+    case "waiting":
       return "Waiting for Termux";
     case "conflict":
       return "Conflict";
