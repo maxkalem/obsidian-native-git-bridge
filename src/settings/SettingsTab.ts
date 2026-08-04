@@ -89,7 +89,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       });
     }
 
-    containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
+    new Setting(containerEl).setName("Setup (one line in Termux)").setHeading();
     const cmd = this.plugin.installCommand();
     // A dedicated class (not <pre>) so long URLs wrap on narrow phone screens.
     const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
@@ -172,7 +172,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Repository rules" });
+    new Setting(containerEl).setName("Repository rules").setHeading();
     containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text:
@@ -185,7 +185,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     this.renderGitignoreSection(containerEl);
     this.renderExcludeSection(containerEl);
 
-    containerEl.createEl("h3", { text: "File context menu" });
+    new Setting(containerEl).setName("File context menu").setHeading();
     containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text:
@@ -220,7 +220,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Notifications" });
+    new Setting(containerEl).setName("Notifications").setHeading();
 
     new Setting(containerEl)
       .setName("Show a result window on success")
@@ -253,7 +253,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Automatic actions (all off by default)" });
+    new Setting(containerEl).setName("Automatic actions").setHeading();
 
     new Setting(containerEl)
       .setName("Pull when Obsidian opens")
@@ -307,7 +307,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    containerEl.createEl("h3", { text: "Advanced" });
+    new Setting(containerEl).setName("Advanced").setHeading();
 
     new Setting(containerEl)
       .setName("Operation timeout (seconds)")

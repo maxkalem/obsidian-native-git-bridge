@@ -1,14 +1,15 @@
-# Obsidian Native Mobile Git Bridge
+# Native Git Bridge
+
+> **Android only.** This plugin needs Termux and a small companion app; it
+> cannot work on desktop, where it loads, explains itself and disables every
+> operation. On desktop use plain Git or
+> [obsidian-git](https://github.com/Vinzent03/obsidian-git). Its natural
+> habitat is a vault shared between a desktop (any Git tooling) and an Android
+> device (this bridge).
 
 Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Termux** — with first-class **sparse checkout** support. No isomorphic-git, no
 HTTP server, no open ports, nothing running in the background.
-
-**Android-only by design.** On desktop the plugin loads, explains itself in the
-settings tab and disables every operation — there is no Termux to bridge to;
-use git directly or [obsidian-git](https://github.com/Vinzent03/obsidian-git)
-there. Its natural habitat is a vault synced between a desktop (any git
-tooling) and an Android device (this bridge).
 
 > Status: implemented — status, sparse safety, pull/commit/push/, sync/fetch with 
 > conflict handling, per-file history (rename-aware), view at commit, diffs, 
@@ -108,8 +109,10 @@ npm run build     # type check + bundle to main.js
 
 Docs: [setup guide](docs/setup.md) · [troubleshooting](docs/troubleshooting.md)
 · [updating](docs/update.md) · [release engineering](docs/release.md) ·
-`docs/ADR-001-android-invocation.md`, `docs/threat-model.md`,
-`docs/protocol.md`, `docs/limitations.md`, `docs/research-notes.md`.
+[design notes for reviewers](docs/submission.md) ·
+[ADR-001: why a companion app](docs/ADR-001-android-invocation.md) ·
+[threat model](docs/threat-model.md) · [protocol](docs/protocol.md) ·
+[limitations](docs/limitations.md) · [research notes](docs/research-notes.md).
 
 ----
 # HOW TO INSTALL THE PLUGIN MANUALLY

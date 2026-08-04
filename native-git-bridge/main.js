@@ -575,7 +575,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         text: "Device-local storage is unavailable; settings will not survive an app restart. Check available storage / WebView state."
       });
     }
-    containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
+    new import_obsidian3.Setting(containerEl).setName("Setup (one line in Termux)").setHeading();
     const cmd = this.plugin.installCommand();
     const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
     cmdBox.setText(cmd);
@@ -622,7 +622,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ repoPathHint: v.trim() });
       })
     );
-    containerEl.createEl("h3", { text: "Repository rules" });
+    new import_obsidian3.Setting(containerEl).setName("Repository rules").setHeading();
     containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text: "Sparse exclusions, .gitignore and .git/info/exclude, managed per item. Each section is collapsed because these lists can get long."
@@ -631,7 +631,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     this.renderSparseSection(containerEl);
     this.renderGitignoreSection(containerEl);
     this.renderExcludeSection(containerEl);
-    containerEl.createEl("h3", { text: "File context menu" });
+    new import_obsidian3.Setting(containerEl).setName("File context menu").setHeading();
     containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text: "Which Git entries appear on right click / long tap of a file or folder. Stage/Unstage is always shown while the bridge is enabled."
@@ -651,7 +651,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ menuExclude: v });
       })
     );
-    containerEl.createEl("h3", { text: "Notifications" });
+    new import_obsidian3.Setting(containerEl).setName("Notifications").setHeading();
     new import_obsidian3.Setting(containerEl).setName("Show a result window on success").setDesc(
       "Off: successful operations only update the status panel (and the log). Failures, conflicts and safety blocks are always shown as a window."
     ).addToggle(
@@ -668,7 +668,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         });
       })
     );
-    containerEl.createEl("h3", { text: "Automatic actions (all off by default)" });
+    new import_obsidian3.Setting(containerEl).setName("Automatic actions").setHeading();
     new import_obsidian3.Setting(containerEl).setName("Pull when Obsidian opens").addToggle(
       (t) => t.setValue(s.autoPullOnOpen).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ autoPullOnOpen: v });
@@ -701,7 +701,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
         await this.plugin.updateDeviceSettings({ skipOnLowBattery: v });
       })
     );
-    containerEl.createEl("h3", { text: "Advanced" });
+    new import_obsidian3.Setting(containerEl).setName("Advanced").setHeading();
     new import_obsidian3.Setting(containerEl).setName("Operation timeout (seconds)").addText(
       (t) => t.setValue(String(s.opTimeoutSeconds)).onChange(async (v) => {
         const n = Math.min(3600, Math.max(10, Math.floor(Number(v) || DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds)));
