@@ -28,6 +28,37 @@ deletions. This plugin delegates every Git operation to native Git in Termux
 through a file-based request/response protocol, and hard-blocks any commit/push
 in which protected sparse paths appear as changes.
 
+## Alternatives — and when to prefer them
+
+The community directory already has several Git plugins. On mobile they take
+one of two approaches, and **neither can work with a native sparse-checkout
+index**, which is the entire reason this one exists:
+
+- **isomorphic-git in the app** — e.g.
+  [obsidian-git](https://github.com/Vinzent03/obsidian-git). A JavaScript Git
+  implementation that does not implement sparse checkout and does not honour
+  skip-worktree, so a sparse index can be misread as mass deletions.
+- **The hosting provider's REST API** — e.g.
+  [Hybrid Git Sync](https://community.obsidian.md/plugins/hybrid-git-sync),
+  Fit, Git Vault Sync. There is no repository on the phone at all: files are
+  transferred over HTTP. That means no local history, no offline commits, no
+  SSH, provider-specific limits, and an access token stored in the plugin's
+  own settings.
+
+**Prefer one of those** if your vault is a normal full checkout, you sync only
+through GitHub/GitLab, and you would rather not install Termux and a companion
+app. They are simpler to set up and they work on iOS, which this plugin never
+will.
+
+**Use this plugin** when you need the things only real Git can give you on the
+device: a **sparse checkout** that stays intact (with a safety gate that
+refuses to commit sparse omissions as deletions), full **offline** commits
+against a real local repository, SSH or a credential helper with credentials
+that **never enter the vault or the plugin**, and identical Git semantics on
+desktop and phone — including a vault whose `.obsidian/plugins/` folder is
+itself tracked, which is why every device-specific setting here is stored
+outside `data.json`.
+
 ## How it works
 
 1. You run a command (e.g. *Native Git: Status*).

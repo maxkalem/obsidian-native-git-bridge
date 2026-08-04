@@ -15,6 +15,17 @@ skip-worktree entries and can stage sparse omissions as mass deletions. Vaults
 that use sparse checkout (this one has ~3900 sparse-hidden files) therefore
 need native Git.
 
+## How this differs from the Git plugins already in the directory
+
+Every existing mobile approach avoids the native index rather than using it:
+isomorphic-git plugins reimplement Git in JavaScript (no sparse checkout, no
+skip-worktree), and API-based plugins transfer files over HTTP with no
+repository on the device (no local history, no offline commits, no SSH, a token
+in plugin settings). Both are perfectly good for a normal full checkout — the
+README recommends them for that case. This plugin exists for the case they
+cannot serve: a vault that uses sparse checkout, needs offline commits against
+a real local repository, and keeps credentials outside the vault entirely.
+
 ## Why a companion app is required
 
 A pure Obsidian plugin **cannot** trigger Termux: sending Termux's
