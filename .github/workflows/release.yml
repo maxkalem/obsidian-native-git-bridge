@@ -54,13 +54,22 @@ jobs:
           java-version: "17"
       - uses: gradle/actions/setup-gradle@v5
 
-      - name: Build companion APKs (debug + unsigned release)
+      # With a keystore configured, ONLY the properly signed release APK is
+      # attached. Without one, a debug APK is attached as a clearly-named
+      # fallback — installable, but each CI run signs it with a fresh debug
+      # key, so Android will not update-install it across releases
+      # (uninstall/reinstall required). See docs/release.md for signing setup.
+      - name: Build companion APK (signed release or debug fallback)
         run: |
-          gradle -p companion :app:assembleDebug :app:assembleRelease
-          cp companion/app/build/outputs/apk/debug/app-debug.apk \
-             git-bridge-companion-debug.apk
-          cp companion/app/build/outputs/apk/release/app-release-unsigned.apk \
-             git-bridge-companion-release-unsigned.apk
+          if [ "${{ vars.NGB_HAS_KEYSTORE }}" = "true" ]; then
+            gradle -p companion :app:assembleRelease
+            cp companion/app/build/outputs/apk/release/app-release-unsigned.apk \
+               companion-unsigned.apk
+          else
+            gradle -p companion :app:assembleDebug
+            cp companion/app/build/outputs/apk/debug/app-debug.apk \
+               git-bridge-companion-DEBUG-SIGNATURE.apk
+          fi
 
       # Signing runs only when the keystore secrets are configured — see
       # docs/release.md for how to create the keystore and add the secrets.
@@ -74,7 +83,7 @@ jobs:
         run: |
           printf '%s' "$KEYSTORE_BASE64" | base64 -d > /tmp/ngb-release.jks
           BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          "$BT/zipalign" -f 4 git-bridge-companion-release-unsigned.apk \
+          "$BT/zipalign" -f 4 companion-unsigned.apk \
             git-bridge-companion.apk
           "$BT/apksigner" sign \
             --ks /tmp/ngb-release.jks \
@@ -102,8 +111,7 @@ jobs:
             native-git-bridge/termux/native-git-bridge-runner.sh
             native-git-bridge/termux/install.sh
             native-git-bridge/termux/bootstrap.sh
-            git-bridge-companion-debug.apk
-            git-bridge-companion-release-unsigned.apk
+            git-bridge-companion-DEBUG-SIGNATURE.apk
             git-bridge-companion.apk
         # The signed APK is only present when signing ran; softprops tolerates
         # missing patterns with fail_on_unmatched_files unset.

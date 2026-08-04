@@ -65,10 +65,12 @@ the plugin loads fine on desktop — it just has nothing to bridge to).
 
 ## Companion APK signing
 
-CI always attaches `git-bridge-companion-debug.apk` (debug-signed, installable
-immediately) and `git-bridge-companion-release-unsigned.apk` (not installable
-until signed). A properly signed release APK (`git-bridge-companion.apk`) is
-produced only when a keystore is configured:
+Without a keystore, the release carries `git-bridge-companion-DEBUG-SIGNATURE.apk`:
+installable, but signed with a FRESH debug key on every CI run, so Android
+refuses to update-install it across releases (uninstall/reinstall each time).
+With a keystore configured, the release carries only the properly signed
+`git-bridge-companion.apk`, and updates install over the previous version. To
+set it up:
 
 1. Create a keystore once, locally:
    `keytool -genkeypair -v -keystore ngb-release.jks -alias ngb -keyalg RSA -keysize 2048 -validity 10000`
@@ -76,6 +78,14 @@ produced only when a keystore is configured:
    `NGB_KEYSTORE_PASSWORD`, `NGB_KEY_ALIAS`, `NGB_KEY_PASSWORD`.
 3. Add repository **variable** `NGB_HAS_KEYSTORE=true` (gates the signing step,
    so forks without secrets do not fail).
+
+Rejected alternative — the Termux approach: Termux signs its GitHub builds
+with a PUBLIC test key committed to the repository (`testkey_untrusted.jks`),
+which makes all GitHub builds update-compatible without secrets, at the price
+that anyone can forge an installable "update" (their README warns about this
+loudly). For the companion this trade-off is unacceptable: it holds the
+RUN_COMMAND permission, so a forged update would mean command execution inside
+the user's Termux. A private keystore costs five minutes and closes this.
 
 Keep the keystore private and back it up: Android updates install only when the
 new APK is signed with the same key as the installed one. Personal devices that

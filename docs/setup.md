@@ -19,8 +19,9 @@ Install Termux, open it once so it initializes its home directory.
 
 ## Step 2 — Companion app
 
-Install `git-bridge-companion-debug.apk` (or the signed release APK) from the
-GitHub release. Open it: it shows a three-step checklist —
+Install `git-bridge-companion.apk` from the GitHub release (or, if the release
+carries only `git-bridge-companion-DEBUG-SIGNATURE.apk`, that one — it works,
+but future updates will require uninstalling it first). Open it: it shows a three-step checklist —
 
 1. *Termux installed* — detected automatically.
 2. *Run commands in Termux environment* — tap to grant the Android permission.
