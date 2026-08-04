@@ -28,8 +28,13 @@ In order of likelihood:
    `runner.log` has never appeared in *this* vault's runtime folder: the
    installer was pointed at another path. Re-run the install command with the
    correct vault path.
-3. **Termux was force-stopped** (battery optimization). Open Termux once and
-   retry; consider excluding Termux from battery optimization.
+3. **Termux is closed or was force-stopped** (swiped away, or battery
+   optimization killed it). Android then refuses to start its background
+   service, so the trigger arrives at the companion but never reaches the
+   runner. The companion detects this case and opens Termux for you (toast:
+   "Termux is closed…"); Bridge check also offers an **Open Termux** button.
+   Keep Termux running — its persistent notification is enough — and consider
+   excluding it from battery optimization.
 4. **A very slow network operation.** Raise the timeout in settings; the runner
    itself caps network git at 120 s per command.
 

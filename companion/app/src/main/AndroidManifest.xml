@@ -10,6 +10,15 @@
          intent silently fails. See Termux wiki, "Target SDK 30 Package Visibility". -->
     <queries>
         <package android:name="com.termux" />
+        <!-- So "get Termux" can open F-Droid directly when it is installed.
+             Without this entry setPackage() would fail on targetSdk >= 30 and
+             we would always fall back to the browser. -->
+        <package android:name="org.fdroid.fdroid" />
+        <!-- Resolving ACTION_VIEW for https (browser fallbacks). -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
     </queries>
 
     <application

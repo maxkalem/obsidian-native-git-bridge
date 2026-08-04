@@ -15,7 +15,15 @@ one-shot script only when you invoke a command in Obsidian.
 
 ## Step 1 — Termux
 
-Install Termux, open it once so it initializes its home directory.
+Get it from the official site <https://termux.dev>, which lists the supported
+download sources — in practice the **F-Droid build**
+(<https://f-droid.org/packages/com.termux/>). Avoid the Play Store build: it is
+deprecated. Open Termux once so it initializes its home directory.
+
+Note: the companion app never installs anything itself — it can only open
+F-Droid or the download page for you. Installing an APK would require
+`REQUEST_INSTALL_PACKAGES` on an app that already holds the Termux
+RUN_COMMAND permission, which is not a trade this project makes.
 
 ## Step 2 — Companion app
 

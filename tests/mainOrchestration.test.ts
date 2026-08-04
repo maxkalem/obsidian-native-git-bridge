@@ -354,7 +354,8 @@ describe("runOperation round trip through the transport seam", () => {
     h.plugin.companionProbeMs = 5; // nobody will answer
     await h.plugin.openCompanionSetup();
     expect(h.runner.uris).toContain("nativegitbridge://setup");
-    expect(__openedModals).toContain("ConfirmModal");
+    // A ResultModal with copy/open actions (a plain confirm cannot offer both).
+    expect(__openedModals).toContain("ResultModal");
   });
 
   it("treats the companion ack as proof of installation (no visibility change needed)", async () => {
@@ -365,7 +366,16 @@ describe("runOperation round trip through the transport seam", () => {
     // protocol handler the plugin registered in onload.
     __protocolHandlers.get("native-git-bridge-ack")!({ src: "setup" });
     await p;
-    expect(__openedModals).not.toContain("ConfirmModal");
+    expect(__openedModals).not.toContain("ResultModal"); // no "not installed?" hint
+  });
+
+  it("records Termux availability reported inside the companion ack", async () => {
+    const h = await loadPlugin();
+    expect(h.plugin.lastAckTermuxInstalled).toBeNull();
+    __protocolHandlers.get("native-git-bridge-ack")!({ src: "run", termux: "0" });
+    expect(h.plugin.lastAckTermuxInstalled).toBe(false);
+    __protocolHandlers.get("native-git-bridge-ack")!({ src: "run", termux: "1" });
+    expect(h.plugin.lastAckTermuxInstalled).toBe(true);
   });
 
   it("falls back to the app-switch signal for pre-ack companions", async () => {
@@ -374,7 +384,7 @@ describe("runOperation round trip through the transport seam", () => {
     const p = h.plugin.openCompanionSetup();
     (globalThis as Any).document.__goHidden(); // old companion: opens, never acks
     await p;
-    expect(__openedModals).not.toContain("ConfirmModal");
+    expect(__openedModals).not.toContain("ResultModal"); // no "not installed?" hint
   });
 
   it("does not blame the companion for a timeout it acknowledged (runner-side break)", async () => {

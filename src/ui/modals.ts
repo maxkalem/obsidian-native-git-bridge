@@ -16,12 +16,43 @@ function outputSection(el: HTMLElement, label: string, text: string | undefined)
 }
 
 /** Generic result modal: summary + collapsible stdout/stderr, never a bare "failed". */
+/**
+ * Render a text line into `parent`, turning every http(s) URL into a real
+ * clickable <a> (Obsidian routes it to the system browser). Plain setText
+ * would leave URLs as dead, uncopyable text on mobile.
+ */
+export function linkifyInto(parent: HTMLElement, text: string): void {
+  const re = /https?:\/\/[^\s)"']+/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    const i = m.index ?? 0;
+    if (i > last) parent.appendText(text.slice(last, i));
+    parent.createEl("a", { href: m[0], text: m[0] });
+    last = i + m[0].length;
+  }
+  if (last < text.length) parent.appendText(text.slice(last));
+}
+
+export interface ResultModalAction {
+  label: string;
+  onClick: () => void;
+  cta?: boolean;
+  /** Keep the modal open after the click (default: close). */
+  keepOpen?: boolean;
+}
+
 export class ResultModal extends Modal {
   constructor(
     app: App,
     private title: string,
     private lines: string[],
-    private opts: { stdout?: string; stderr?: string; isError?: boolean } = {}
+    private opts: {
+      stdout?: string;
+      stderr?: string;
+      isError?: boolean;
+      /** One-tap fix buttons rendered ABOVE Copy/Close. */
+      actions?: ResultModalAction[];
+    } = {}
   ) {
     super(app);
   }
@@ -32,7 +63,18 @@ export class ResultModal extends Modal {
     const c = this.contentEl;
     const sec = c.createDiv({ cls: "ngb-section" });
     for (const line of this.lines) {
-      sec.createDiv({ text: line, cls: this.opts.isError ? "ngb-status-error" : "" });
+      const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
+      linkifyInto(div, line);
+    }
+    if (this.opts.actions && this.opts.actions.length > 0) {
+      const fixes = c.createDiv({ cls: "ngb-buttons ngb-action-buttons" });
+      for (const a of this.opts.actions) {
+        const b = fixes.createEl("button", { text: a.label, cls: a.cta ? "mod-cta" : "" });
+        b.addEventListener("click", () => {
+          a.onClick();
+          if (!a.keepOpen) this.close();
+        });
+      }
     }
     outputSection(c, "stdout", this.opts.stdout);
     outputSection(c, "stderr", this.opts.stderr);
@@ -79,7 +121,7 @@ export class ConfirmModal extends Modal {
     this.modalEl.addClass("ngb-modal");
     this.titleEl.setText(this.opts.title);
     const c = this.contentEl;
-    for (const line of this.opts.body) c.createEl("p", { text: line });
+    for (const line of this.opts.body) linkifyInto(c.createEl("p"), line);
     const btns = c.createDiv({ cls: "ngb-buttons" });
     const cancel = btns.createEl("button", { text: this.opts.cancelLabel ?? "Cancel" });
     cancel.addEventListener("click", () => {

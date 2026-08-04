@@ -38,6 +38,7 @@ import {
   ChangedFilesModal,
   ConfirmModal,
   ResultModal,
+  type ResultModalAction,
   SparseSafetyModal,
   StatusModal,
 } from "./ui/modals";
@@ -55,11 +56,18 @@ import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView"
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
 import {
+  COMPANION_APK_URL,
+  COMPANION_DOWNLOAD_APK_URI,
+  COMPANION_GET_TERMUX_URI,
+  COMPANION_OPEN_TERMUX_URI,
   COMPANION_RELEASES_URL,
   COMPANION_SETUP_URI,
   PAIRING_FILE,
+  REPO_RAW_BASE,
   RUNNER_MIN_VERSION,
   RUNNER_OUTDATED_HINT,
+  TERMUX_FDROID_URL,
+  TERMUX_SITE_URL,
 } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
@@ -595,9 +603,10 @@ export default class NativeGitBridgePlugin extends Plugin {
 
     // The companion bounces this back for every URI it handles — the
     // deterministic "companion installed and reachable" signal.
-    this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) =>
-      this.onCompanionAck((params as Record<string, string> | undefined)?.src)
-    );
+    this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
+      const p = params as Record<string, string> | undefined;
+      this.onCompanionAck(p?.src, p?.termux);
+    });
   }
 
   // ------------------------------------------------------------ operations
@@ -781,16 +790,26 @@ export default class NativeGitBridgePlugin extends Plugin {
   companionProbeMs = 4000;
   /** Time of the last obsidian://native-git-bridge-ack from the companion. */
   private lastCompanionAckMs = 0;
+  /** What the companion reported about Termux (null until the first ack). */
+  lastAckTermuxInstalled: boolean | null = null;
   private ackWaiters: Array<() => void> = [];
 
   /**
    * The companion (>= 0.4.0) bounces obsidian://native-git-bridge-ack back for
    * every URI it receives, giving a DETERMINISTIC "companion is installed and
-   * reachable" signal. Registered in onload.
+   * reachable" signal — and, since 0.4.1, whether Termux itself is installed
+   * (the WebView cannot query other packages; the companion can). Registered
+   * in onload.
    */
-  onCompanionAck(src?: string): void {
+  onCompanionAck(src?: string, termux?: string): void {
     this.lastCompanionAckMs = Date.now();
-    this.log.add("info", "companion", `Companion acknowledged (${src ?? "unknown"}).`);
+    if (termux === "1") this.lastAckTermuxInstalled = true;
+    else if (termux === "0") this.lastAckTermuxInstalled = false;
+    this.log.add(
+      "info",
+      "companion",
+      `Companion acknowledged (${src ?? "unknown"}; Termux installed: ${termux === "1" ? "yes" : termux === "0" ? "NO" : "unknown"}).`
+    );
     for (const w of this.ackWaiters.splice(0)) w();
   }
 
@@ -862,22 +881,34 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.openExternalUri(COMPANION_SETUP_URI);
     if (await this.probeCompanion()) return;
     this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
-    new ConfirmModal(
+    new ResultModal(
       this.app,
+      "Companion app not installed?",
+      [
+        "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
+        "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
+        "Copy the link below and paste it into your browser (Chrome/Firefox). That is the reliable route: a download started inside Obsidian's built-in browser tab is often discarded when the tab closes, so the APK never reaches Downloads.",
+        `Direct APK: ${COMPANION_APK_URL}`,
+        `All assets: ${COMPANION_RELEASES_URL}`,
+        "After installing, grant the 'Run commands in Termux environment' permission in the companion, then try again.",
+      ],
       {
-        title: "Companion app not installed?",
-        body: [
-          "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
-          "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
-          `Download its APK from ${COMPANION_RELEASES_URL} (asset: git-bridge-companion), install it, grant the 'Run commands in Termux environment' permission, then try again.`,
+        actions: [
+          {
+            label: "Copy download link",
+            cta: true,
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(COMPANION_APK_URL);
+              new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+            },
+          },
+          {
+            label: "Try opening in browser",
+            keepOpen: true,
+            onClick: () => this.openExternalUri(COMPANION_APK_URL),
+          },
         ],
-        confirmLabel: "Copy download link",
-        cancelLabel: "Close",
-      },
-      async (copy) => {
-        if (!copy) return;
-        await navigator.clipboard.writeText(COMPANION_RELEASES_URL);
-        new Notice("Download link copied.");
       }
     ).open();
   }
@@ -1498,25 +1529,98 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /** Local bridge diagnosis that works even when nothing comes back from Termux. */
+  /** The one-line Termux install command (same one settings shows). */
+  installCommand(): string {
+    const hint = this.deviceSettings.repoPathHint;
+    return hint
+      ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${hint}"`
+      : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+  }
+
+  /** Copy the install command, then bring Termux to the front (via the companion). */
+  copyCommandAndOpenTermux(): void {
+    void navigator.clipboard.writeText(this.installCommand());
+    new Notice("Install command copied - long-press in Termux to paste, then Enter.");
+    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+  }
+
   async cmdSelfCheck(timedOut = false): Promise<void> {
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
     const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
-    const lines = [
-      report.verdict,
+    const outdated = /ERROR building result for [^(]*$/m.test(report.runnerLogTail);
+    const lines = [report.verdict];
+    if (outdated) {
+      lines.push("", "The Termux runner is OUTDATED. Fix: the button below copies the install command and opens Termux - paste and run it there.");
+    }
+    lines.push(
       "",
       `Runtime folder (as the plugin sees it): ${paths.root}`,
       `Runner has written here: ${report.runnerLogExists ? "yes" : "NO"}`,
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
-      `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`,
-    ];
-    if (/ERROR building result for [^(]*$/m.test(report.runnerLogTail)) {
-      lines.splice(1, 0, "", `Detected an OUTDATED runner in the log. ${RUNNER_OUTDATED_HINT}`);
-    }
+      `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
+    );
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
+
+    // One-tap fixes instead of prose. Which buttons appear depends on what the
+    // plugin actually knows: the companion reports whether Termux is installed
+    // in every ack; no ack ever means the companion itself is the suspect.
+    const actions: ResultModalAction[] = [];
+    if (Platform.isAndroidApp) {
+      actions.push({
+        label: "Copy command & open Termux",
+        cta: true,
+        onClick: () => this.copyCommandAndOpenTermux(),
+      });
+      // Termux present but the runner never answered: it is most often simply
+      // closed/force-stopped (Android then blocks its background service).
+      if (this.lastAckTermuxInstalled !== false) {
+        actions.push({
+          label: "Open Termux",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_OPEN_TERMUX_URI),
+        });
+      }
+      if (this.lastAckTermuxInstalled === false) {
+        // The companion reported Termux missing. Let it open F-Droid (or the
+        // page in the real browser) — an in-app Custom Tab download tends to
+        // vanish. The plain link stays as a copyable fallback below.
+        actions.push({
+          label: "Get Termux (F-Droid)",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_GET_TERMUX_URI),
+        });
+        lines.push(
+          "",
+          `Termux is NOT installed on this device. Official site: ${TERMUX_SITE_URL}`,
+          `Direct F-Droid page: ${TERMUX_FDROID_URL} — do not use the Play Store build, it is deprecated.`
+        );
+      }
+      if (this.lastCompanionAckMs === 0) {
+        // No companion has answered: it cannot fetch its own update, so hand
+        // the user a link they can paste into a real browser.
+        actions.push({
+          label: "Copy companion APK link",
+          keepOpen: true,
+          onClick: () => {
+            void navigator.clipboard.writeText(COMPANION_APK_URL);
+            new Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+          },
+        });
+      } else {
+        // Companion is alive: let IT open the download in the real default
+        // browser (an in-app Custom Tab download is often discarded).
+        actions.push({
+          label: "Update companion app",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_DOWNLOAD_APK_URI),
+        });
+      }
+    }
     new ResultModal(this.app, "Bridge check", lines, {
       stdout: report.runnerLogTail || undefined,
       isError: !report.ok,
+      actions,
     }).open();
   }
 

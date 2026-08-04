@@ -36,9 +36,43 @@ export const PAIRING_FILE = "pairing.json";
 /** Opens the companion app's setup checklist (permission + Termux + round trip). */
 export const COMPANION_SETUP_URI = "nativegitbridge://setup";
 
-/** Where the companion APK lives (shown when the setup URI opens nothing). */
+/**
+ * Direct download of the newest signed companion APK. GitHub keeps this URL
+ * stable across releases ("latest/download/<asset>"); it 404s only when the
+ * latest release lacks a signed APK — the releases page below is the fallback.
+ */
+export const COMPANION_APK_URL =
+  "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/git-bridge-companion.apk";
+
+/** Fallback: the releases page (always exists, lists every asset). */
 export const COMPANION_RELEASES_URL =
   "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
+
+/** Asks the companion to bring Termux to the foreground (launch intent). */
+export const COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
+
+/**
+ * Asks the companion to open its own APK download in the REAL default browser.
+ * Carries no payload — the companion holds the URL itself, so the URI keeps
+ * its "no content, only intent" property. Needed because a download started
+ * inside Obsidian's Chrome Custom Tab is frequently discarded when the tab
+ * closes (the file never reaches Downloads).
+ */
+export const COMPANION_DOWNLOAD_APK_URI = "nativegitbridge://download-apk";
+
+/** Official Termux site (the F-Droid build; Play Store build is deprecated). */
+export const TERMUX_SITE_URL = "https://termux.dev";
+
+/** Termux on F-Droid — the supported build, linked directly. */
+export const TERMUX_FDROID_URL = "https://f-droid.org/packages/com.termux/";
+
+/**
+ * Asks the companion to open Termux on F-Droid (or F-Droid's web page in the
+ * real browser). The companion never installs anything itself: that would
+ * require REQUEST_INSTALL_PACKAGES on an app that already holds RUN_COMMAND,
+ * and Android would still ask the user to confirm.
+ */
+export const COMPANION_GET_TERMUX_URI = "nativegitbridge://get-termux";
 
 /** Shown whenever the Termux-side runner is older than RUNNER_MIN_VERSION. */
 export const RUNNER_OUTDATED_HINT =

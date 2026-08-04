@@ -49,7 +49,13 @@ var STORAGE_PREFIX = "ngb:v1";
 var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
 var PAIRING_FILE = "pairing.json";
 var COMPANION_SETUP_URI = "nativegitbridge://setup";
+var COMPANION_APK_URL = "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/git-bridge-companion.apk";
 var COMPANION_RELEASES_URL = "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
+var COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
+var COMPANION_DOWNLOAD_APK_URI = "nativegitbridge://download-apk";
+var TERMUX_SITE_URL = "https://termux.dev";
+var TERMUX_FDROID_URL = "https://f-droid.org/packages/com.termux/";
+var COMPANION_GET_TERMUX_URI = "nativegitbridge://get-termux";
 var RUNNER_OUTDATED_HINT = "The Termux runner script is outdated. Updating the plugin does not update it \u2014 re-run the install command in Termux (Settings -> Native Git Bridge -> Copy command, or the 'Set up Termux' button in the companion app).";
 
 // src/types.ts
@@ -282,6 +288,17 @@ function outputSection(el, label2, text) {
   const shown = text.length > DISPLAY_OUTPUT_LIMIT ? text.slice(0, DISPLAY_OUTPUT_LIMIT) + "\n\u2026 (truncated; full output in runner.log)" : text;
   box.createEl("pre", { text: shown });
 }
+function linkifyInto(parent, text) {
+  const re = /https?:\/\/[^\s)"']+/g;
+  let last = 0;
+  for (const m of text.matchAll(re)) {
+    const i = m.index ?? 0;
+    if (i > last) parent.appendText(text.slice(last, i));
+    parent.createEl("a", { href: m[0], text: m[0] });
+    last = i + m[0].length;
+  }
+  if (last < text.length) parent.appendText(text.slice(last));
+}
 var ResultModal = class extends import_obsidian2.Modal {
   constructor(app, title, lines, opts = {}) {
     super(app);
@@ -295,7 +312,18 @@ var ResultModal = class extends import_obsidian2.Modal {
     const c = this.contentEl;
     const sec = c.createDiv({ cls: "ngb-section" });
     for (const line of this.lines) {
-      sec.createDiv({ text: line, cls: this.opts.isError ? "ngb-status-error" : "" });
+      const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
+      linkifyInto(div, line);
+    }
+    if (this.opts.actions && this.opts.actions.length > 0) {
+      const fixes = c.createDiv({ cls: "ngb-buttons ngb-action-buttons" });
+      for (const a of this.opts.actions) {
+        const b = fixes.createEl("button", { text: a.label, cls: a.cta ? "mod-cta" : "" });
+        b.addEventListener("click", () => {
+          a.onClick();
+          if (!a.keepOpen) this.close();
+        });
+      }
     }
     outputSection(c, "stdout", this.opts.stdout);
     outputSection(c, "stderr", this.opts.stderr);
@@ -325,7 +353,7 @@ var ConfirmModal = class extends import_obsidian2.Modal {
     this.modalEl.addClass("ngb-modal");
     this.titleEl.setText(this.opts.title);
     const c = this.contentEl;
-    for (const line of this.opts.body) c.createEl("p", { text: line });
+    for (const line of this.opts.body) linkifyInto(c.createEl("p"), line);
     const btns = c.createDiv({ cls: "ngb-buttons" });
     const cancel = btns.createEl("button", { text: this.opts.cancelLabel ?? "Cancel" });
     cancel.addEventListener("click", () => {
@@ -477,6 +505,13 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
+    // ------------------------------------------------ collapsible rule managers
+    /**
+     * Which sections the user has expanded. Add/remove actions re-render the
+     * whole tab (display()), which would otherwise collapse every <details>
+     * back to its default state — remembering titles here keeps them open.
+     */
+    this.openSections = /* @__PURE__ */ new Set();
   }
   display() {
     const { containerEl } = this;
@@ -654,14 +689,18 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
       })
     );
   }
-  // ------------------------------------------------ collapsible rule managers
-  /** Collapsed <details> block with a title; content is built by `fill`. */
+  /** Collapsible <details> block with a title; open state survives re-renders. */
   detailsSection(containerEl, title, hint) {
     const det = containerEl.createEl("details", { cls: "ngb-details" });
+    if (this.openSections.has(title)) det.setAttribute("open", "");
+    det.addEventListener("toggle", () => {
+      if (det.hasAttribute("open")) this.openSections.add(title);
+      else this.openSections.delete(title);
+    });
     const sum = det.createEl("summary");
     sum.createSpan({ text: title });
-    sum.createSpan({ cls: "ngb-details-hint", text: hint });
-    return det.createDiv({ cls: "ngb-details-body" });
+    const hintEl = sum.createSpan({ cls: "ngb-details-hint", text: hint });
+    return { body: det.createDiv({ cls: "ngb-details-body" }), hintEl };
   }
   /** One removable row: monospace text + a Remove button. */
   entryRow(listEl, text, onRemove) {
@@ -683,116 +722,123 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
       input.value = "";
     });
   }
+  // Every section refreshes ONLY its own list in place. Re-rendering the whole
+  // tab (display()) on each add/remove resets the scroll position and makes
+  // the collapsibles flicker — the view visibly "jumps".
   renderProtectedPathsSection(containerEl, s) {
-    const body = this.detailsSection(
-      containerEl,
-      "Protected paths",
-      `${this.plugin.effectiveProtectedPaths().length} effective`
-    );
+    const { body, hintEl } = this.detailsSection(containerEl, "Protected paths", "");
     new import_obsidian3.Setting(body).setName("Auto-protect sparse exclusions").setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).").addToggle(
       (t) => t.setValue(s.autoProtectSparse).onChange(async (v) => {
         await this.plugin.updateDeviceSettings({ autoProtectSparse: v });
-        this.display();
+        refresh();
       })
     );
-    if (s.autoProtectSparse) {
-      body.createEl("p", {
-        cls: "ngb-settings-note",
-        text: s.derivedProtectedPaths.length ? `Derived from sparse checkout: ${s.derivedProtectedPaths.join(", ")}` : "Derived from sparse checkout: none yet (run Status once to read them from git)."
-      });
-    }
+    const derivedNote = body.createEl("p", { cls: "ngb-settings-note" });
     const list = body.createDiv();
-    for (const p of s.protectedPaths) {
-      this.entryRow(list, p, async () => {
-        await this.plugin.updateDeviceSettings({
-          protectedPaths: s.protectedPaths.filter((x) => x !== p)
-        });
-        this.display();
-      });
-    }
     const invalidNote = body.createDiv({ cls: "ngb-invalid" });
+    const refresh = () => {
+      const cur = this.plugin.deviceSettings;
+      hintEl.setText(`${this.plugin.effectiveProtectedPaths().length} effective`);
+      derivedNote.setText(
+        !cur.autoProtectSparse ? "Auto-protect is off: only the manual paths below are protected." : cur.derivedProtectedPaths.length ? `Derived from sparse checkout: ${cur.derivedProtectedPaths.join(", ")}` : "Derived from sparse checkout: none yet (run Status once to read them from git)."
+      );
+      list.empty();
+      for (const p of cur.protectedPaths) {
+        this.entryRow(list, p, async () => {
+          await this.plugin.updateDeviceSettings({
+            protectedPaths: this.plugin.deviceSettings.protectedPaths.filter((x) => x !== p)
+          });
+          refresh();
+        });
+      }
+    };
+    refresh();
     this.addRow(body, "Folder/Subfolder", "Add manual path", async (v) => {
-      const res = validateProtectedPaths([...s.protectedPaths, v]);
+      const res = validateProtectedPaths([...this.plugin.deviceSettings.protectedPaths, v]);
       if (!res.ok) {
         invalidNote.setText(`Rejected "${res.offending}": ${res.reason}`);
         return;
       }
+      invalidNote.setText("");
       await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
-      this.display();
+      refresh();
     });
   }
   renderSparseSection(containerEl) {
-    const sparse = this.plugin.lastKnownSparse();
-    const excls = this.plugin.deviceSettings.derivedProtectedPaths;
-    const body = this.detailsSection(
-      containerEl,
-      "Sparse checkout exclusions",
-      sparse ? `${excls.length} hidden` : "run Status to load"
-    );
+    const { body, hintEl } = this.detailsSection(containerEl, "Sparse checkout exclusions", "");
     body.createEl("p", {
       cls: "ngb-settings-note",
       text: "Paths hidden from THIS device's working tree (non-cone sparse checkout, applied by git in Termux). Hiding never deletes anything from the repository; removing an exclusion materializes the files again."
     });
-    if (sparse && sparse.enabled === false) {
-      body.createEl("p", { cls: "ngb-invalid", text: "Sparse checkout is not enabled in this repository." });
-    }
+    const stateNote = body.createDiv({ cls: "ngb-invalid" });
     const list = body.createDiv();
-    for (const p of excls) {
-      this.entryRow(list, p, () => void this.plugin.cmdSparseExclude(p, false).then(() => this.display()));
-    }
+    const refresh = () => {
+      const sparse = this.plugin.lastKnownSparse();
+      const excls = this.plugin.deviceSettings.derivedProtectedPaths;
+      hintEl.setText(sparse ? `${excls.length} hidden` : "run Status to load");
+      stateNote.setText(sparse && sparse.enabled === false ? "Sparse checkout is not enabled in this repository." : "");
+      list.empty();
+      for (const p of excls) {
+        this.entryRow(list, p, () => void this.plugin.cmdSparseExclude(p, false).then(refresh));
+      }
+    };
+    refresh();
     this.addRow(
       body,
       "Folder/Subfolder",
       "Hide path",
-      (v) => void this.plugin.cmdSparseExclude(v, true).then(() => this.display())
+      (v) => void this.plugin.cmdSparseExclude(v, true).then(refresh)
     );
   }
   renderGitignoreSection(containerEl) {
-    const body = this.detailsSection(containerEl, ".gitignore", "shared, synced through git");
+    const { body, hintEl } = this.detailsSection(containerEl, ".gitignore", "shared, synced through git");
     body.createEl("p", {
       cls: "ngb-settings-note",
       text: ".gitignore is a tracked file: entries apply to ALL devices once the change is committed and synced."
     });
     const list = body.createDiv();
-    void this.plugin.loadGitignore().then((entries) => {
-      for (const e of entries) {
-        this.entryRow(list, e, () => void this.plugin.gitignoreRemove(e).then(() => this.display()));
-      }
-    });
+    const refresh = () => {
+      void this.plugin.loadGitignore().then((entries) => {
+        hintEl.setText(`${entries.length} entries \xB7 shared, synced through git`);
+        list.empty();
+        for (const e of entries) {
+          this.entryRow(list, e, () => void this.plugin.gitignoreRemove(e).then(refresh));
+        }
+      });
+    };
+    refresh();
     this.addRow(
       body,
       "pattern, e.g. /Scratch/ or *.tmp",
       "Add entry",
-      (v) => void this.plugin.gitignoreAdd(v).then(() => this.display())
+      (v) => void this.plugin.gitignoreAdd(v).then(refresh)
     );
   }
   renderExcludeSection(containerEl) {
-    const body = this.detailsSection(containerEl, ".git/info/exclude", "this clone only, never synced");
+    const { body, hintEl } = this.detailsSection(containerEl, ".git/info/exclude", "this clone only, never synced");
     body.createEl("p", {
       cls: "ngb-settings-note",
       text: "Local ignore rules stored inside .git \u2014 they never reach the remote or other devices. Managed through the Termux runner; press Load to read the current file."
     });
     const list = body.createDiv();
-    const render = (entries) => {
+    const refresh = () => {
+      const entries = this.plugin.currentExcludeLines();
+      hintEl.setText(`${entries.length} entries \xB7 this clone only`);
       list.empty();
       for (const e of entries) {
         const path = e.replace(/^\//, "").replace(/\/$/, "");
-        this.entryRow(list, e, () => void this.plugin.cmdExcludeChange(path, false).then(() => this.display()));
+        this.entryRow(list, e, () => void this.plugin.cmdExcludeChange(path, false).then(refresh));
       }
     };
-    render(this.plugin.currentExcludeLines());
+    refresh();
     new import_obsidian3.Setting(body).addButton(
-      (b) => b.setButtonText("Load from Termux").onClick(
-        () => void this.plugin.refreshExcludeList().then((entries) => {
-          if (entries) render(entries);
-        })
-      )
+      (b) => b.setButtonText("Load from Termux").onClick(() => void this.plugin.refreshExcludeList().then(refresh))
     );
     this.addRow(
       body,
       "Folder/Subfolder",
       "Add to exclude",
-      (v) => void this.plugin.cmdExcludeChange(v, true).then(() => this.display())
+      (v) => void this.plugin.cmdExcludeChange(v, true).then(refresh)
     );
   }
 };
@@ -2162,6 +2208,8 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
     this.companionProbeMs = 4e3;
     /** Time of the last obsidian://native-git-bridge-ack from the companion. */
     this.lastCompanionAckMs = 0;
+    /** What the companion reported about Termux (null until the first ack). */
+    this.lastAckTermuxInstalled = null;
     this.ackWaiters = [];
     // -------------------- repo config management (sparse / gitignore / exclude)
     /** In-memory caches so the file context menu can decide add-vs-remove synchronously. */
@@ -2598,10 +2646,10 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
       { id: "cancel-operation", name: "Native Git: Cancel current operation when possible", cb: () => void this.cmdCancel() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
-    this.registerObsidianProtocolHandler(
-      "native-git-bridge-ack",
-      (params) => this.onCompanionAck(params?.src)
-    );
+    this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
+      const p = params;
+      this.onCompanionAck(p?.src, p?.termux);
+    });
   }
   // ------------------------------------------------------------ operations
   /** Guard + queue + trigger + await one bridge operation. */
@@ -2745,11 +2793,19 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
   /**
    * The companion (>= 0.4.0) bounces obsidian://native-git-bridge-ack back for
    * every URI it receives, giving a DETERMINISTIC "companion is installed and
-   * reachable" signal. Registered in onload.
+   * reachable" signal — and, since 0.4.1, whether Termux itself is installed
+   * (the WebView cannot query other packages; the companion can). Registered
+   * in onload.
    */
-  onCompanionAck(src) {
+  onCompanionAck(src, termux) {
     this.lastCompanionAckMs = Date.now();
-    this.log.add("info", "companion", `Companion acknowledged (${src ?? "unknown"}).`);
+    if (termux === "1") this.lastAckTermuxInstalled = true;
+    else if (termux === "0") this.lastAckTermuxInstalled = false;
+    this.log.add(
+      "info",
+      "companion",
+      `Companion acknowledged (${src ?? "unknown"}; Termux installed: ${termux === "1" ? "yes" : termux === "0" ? "NO" : "unknown"}).`
+    );
     for (const w of this.ackWaiters.splice(0)) w();
   }
   awaitCompanionAck(timeoutMs) {
@@ -2817,22 +2873,34 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
     this.openExternalUri(COMPANION_SETUP_URI);
     if (await this.probeCompanion()) return;
     this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
-    new ConfirmModal(
+    new ResultModal(
       this.app,
+      "Companion app not installed?",
+      [
+        "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
+        "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
+        "Copy the link below and paste it into your browser (Chrome/Firefox). That is the reliable route: a download started inside Obsidian's built-in browser tab is often discarded when the tab closes, so the APK never reaches Downloads.",
+        `Direct APK: ${COMPANION_APK_URL}`,
+        `All assets: ${COMPANION_RELEASES_URL}`,
+        "After installing, grant the 'Run commands in Termux environment' permission in the companion, then try again."
+      ],
       {
-        title: "Companion app not installed?",
-        body: [
-          "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
-          "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
-          `Download its APK from ${COMPANION_RELEASES_URL} (asset: git-bridge-companion), install it, grant the 'Run commands in Termux environment' permission, then try again.`
-        ],
-        confirmLabel: "Copy download link",
-        cancelLabel: "Close"
-      },
-      async (copy) => {
-        if (!copy) return;
-        await navigator.clipboard.writeText(COMPANION_RELEASES_URL);
-        new import_obsidian12.Notice("Download link copied.");
+        actions: [
+          {
+            label: "Copy download link",
+            cta: true,
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(COMPANION_APK_URL);
+              new import_obsidian12.Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+            }
+          },
+          {
+            label: "Try opening in browser",
+            keepOpen: true,
+            onClick: () => this.openExternalUri(COMPANION_APK_URL)
+          }
+        ]
       }
     ).open();
   }
@@ -3393,25 +3461,81 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
     }
   }
   /** Local bridge diagnosis that works even when nothing comes back from Termux. */
+  /** The one-line Termux install command (same one settings shows). */
+  installCommand() {
+    const hint = this.deviceSettings.repoPathHint;
+    return hint ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${hint}"` : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+  }
+  /** Copy the install command, then bring Termux to the front (via the companion). */
+  copyCommandAndOpenTermux() {
+    void navigator.clipboard.writeText(this.installCommand());
+    new import_obsidian12.Notice("Install command copied - long-press in Termux to paste, then Enter.");
+    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+  }
   async cmdSelfCheck(timedOut = false) {
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
     const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
-    const lines = [
-      report.verdict,
+    const outdated = /ERROR building result for [^(]*$/m.test(report.runnerLogTail);
+    const lines = [report.verdict];
+    if (outdated) {
+      lines.push("", "The Termux runner is OUTDATED. Fix: the button below copies the install command and opens Termux - paste and run it there.");
+    }
+    lines.push(
       "",
       `Runtime folder (as the plugin sees it): ${paths.root}`,
       `Runner has written here: ${report.runnerLogExists ? "yes" : "NO"}`,
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
       `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
-    ];
-    if (/ERROR building result for [^(]*$/m.test(report.runnerLogTail)) {
-      lines.splice(1, 0, "", `Detected an OUTDATED runner in the log. ${RUNNER_OUTDATED_HINT}`);
-    }
+    );
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
+    const actions = [];
+    if (import_obsidian12.Platform.isAndroidApp) {
+      actions.push({
+        label: "Copy command & open Termux",
+        cta: true,
+        onClick: () => this.copyCommandAndOpenTermux()
+      });
+      if (this.lastAckTermuxInstalled !== false) {
+        actions.push({
+          label: "Open Termux",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_OPEN_TERMUX_URI)
+        });
+      }
+      if (this.lastAckTermuxInstalled === false) {
+        actions.push({
+          label: "Get Termux (F-Droid)",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_GET_TERMUX_URI)
+        });
+        lines.push(
+          "",
+          `Termux is NOT installed on this device. Official site: ${TERMUX_SITE_URL}`,
+          `Direct F-Droid page: ${TERMUX_FDROID_URL} \u2014 do not use the Play Store build, it is deprecated.`
+        );
+      }
+      if (this.lastCompanionAckMs === 0) {
+        actions.push({
+          label: "Copy companion APK link",
+          keepOpen: true,
+          onClick: () => {
+            void navigator.clipboard.writeText(COMPANION_APK_URL);
+            new import_obsidian12.Notice("Link copied - paste it into Chrome or Firefox to download the APK.");
+          }
+        });
+      } else {
+        actions.push({
+          label: "Update companion app",
+          keepOpen: true,
+          onClick: () => this.openExternalUri(COMPANION_DOWNLOAD_APK_URI)
+        });
+      }
+    }
     new ResultModal(this.app, "Bridge check", lines, {
       stdout: report.runnerLogTail || void 0,
-      isError: !report.ok
+      isError: !report.ok,
+      actions
     }).open();
   }
   // ------------------------------------------------- per-file staging actions

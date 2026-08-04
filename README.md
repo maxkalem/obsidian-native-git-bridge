@@ -53,7 +53,7 @@ in which protected sparse paths appear as changes.
 curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
-> [!warning] WARNING
+> [!warning]
 > Be sure to replace \<YourVault\> in this command with the path to your vault. 
 > ==DO NOT== COPY THE COMMAND AS-IS.
 
