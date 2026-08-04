@@ -148,3 +148,13 @@
 }
 /* Same guarantee for any monospace output rendered in modals */
 .ngb-mono, .ngb-output pre { overflow-wrap: anywhere; }
+
+/* Footer key/value rows: one line each, value right-aligned (no odd wrapping
+   in the narrow sidebar, where a fixed label column pushed values down). */
+.ngb-sv-kv { display: flex; flex-direction: column; gap: 2px; }
+.ngb-sv-kv-row {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--size-4-2); font-size: var(--font-ui-small);
+}
+.ngb-sv-kv-key { color: var(--text-muted); flex: 0 1 auto; }
+.ngb-sv-kv-val { color: var(--text-normal); text-align: right; overflow-wrap: anywhere; }

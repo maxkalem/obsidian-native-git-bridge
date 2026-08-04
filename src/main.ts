@@ -198,6 +198,42 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.activeCancel?.cancel();
   }
 
+  // --------------------------------------------------------------- messaging
+
+  /**
+   * Route a short informational message according to the device setting.
+   * Failures never go through here — they always surface as a modal.
+   *
+   * Note: an Obsidian plugin cannot raise native Android toasts; the choices are
+   * an in-app notice, the status panel, or the log only.
+   */
+  private notify(message: string): void {
+    const mode = this.deviceSettings.notificationMode;
+    this.log.add("info", "notify", message);
+    if (mode === "notice") new Notice(message);
+    else if (mode === "status-only") {
+      this.progressText = message;
+      this.updateProgressInView(message);
+      window.setTimeout(() => {
+        if (this.progressText === message) {
+          this.progressText = null;
+          this.updateProgressInView(null);
+        }
+      }, 4000);
+    }
+    // "log-only": nothing else to do.
+  }
+
+  /** Result window for a SUCCESSFUL operation: shown only when enabled. */
+  private reportSuccess(title: string, lines: string[], stdout?: string): void {
+    if (this.deviceSettings.showSuccessModals) {
+      new ResultModal(this.app, title, lines, { stdout }).open();
+    } else {
+      this.notify(`${title}: ${lines[0] ?? "done"}`);
+      if (stdout) this.log.add("info", "result", title, stdout);
+    }
+  }
+
   // ------------------------------------------------------------------ setup
 
   private resolveScopeId(): string {
@@ -338,7 +374,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           /* best effort */
         }
         this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
-        new Notice("Native Git Bridge: paired with the Termux runner.");
+        this.notify("Native Git Bridge: paired with the Termux runner.");
       };
       const current = this.deviceSettings.authToken;
       if (current === "" || current === pairing.token) {
@@ -690,14 +726,23 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!confirmed) return;
         const result = await this.runOperation("sparse-reapply");
         if (!result) return;
-        new ResultModal(
-          this.app,
-          result.ok ? "Sparse checkout reapplied" : "Sparse reapply failed",
-          result.ok
-            ? ["Sparse checkout rules were reapplied.", `Patterns now active: ${(result.data?.sparseList ?? "").split("\n").filter(Boolean).length}`]
-            : [result.error?.message ?? "Unknown error."],
-          { stdout: result.error?.stdout ?? result.data?.reapplyOutput, stderr: result.error?.stderr, isError: !result.ok }
-        ).open();
+        if (result.ok) {
+          this.reportSuccess(
+            "Sparse checkout reapplied",
+            [
+              "Sparse checkout rules were reapplied.",
+              `Patterns now active: ${(result.data?.sparseList ?? "").split("\n").filter(Boolean).length}`,
+            ],
+            result.data?.reapplyOutput
+          );
+        } else {
+          new ResultModal(
+            this.app,
+            "Sparse reapply failed",
+            [result.error?.message ?? "Unknown error."],
+            { stdout: result.error?.stdout, stderr: result.error?.stderr, isError: true }
+          ).open();
+        }
       }
     ).open();
   }
@@ -768,7 +813,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!result.ok) return this.renderMutationError("Native Git: fetch failed", result);
     this.absorbStatusData(result.data ?? {});
     const st = this.lastStatus?.status;
-    new Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
+    this.notify(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
   }
 
   async cmdPull(silent = false): Promise<void> {
@@ -779,9 +824,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!result.ok) return this.renderMutationError("Native Git: pull failed", result);
     this.absorbStatusData(result.data ?? {});
     if (!silent) {
-      new ResultModal(this.app, "Native Git: pull", ["Pull completed."], {
-        stdout: result.data?.pullOutput,
-      }).open();
+      this.reportSuccess("Native Git: pull", ["Pull completed."], result.data?.pullOutput);
     }
   }
 
@@ -799,16 +842,15 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result.ok) return this.renderMutationError("Native Git: commit failed", result);
         this.absorbStatusData(result.data ?? {});
         const committed = result.data?.committed === "true";
-        new ResultModal(
-          this.app,
+        this.reportSuccess(
           "Native Git: commit",
           [
             committed
               ? `Committed ${result.data?.newHead?.slice(0, 8) ?? ""}.`
               : "Nothing to commit (no staged changes after safety filtering).",
           ],
-          { stdout: result.data?.commitOutput }
-        ).open();
+          result.data?.commitOutput
+        );
       }
     ).open();
   }
@@ -820,9 +862,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: push failed", result);
     this.absorbStatusData(result.data ?? {});
-    new ResultModal(this.app, "Native Git: push", ["Push completed."], {
-      stdout: result.data?.pushOutput,
-    }).open();
+    this.reportSuccess("Native Git: push", ["Push completed."], result.data?.pushOutput);
   }
 
   async cmdSync(message?: string, silent = false): Promise<void> {
@@ -839,8 +879,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       `Committed: ${result.data?.committed ?? "false"} · Pushed: ${result.data?.pushed ?? "false"}`,
     ];
     this.log.add("info", "sync", "Sync completed successfully.");
-    if (silent) new Notice("Native Git: sync completed.");
-    else new ResultModal(this.app, "Native Git: sync completed", lines, { stdout: result.data?.pullOutput }).open();
+    if (silent) this.notify("Native Git: sync completed.");
+    else this.reportSuccess("Native Git: sync completed", lines, result.data?.pullOutput);
   }
 
   async cmdAbortMerge(): Promise<void> {
@@ -861,7 +901,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
         this.absorbStatusData(result.data ?? {});
-        new Notice("Merge aborted; repository restored.");
+        this.notify("Merge aborted; repository restored.");
       }
     ).open();
   }
@@ -971,7 +1011,7 @@ export default class NativeGitBridgePlugin extends Plugin {
             bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
           );
           this.log.add("info", "restore-file", `Restored ${currentPath} from ${e.hash} (historical name ${e.pathAtCommit}).`);
-          new Notice("File content restored from the selected version.");
+          this.notify("File content restored from the selected version.");
           return;
         }
         const result = await this.runOperation("restore-file", {
@@ -982,7 +1022,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
         this.absorbStatusData(result.data ?? {});
-        new Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
+        this.notify(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
       }
     ).open();
   }
@@ -1076,7 +1116,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
     this.absorbStatusData(result.data ?? {});
-    new Notice("Staged all permitted changes (protected paths excluded).");
+    this.notify("Staged all permitted changes (protected paths excluded).");
   }
 
   async cmdUnstageAll(): Promise<void> {
@@ -1086,7 +1126,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
     this.absorbStatusData(result.data ?? {});
-    new Notice("Unstaged all changes.");
+    this.notify("Unstaged all changes.");
   }
 
   async cmdStageFile(path: string): Promise<void> {
@@ -1131,7 +1171,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
         this.absorbStatusData(result.data ?? {});
-        new Notice(`Discarded changes in ${path}.`);
+        this.notify(`Discarded changes in ${path}.`);
       }
     ).open();
   }

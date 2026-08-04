@@ -243,10 +243,11 @@ export class StatusView extends ItemView {
 
     // --- footer: details + progress (bottom of the panel, never covering content) ---
     const foot = c.createDiv({ cls: "ngb-sv-footer" });
-    const kv = foot.createDiv({ cls: "ngb-kv" });
+    const kv = foot.createDiv({ cls: "ngb-sv-kv" });
     const row = (k: string, v: string) => {
-      kv.createDiv({ cls: "k", text: k });
-      kv.createDiv({ text: v });
+      const line = kv.createDiv({ cls: "ngb-sv-kv-row" });
+      line.createSpan({ cls: "ngb-sv-kv-key", text: k });
+      line.createSpan({ cls: "ngb-sv-kv-val", text: v });
     };
     if (d.sparse) {
       row("Sparse", d.sparse.enabled ? `on (${d.sparse.patterns.length} rules)` : "off");

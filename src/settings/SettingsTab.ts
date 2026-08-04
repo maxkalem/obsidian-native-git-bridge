@@ -120,6 +120,39 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       });
     });
 
+    containerEl.createEl("h3", { text: "Notifications" });
+
+    new Setting(containerEl)
+      .setName("Show a result window on success")
+      .setDesc(
+        "Off: successful operations only update the status panel (and the log). " +
+          "Failures, conflicts and safety blocks are always shown as a window."
+      )
+      .addToggle((t) =>
+        t.setValue(s.showSuccessModals).onChange(async (v) => {
+          await this.plugin.updateDeviceSettings({ showSuccessModals: v });
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Short messages")
+      .setDesc(
+        "Where brief informational messages go. Note: a plugin cannot raise native Android " +
+          "toasts, so the choices are Obsidian's own notice, the status panel, or the log only."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("notice", "Obsidian notice (toast)")
+          .addOption("status-only", "Status panel only")
+          .addOption("log-only", "Operation log only")
+          .setValue(s.notificationMode)
+          .onChange(async (v) => {
+            await this.plugin.updateDeviceSettings({
+              notificationMode: v as "notice" | "status-only" | "log-only",
+            });
+          })
+      );
+
     containerEl.createEl("h3", { text: "Automatic actions (all off by default)" });
 
     new Setting(containerEl)

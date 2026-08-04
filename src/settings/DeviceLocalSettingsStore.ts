@@ -19,6 +19,10 @@ export interface DeviceLocalSettings {
   skipOnLowBattery: boolean;
   /** URI template for the companion-intent transport; "{id}" is replaced by the request id. */
   companionUriTemplate: string;
+  /** Show a result window when an operation SUCCEEDS (failures are always shown). */
+  showSuccessModals: boolean;
+  /** Where short informational messages go. */
+  notificationMode: "notice" | "status-only" | "log-only";
   /** Suppress the obsidian-git incompatibility warning on this device. */
   suppressObsidianGitWarning: boolean;
 }
@@ -40,6 +44,8 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   wifiOnly: false,
   skipOnLowBattery: false,
   companionUriTemplate: "nativegitbridge://run?id={id}",
+  showSuccessModals: false,
+  notificationMode: "notice",
   suppressObsidianGitWarning: false,
 };
 
