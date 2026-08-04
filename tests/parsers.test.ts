@@ -120,3 +120,10 @@ describe("parseLastCommit", () => {
     expect(parseLastCommit("not-a-hash\tx\ty")).toBeUndefined();
   });
 });
+
+describe("untracked directory paths from porcelain v2", () => {
+  it("keeps the trailing slash so the UI can show a folder name", () => {
+    const s = parseStatusPorcelainV2("? Private/Work/\n? note.md\n");
+    expect(s.untracked).toEqual(["Private/Work/", "note.md"]);
+  });
+});

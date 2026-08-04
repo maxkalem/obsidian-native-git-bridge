@@ -52,7 +52,19 @@
 .ngb-sv-file:hover { background: var(--background-modifier-hover); }
 .ngb-sv-file-main { display: flex; align-items: center; gap: var(--size-4-1); min-width: 0; flex: 1; cursor: pointer; }
 .ngb-sv-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ngb-sv-file-kind { color: var(--text-faint); font-size: var(--font-smaller); flex: 0 0 auto; }
+.ngb-sv-file-kind {
+  color: var(--text-faint); font-size: var(--font-smaller);
+  flex: 0 0 auto; margin-left: var(--size-4-1);
+}
+.ngb-sv-empty {
+  color: var(--text-faint); font-size: var(--font-ui-smaller);
+  padding: 2px 0 2px var(--size-4-3);
+}
+.ngb-sv-file-code {
+  flex: 0 0 auto; min-width: 1.4em; text-align: center;
+  font-family: var(--font-monospace); font-size: var(--font-smaller);
+  color: var(--text-muted); margin-left: 2px;
+}
 .ngb-sv-file-actions { display: flex; gap: 0; flex: 0 0 auto; }
 .ngb-code-D { color: var(--text-error); }
 .ngb-code-A, .ngb-code-\? { color: var(--text-success, #08b94e); }

@@ -1696,8 +1696,16 @@ var StatusView = class extends import_obsidian10.ItemView {
       c.createEl("p", { cls: "ngb-settings-note", text: "Press refresh to query native Git." });
       return;
     }
+    const stageable = d.unstaged.length + d.untracked.length > 0;
     this.renderGroup(c, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
-    this.renderGroup(c, "staged", "Staged changes", d.staged.map((e) => entry(e, e.index)), false);
+    this.renderGroup(
+      c,
+      "staged",
+      "Staged changes",
+      d.staged.map((e) => entry(e, e.index)),
+      false,
+      stageable
+    );
     this.renderGroup(c, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
     this.renderGroup(
       c,
@@ -1724,8 +1732,8 @@ var StatusView = class extends import_obsidian10.ItemView {
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
   }
-  renderGroup(parent, group, title, items, danger) {
-    if (items.length === 0) return;
+  renderGroup(parent, group, title, items, danger, showWhenEmpty = false) {
+    if (items.length === 0 && !showWhenEmpty) return;
     const wrap = parent.createDiv({ cls: "ngb-sv-group" });
     const header = wrap.createDiv({ cls: "ngb-sv-group-header" });
     const chevron = header.createSpan({ cls: "ngb-sv-chevron" });
@@ -1741,14 +1749,20 @@ var StatusView = class extends import_obsidian10.ItemView {
     });
     if (this.collapsed[group]) return;
     const list = wrap.createDiv({ cls: "ngb-sv-list" });
+    if (items.length === 0) {
+      list.createDiv({ cls: "ngb-sv-empty", text: "Nothing staged yet." });
+      return;
+    }
     for (const it of items) {
       const rowEl = list.createDiv({ cls: "ngb-sv-file" });
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
-      main.createSpan({ cls: `ngb-badge ngb-code-${it.code}`, text: it.code });
-      const name = main.createSpan({ cls: "ngb-sv-file-name", text: shortName(it.path) });
-      name.setAttribute("aria-label", `${it.path} \u2014 ${CHANGE_LABEL[it.code] ?? it.code}`);
+      const kind = CHANGE_LABEL[it.code] ?? it.code;
+      const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
+      name.setAttribute("aria-label", `${it.path} - ${kind}`);
       main.addEventListener("click", () => this.actions.openFile(it.path));
-      main.createSpan({ cls: "ngb-sv-file-kind", text: CHANGE_LABEL[it.code] ?? it.code });
+      if (import_obsidian10.Platform.isMobile) {
+        main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
+      }
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
       const act = (icon, tooltip, cb, warn = false, spinning = false) => {
         const b = acts.createEl("button", {
@@ -1768,15 +1782,24 @@ var StatusView = class extends import_obsidian10.ItemView {
         act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
       }
       act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
+      const codeEl = rowEl.createSpan({
+        cls: `ngb-sv-file-code ngb-code-${it.code}`,
+        text: it.code
+      });
+      codeEl.setAttribute("aria-label", kind);
     }
   }
 };
 function entry(e, code) {
   return { path: e.path, code: code === "." ? "M" : code };
 }
-function shortName(path) {
-  const i = path.lastIndexOf("/");
-  return i >= 0 ? path.slice(i + 1) : path;
+function displayName(path) {
+  const isDir = path.endsWith("/");
+  const trimmed = isDir ? path.slice(0, -1) : path;
+  const i = trimmed.lastIndexOf("/");
+  const base = i >= 0 ? trimmed.slice(i + 1) : trimmed;
+  const label2 = base === "" ? trimmed || path : base;
+  return isDir ? `${label2}/` : label2;
 }
 function stateLabel(state) {
   switch (state) {

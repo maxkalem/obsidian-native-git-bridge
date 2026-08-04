@@ -1,4 +1,4 @@
-import { ItemView, Menu, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
 import {
   NGB_ICON_PULL,
@@ -224,8 +224,18 @@ export class StatusView extends ItemView {
     }
 
     // --- file groups ---
+    const stageable = d.unstaged.length + d.untracked.length > 0;
     this.renderGroup(c, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
-    this.renderGroup(c, "staged", "Staged changes", d.staged.map((e) => entry(e, e.index)), false);
+    // Keep the staged group visible whenever something could be staged, so the
+    // destination of the "+" buttons is always on screen.
+    this.renderGroup(
+      c,
+      "staged",
+      "Staged changes",
+      d.staged.map((e) => entry(e, e.index)),
+      false,
+      stageable
+    );
     this.renderGroup(c, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
     this.renderGroup(
       c,
@@ -264,9 +274,10 @@ export class StatusView extends ItemView {
     group: Group,
     title: string,
     items: { path: string; code: string }[],
-    danger: boolean
+    danger: boolean,
+    showWhenEmpty = false
   ): void {
-    if (items.length === 0) return;
+    if (items.length === 0 && !showWhenEmpty) return;
     const wrap = parent.createDiv({ cls: "ngb-sv-group" });
     const header = wrap.createDiv({ cls: "ngb-sv-group-header" });
     const chevron = header.createSpan({ cls: "ngb-sv-chevron" });
@@ -283,14 +294,21 @@ export class StatusView extends ItemView {
     if (this.collapsed[group]) return;
 
     const list = wrap.createDiv({ cls: "ngb-sv-list" });
+    if (items.length === 0) {
+      list.createDiv({ cls: "ngb-sv-empty", text: "Nothing staged yet." });
+      return;
+    }
     for (const it of items) {
       const rowEl = list.createDiv({ cls: "ngb-sv-file" });
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
-      main.createSpan({ cls: `ngb-badge ngb-code-${it.code}`, text: it.code });
-      const name = main.createSpan({ cls: "ngb-sv-file-name", text: shortName(it.path) });
-      name.setAttribute("aria-label", `${it.path} — ${CHANGE_LABEL[it.code] ?? it.code}`);
+      const kind = CHANGE_LABEL[it.code] ?? it.code;
+      const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
+      name.setAttribute("aria-label", `${it.path} - ${kind}`);
       main.addEventListener("click", () => this.actions.openFile(it.path));
-      main.createSpan({ cls: "ngb-sv-file-kind", text: CHANGE_LABEL[it.code] ?? it.code });
+      // Tooltips are unavailable on touch, so the change is spelled out there.
+      if (Platform.isMobile) {
+        main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
+      }
 
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
       const act = (icon: string, tooltip: string, cb: () => void, warn = false, spinning = false) => {
@@ -313,6 +331,14 @@ export class StatusView extends ItemView {
         act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
       }
       act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
+
+      // The change letter lives at the END of the row: next to the file name it
+      // read like part of the file name.
+      const codeEl = rowEl.createSpan({
+        cls: `ngb-sv-file-code ngb-code-${it.code}`,
+        text: it.code,
+      });
+      codeEl.setAttribute("aria-label", kind);
     }
   }
 }
@@ -321,9 +347,18 @@ function entry(e: GitFileEntry, code: string): { path: string; code: string } {
   return { path: e.path, code: code === "." ? "M" : code };
 }
 
-function shortName(path: string): string {
-  const i = path.lastIndexOf("/");
-  return i >= 0 ? path.slice(i + 1) : path;
+/**
+ * Last path segment for display. Untracked *directories* are reported by git
+ * with a trailing slash (e.g. "Private/Work/"), which previously produced an
+ * empty label, so the slash is stripped first and folders keep a trailing "/".
+ */
+function displayName(path: string): string {
+  const isDir = path.endsWith("/");
+  const trimmed = isDir ? path.slice(0, -1) : path;
+  const i = trimmed.lastIndexOf("/");
+  const base = i >= 0 ? trimmed.slice(i + 1) : trimmed;
+  const label = base === "" ? trimmed || path : base;
+  return isDir ? `${label}/` : label;
 }
 
 function stateLabel(state: string): string {
