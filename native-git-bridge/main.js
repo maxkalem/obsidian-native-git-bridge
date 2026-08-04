@@ -47,7 +47,12 @@ var DISPLAY_OUTPUT_LIMIT = 100 * 1024;
 var LOG_MAX_ENTRIES = 200;
 var SPARSE_SAFETY_WARNING = "Sparse checkout safety check failed. The excluded directories appear as Git changes. No commit or push was performed.";
 var STORAGE_PREFIX = "ngb:v1";
-var REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
+var REPO_URL = "https://github.com/maxkalem/obsidian-native-git-bridge";
+function bootstrapCommand(pluginVersion, repoPathHint) {
+  const base = /^\d+\.\d+\.\d+$/.test(pluginVersion) ? `${REPO_URL}/releases/download/${pluginVersion}` : `${REPO_URL}/releases/latest/download`;
+  const cmd = `curl -fsSL ${base}/bootstrap.sh | NGB_VERSION=${pluginVersion} bash -s --`;
+  return repoPathHint ? `${cmd} "${repoPathHint}"` : cmd;
+}
 var PAIRING_FILE = "pairing.json";
 var COMPANION_SETUP_URI = "nativegitbridge://setup";
 var COMPANION_RELEASES_URL = "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
@@ -571,7 +576,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
       });
     }
     containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
-    const cmd = s.repoPathHint ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"` : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+    const cmd = this.plugin.installCommand();
     const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
     cmdBox.setText(cmd);
     cmdBox.setAttribute("aria-label", "Install command");
@@ -3663,8 +3668,7 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
   }
   /** The one-line Termux install command (same one settings shows). */
   installCommand() {
-    const hint = this.deviceSettings.repoPathHint;
-    return hint ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${hint}"` : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+    return bootstrapCommand(this.manifest.version, this.deviceSettings.repoPathHint);
   }
   /** Open the latest release page (companion APK + plugin files live there). */
   openLatestRelease() {

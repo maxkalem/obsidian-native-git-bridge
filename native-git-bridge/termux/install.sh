@@ -233,6 +233,11 @@ esac
 EXCLUDE_FILE="$GIT_DIR_PATH/info/exclude"
 mkdir -p "$(dirname "$EXCLUDE_FILE")"
 EXCLUDE_LINE=".obsidian/plugins/native-git-bridge/runtime/"
+# Append only after a newline: a file whose last line has none would otherwise
+# swallow our entry into it (and corrupt that line too).
+if [ -s "$EXCLUDE_FILE" ] && [ "$(tail -c 1 "$EXCLUDE_FILE" | od -An -tx1 | tr -d ' \n')" != "0a" ]; then
+  printf '\n' >> "$EXCLUDE_FILE"
+fi
 grep -qxF "$EXCLUDE_LINE" "$EXCLUDE_FILE" 2>/dev/null || printf '%s\n' "$EXCLUDE_LINE" >> "$EXCLUDE_FILE"
 say "-- Runtime dir excluded via .git/info/exclude (local only)."
 

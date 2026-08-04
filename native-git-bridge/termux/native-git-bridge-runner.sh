@@ -739,6 +739,18 @@ action_discard_file() {
 # Only non-cone (pattern) sparse mode is supported for exclusions: cone mode
 # cannot express "hide this directory" as a pattern.
 
+# A line-based file may lack a trailing newline (git writes the sparse file,
+# the installer or an editor writes info/exclude). Appending then GLUES the new
+# entry onto the previous last line and silently corrupts both — e.g.
+# "!/Projects/Backup" + "/.gitignore" becomes "!/Projects/Backup/.gitignore".
+# Every append in this runner goes through here first.
+ensure_trailing_newline() { # $1 file
+  [ -s "$1" ] || return 0
+  local last
+  last="$(tail -c 1 "$1" | od -An -tx1 | tr -d ' \n')"
+  [ "$last" = "0a" ] || printf '\n' >> "$1"
+}
+
 require_noncone_sparse() {
   if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
     ERROR=$(err_json GIT_FAILED "Sparse checkout is not enabled in this repository. In Termux run: git sparse-checkout set --no-cone '/*'  (then retry)." "" "")
@@ -760,6 +772,7 @@ action_sparse_exclude_add() {
   require_noncone_sparse || return 1
   local tmpf; tmpf="$(mktemp)"
   git sparse-checkout list > "$tmpf" 2>/dev/null || true
+  ensure_trailing_newline "$tmpf"
   if ! grep -qxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf"; then
     printf '!/%s\n' "$path" >> "$tmpf"
     if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf"; then
@@ -808,6 +821,7 @@ action_exclude_add() {
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
   xf="$(exclude_file_path)"
   mkdir -p "$(dirname "$xf")"
+  ensure_trailing_newline "$xf"
   grep -qxF "/$path" "$xf" 2>/dev/null || printf '/%s\n' "$path" >> "$xf"
   emit_exclude_list
 }

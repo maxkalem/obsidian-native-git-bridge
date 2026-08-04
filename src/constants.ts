@@ -29,8 +29,23 @@ export const SPARSE_SAFETY_WARNING =
 /** localStorage key prefix; versioned for migrations. */
 export const STORAGE_PREFIX = "ngb:v1";
 
-/** Raw base URL for the one-line Termux bootstrap (used only for display/copy in settings). */
-export const REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
+export const REPO_URL = "https://github.com/maxkalem/obsidian-native-git-bridge";
+
+/**
+ * The install command fetches from a RELEASE, never from `main`: the branch is
+ * the development state and may be mid-change, while a release is a tested,
+ * immutable set of files. Pinned to the plugin's OWN version, so the runner it
+ * installs is the one this build was tested against (that is also what the
+ * version handshake expects). Falls back to the newest release when this
+ * version has no published assets yet (e.g. a local dev build).
+ */
+export function bootstrapCommand(pluginVersion: string, repoPathHint: string): string {
+  const base = /^\d+\.\d+\.\d+$/.test(pluginVersion)
+    ? `${REPO_URL}/releases/download/${pluginVersion}`
+    : `${REPO_URL}/releases/latest/download`;
+  const cmd = `curl -fsSL ${base}/bootstrap.sh | NGB_VERSION=${pluginVersion} bash -s --`;
+  return repoPathHint ? `${cmd} "${repoPathHint}"` : cmd;
+}
 export const PAIRING_FILE = "pairing.json";
 
 /** Opens the companion app's setup checklist (permission + Termux + round trip). */

@@ -155,8 +155,13 @@ class SetupActivity : Activity() {
         }
         step3 = makeStepRow("3") {
             val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            // Pinned to this app's version == the release version, so the
+            // runner installed here matches the release the plugin came from.
             clipboard.setPrimaryClip(
-                ClipData.newPlainText("git-bridge-setup", getString(R.string.setup_command))
+                ClipData.newPlainText(
+                    "git-bridge-setup",
+                    getString(R.string.setup_command, appVersion())
+                )
             )
             Toast.makeText(this, R.string.setup_command_copied, Toast.LENGTH_LONG).show()
             val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)

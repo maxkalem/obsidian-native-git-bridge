@@ -3,7 +3,7 @@ import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
 import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
-import { REPO_RAW_BASE, RUNNER_MIN_VERSION } from "../constants";
+import { RUNNER_MIN_VERSION } from "../constants";
 import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
@@ -90,9 +90,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     }
 
     containerEl.createEl("h3", { text: "Setup (one line in Termux)" });
-    const cmd = s.repoPathHint
-      ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${s.repoPathHint}"`
-      : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+    const cmd = this.plugin.installCommand();
     // A dedicated class (not <pre>) so long URLs wrap on narrow phone screens.
     const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
     cmdBox.setText(cmd);

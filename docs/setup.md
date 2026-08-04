@@ -42,11 +42,18 @@ All three checkmarks must be green before the bridge can work.
 ## Step 3 — one pasted line in Termux
 
 ```
-curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
+curl -fsSL https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
 (You can omit the path — the installer scans shared storage for vaults that are
 git repositories and asks if it finds several.)
+
+Better: copy the command from the plugin (Settings → Copy command) or from the
+companion app's step 3. Those versions are **pinned to the release you are
+running**, so the runner they install is exactly the one your plugin build was
+tested against. The command above tracks the newest release instead, and
+neither fetches from the `main` branch — that is the development state and may
+be mid-change.
 
 The installer requests storage access (accept the Android dialog), installs
 git/jq/openssh, marks the repo as `safe.directory` if needed (asks first),

@@ -62,7 +62,7 @@ import {
   COMPANION_RELEASES_URL,
   COMPANION_SETUP_URI,
   PAIRING_FILE,
-  REPO_RAW_BASE,
+  bootstrapCommand,
   RUNNER_MIN_VERSION,
   RUNNER_OUTDATED_HINT,
   TERMUX_FDROID_URL,
@@ -1718,10 +1718,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   /** The one-line Termux install command (same one settings shows). */
   installCommand(): string {
-    const hint = this.deviceSettings.repoPathHint;
-    return hint
-      ? `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash -s -- "${hint}"`
-      : `curl -fsSL ${REPO_RAW_BASE}/termux/bootstrap.sh | bash`;
+    return bootstrapCommand(this.manifest.version, this.deviceSettings.repoPathHint);
   }
 
   /** Open the latest release page (companion APK + plugin files live there). */

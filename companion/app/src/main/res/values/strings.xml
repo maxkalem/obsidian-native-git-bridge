@@ -26,7 +26,10 @@
     <string name="probe_fail_toast">Test failed — see the message below the checklist.</string>
     <string name="probe_already_running">A check is already running…</string>
     <string name="probe_timeout">Termux did not answer within 15 s. Most likely allow-external-apps is not enabled yet — run step 3, then fully restart Termux (Exit in its notification).</string>
-    <string name="setup_command">curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash</string>
+    <!-- %1$s = this app's version, which equals the release version: the
+         installer is fetched from that RELEASE, never from the `main` branch
+         (which is the development state and may be mid-change). -->
+    <string name="setup_command">curl -fsSL https://github.com/maxkalem/obsidian-native-git-bridge/releases/download/%1$s/bootstrap.sh | NGB_VERSION=%1$s bash -s --</string>
     <string name="setup_command_copied">Command copied. In Termux: long-press → Paste → Enter. It finds your vault and sets up everything by itself.</string>
     <string name="btn_update_companion">Download the newer version of this app</string>
     <string name="update_hint">Opening the release page. Download the APK named git-bridge-companion-&lt;version&gt;.apk and install it over this app.</string>

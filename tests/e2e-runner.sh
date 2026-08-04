@@ -447,6 +447,28 @@ check '! grep -qxF "/scratch-local.md" .git/info/exclude' "line removed from .gi
 check 'git status --porcelain=v1 | grep -q "scratch-local.md"' "file shows as untracked again"
 rm -f scratch-local.md
 
+echo "# config: appending to files WITHOUT a trailing newline must not glue lines"
+# Reproduces the corruption seen in the field: an entry such as
+# "Projects/Backup.gitignores" is two entries fused into one.
+printf '/*\n!/Private/Hidden/\n!/Projects/Archive' > .git/info/sparse-checkout  # no final newline
+git sparse-checkout reapply 2>/dev/null || true
+req "r-20260804T151008Z-nl001" sparse-exclude-add "$TOKEN" '{"path":"NlFixture"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T151008Z-nl001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "sparse-exclude-add ok on a file with no trailing newline"
+check 'git sparse-checkout list | grep -qx "!/Projects/Archive"' "previous last pattern survived intact"
+check 'git sparse-checkout list | grep -qx "!/NlFixture"' "new pattern is its own line"
+check '! git sparse-checkout list | grep -q "Archive!/"' "no glued pattern produced"
+req "r-20260804T151009Z-nl002" sparse-exclude-remove "$TOKEN" '{"path":"NlFixture"}'
+bash "$RUNNER"
+printf '/dirty-no-newline' > .git/info/exclude
+req "r-20260804T151010Z-nl003" exclude-add "$TOKEN" '{"path":"NlNote.md"}'
+bash "$RUNNER"
+check 'grep -qxF "/dirty-no-newline" .git/info/exclude' "exclude: previous last line survived intact"
+check 'grep -qxF "/NlNote.md" .git/info/exclude' "exclude: new entry is its own line"
+# restore the runtime exclusion the rest of the suite relies on
+printf '.obsidian/plugins/native-git-bridge/runtime/\n' >> .git/info/exclude
+
 echo "# config: path validation also guards the new actions"
 req "r-20260804T151006Z-exc004" sparse-exclude-add "$TOKEN" '{"path":":/"}'
 bash "$RUNNER"

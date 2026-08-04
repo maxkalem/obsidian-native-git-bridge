@@ -54,8 +54,8 @@ curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge
 ```
 
 > [!warning]
-> Be sure to replace \<YourVault\> in this command with the path to your vault. 
-> ==DO NOT== COPY THE COMMAND AS-IS.
+> Be sure to replace \<YourVault\> in this command with the path to your vault! 
+> DO NOT COPY THE COMMAND AS-IS.
 
 The installer sets up everything inside Termux: packages (git, jq, openssh),
 storage access, `allow-external-apps` for the companion, an SSH key (it prints

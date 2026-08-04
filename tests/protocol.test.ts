@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { bootstrapCommand } from "../src/constants";
 import { createRequest, makeRequestId, parseResult } from "../src/bridge/protocol";
 import { isValidRequestId } from "../src/settings/pathValidation";
 import { idTimestampMs } from "../src/bridge/BridgeClient";
@@ -31,5 +32,28 @@ describe("parseResult", () => {
   it("returns null for wrong shapes", () => {
     expect(parseResult('{"hello":"world"}')).toBeNull();
     expect(parseResult('[1,2,3]')).toBeNull();
+  });
+});
+
+describe("bootstrapCommand", () => {
+  it("fetches from the plugin's OWN release, never from the main branch", () => {
+    const cmd = bootstrapCommand("0.5.2", "");
+    // A release is a tested, immutable set; `main` is the development state.
+    expect(cmd).not.toContain("raw.githubusercontent.com");
+    expect(cmd).not.toContain("/main/");
+    expect(cmd).toContain("/releases/download/0.5.2/bootstrap.sh");
+    // The version is forwarded so install.sh and the runner come from the SAME
+    // release as bootstrap.sh itself.
+    expect(cmd).toContain("NGB_VERSION=0.5.2");
+  });
+
+  it("quotes the vault path when one is known", () => {
+    const cmd = bootstrapCommand("0.5.2", "/storage/emulated/0/Documents/My Vault");
+    expect(cmd).toContain('"/storage/emulated/0/Documents/My Vault"');
+  });
+
+  it("falls back to the newest release for a non-release version string", () => {
+    // e.g. a local dev build whose version has no published assets.
+    expect(bootstrapCommand("0.5.2-dev", "")).toContain("/releases/latest/download/bootstrap.sh");
   });
 });
