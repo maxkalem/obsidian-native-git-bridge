@@ -9,6 +9,7 @@ export const NGB_ICON_PUSH = "ngb-push";
 export const NGB_ICON_PULL = "ngb-pull";
 export const NGB_ICON_STAGE_ALL = "ngb-stage-all";
 export const NGB_ICON_UNSTAGE_ALL = "ngb-unstage-all";
+export const NGB_ICON_SYNC = "ngb-sync";
 
 const SCALE = 100 / 24;
 
@@ -30,5 +31,10 @@ export function registerIcons(): void {
   addIcon(
     NGB_ICON_UNSTAGE_ALL,
     scaled('<path d="M4 6h9M4 11h9M4 16h5M13 14h8"/>')
+  );
+  // Sync: two opposing arrows (deliberately unlike the circular refresh icon).
+  addIcon(
+    NGB_ICON_SYNC,
+    scaled('<path d="M8 3v14M4 13l4 4 4-4M16 21V7M12 11l4-4 4 4"/>')
   );
 }

@@ -1528,6 +1528,7 @@ var NGB_ICON_PUSH = "ngb-push";
 var NGB_ICON_PULL = "ngb-pull";
 var NGB_ICON_STAGE_ALL = "ngb-stage-all";
 var NGB_ICON_UNSTAGE_ALL = "ngb-unstage-all";
+var NGB_ICON_SYNC = "ngb-sync";
 var SCALE = 100 / 24;
 function scaled(path, strokeWidth = 2) {
   return `<g transform="scale(${SCALE})" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round">${path}</g>`;
@@ -1543,6 +1544,47 @@ function registerIcons() {
     NGB_ICON_UNSTAGE_ALL,
     scaled('<path d="M4 6h9M4 11h9M4 16h5M13 14h8"/>')
   );
+  (0, import_obsidian8.addIcon)(
+    NGB_ICON_SYNC,
+    scaled('<path d="M8 3v14M4 13l4 4 4-4M16 21V7M12 11l4-4 4 4"/>')
+  );
+}
+
+// src/ui/animatedIcons.ts
+var gradientSeq = 0;
+var PATHS = {
+  // Same glyphs as the static icons (24x24 coordinate system).
+  down: "M12 3v12M7 10l5 5 5-5M5 21h14",
+  up: "M12 15V3M7 8l5-5 5 5M5 21h14"
+};
+function directionalHighlightSvg(direction) {
+  const id = `ngb-grad-${++gradientSeq}`;
+  const from = direction === "down" ? "0 -24" : "0 24";
+  const to = "0 0";
+  return `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="ngb-anim-sweep-svg">
+  <defs>
+    <linearGradient id="${id}" gradientUnits="userSpaceOnUse"
+                    x1="0" y1="0" x2="0" y2="24" spreadMethod="repeat">
+      <stop offset="0"    stop-color="var(--text-muted)"/>
+      <stop offset="0.28" stop-color="var(--text-muted)"/>
+      <stop offset="0.5"  stop-color="var(--text-accent)"/>
+      <stop offset="0.72" stop-color="var(--text-muted)"/>
+      <stop offset="1"    stop-color="var(--text-muted)"/>
+      <animateTransform attributeName="gradientTransform" type="translate"
+                        from="${from}" to="${to}" dur="1s" repeatCount="indefinite"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#${id})" stroke-width="2"
+     stroke-linecap="round" stroke-linejoin="round">
+    <path d="${PATHS[direction]}"/>
+  </g>
+</svg>`.trim();
+}
+function applySweepIcon(button, direction) {
+  button.empty();
+  const wrapper = button.createSpan({ cls: "ngb-sweep-wrap" });
+  wrapper.innerHTML = directionalHighlightSvg(direction);
 }
 
 // src/ui/StatusView.ts
@@ -1585,6 +1627,14 @@ var StatusView = class extends import_obsidian9.ItemView {
   async onOpen() {
     this.render();
   }
+  onPaneMenu(menu) {
+    menu.addItem(
+      (item) => item.setTitle("Native Git: operation log").setIcon("file-clock").onClick(() => this.actions.openLog())
+    );
+    menu.addItem(
+      (item) => item.setTitle("Refresh status").setIcon("refresh-cw").onClick(() => this.actions.refresh())
+    );
+  }
   render() {
     const c = this.contentEl;
     c.empty();
@@ -1592,25 +1642,30 @@ var StatusView = class extends import_obsidian9.ItemView {
     const d = this.data;
     const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
     const running = d?.runningAction;
-    const iconBtn = (icon, tooltip, cb, actionName) => {
+    const iconBtn = (icon, tooltip, cb, actionName, anim = "pulse") => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
       b.setAttribute("aria-label", tooltip);
-      (0, import_obsidian9.setIcon)(b, icon);
-      if (actionName && running === actionName) {
-        b.addClass("ngb-spin");
+      const active = Boolean(actionName) && running === actionName;
+      if (active && (anim === "sweep-down" || anim === "sweep-up")) {
+        applySweepIcon(b, anim === "sweep-down" ? "down" : "up");
         b.addClass("ngb-sv-icon-active");
+      } else {
+        (0, import_obsidian9.setIcon)(b, icon);
+        if (active) {
+          b.addClass(`ngb-anim-${anim}`);
+          b.addClass("ngb-sv-icon-active");
+        }
       }
       b.addEventListener("click", cb);
     };
-    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync, "sync");
-    iconBtn("check", "Commit", this.actions.commit, "commit");
-    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all");
-    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all");
-    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch");
-    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull");
-    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push");
-    iconBtn("file-clock", "Operation log", this.actions.openLog);
-    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status");
+    iconBtn(NGB_ICON_SYNC, "Sync", this.actions.sync, "sync", "pulse");
+    iconBtn("check", "Commit", this.actions.commit, "commit", "pulse");
+    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all", "pulse");
+    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all", "pulse");
+    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch", "sweep-down");
+    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
+    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
+    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
     const head = c.createDiv({ cls: "ngb-sv-header" });
     head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
     head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
@@ -1650,6 +1705,11 @@ var StatusView = class extends import_obsidian9.ItemView {
     row("Bridge", d.bridge);
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
+    const footActions = foot.createDiv({ cls: "ngb-sv-foot-actions" });
+    const logBtn = footActions.createEl("button", { cls: "ngb-sv-foot-btn" });
+    (0, import_obsidian9.setIcon)(logBtn.createSpan(), "file-clock");
+    logBtn.createSpan({ text: " Operation log" });
+    logBtn.addEventListener("click", this.actions.openLog);
     if (d.progress) {
       const p = foot.createDiv({ cls: "ngb-sv-progress" });
       p.createSpan({ text: d.progress });
@@ -1685,7 +1745,7 @@ var StatusView = class extends import_obsidian9.ItemView {
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
       const act = (icon, tooltip, cb, warn = false, spinning = false) => {
         const b = acts.createEl("button", {
-          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-spin" : ""}`
+          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-anim-pulse ngb-sv-icon-active" : ""}`
         });
         b.setAttribute("aria-label", tooltip);
         (0, import_obsidian9.setIcon)(b, icon);

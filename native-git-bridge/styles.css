@@ -75,6 +75,30 @@
 .ngb-sv-toolbar .ngb-sv-icon { padding: var(--size-4-1); }
 .ngb-sv-toolbar .ngb-sv-icon svg { width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
 .ngb-sv-icon-active { color: var(--text-accent); }
+/* Activity animations. Rotation is reserved for refresh; directional bobbing
+   for pull/fetch (down) and push (up); gentle pulsing for everything else. */
 @keyframes ngb-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.ngb-spin svg { animation: ngb-rotate 1.2s linear infinite; transform-origin: 50% 50%; }
+@keyframes ngb-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.86); }
+}
+/* pull/fetch and push use an SVG gradient sweep instead of a CSS keyframe */
+.ngb-anim-spin svg     { animation: ngb-rotate 1.2s linear infinite; transform-origin: 50% 50%; }
+.ngb-anim-pulse svg    { animation: ngb-pulse 1s ease-in-out infinite; transform-origin: 50% 50%; }
+.ngb-sweep-wrap { display: inline-flex; align-items: center; justify-content: center; }
+.ngb-sweep-wrap svg { width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
+@media (prefers-reduced-motion: reduce) {
+  .ngb-anim-spin svg, .ngb-anim-pulse svg { animation-duration: 2.4s; }
+}
 .ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }
+
+/* Footer actions (log moved out of the crowded toolbar) */
+.ngb-sv-foot-actions { margin-top: var(--size-4-2); }
+.ngb-sv-foot-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: transparent; border: none; box-shadow: none;
+  color: var(--text-muted); font-size: var(--font-ui-small);
+  padding: var(--size-4-1) 0; cursor: pointer;
+}
+.ngb-sv-foot-btn:hover { color: var(--text-normal); }
+.ngb-sv-toolbar { justify-content: space-between; }

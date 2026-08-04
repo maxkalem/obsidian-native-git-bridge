@@ -1,11 +1,13 @@
-import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Menu, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
 import {
   NGB_ICON_PULL,
   NGB_ICON_PUSH,
   NGB_ICON_STAGE_ALL,
+  NGB_ICON_SYNC,
   NGB_ICON_UNSTAGE_ALL,
 } from "./icons";
+import { applySweepIcon } from "./animatedIcons";
 
 export const NGB_STATUS_VIEW = "native-git-bridge-status";
 
@@ -96,6 +98,21 @@ export class StatusView extends ItemView {
     this.render();
   }
 
+  onPaneMenu(menu: Menu): void {
+    menu.addItem((item) =>
+      item
+        .setTitle("Native Git: operation log")
+        .setIcon("file-clock")
+        .onClick(() => this.actions.openLog())
+    );
+    menu.addItem((item) =>
+      item
+        .setTitle("Refresh status")
+        .setIcon("refresh-cw")
+        .onClick(() => this.actions.refresh())
+    );
+  }
+
   private render(): void {
     const c = this.contentEl;
     c.empty();
@@ -105,25 +122,38 @@ export class StatusView extends ItemView {
     // --- toolbar: fixed order, animated while the matching action runs ---
     const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
     const running = d?.runningAction;
-    const iconBtn = (icon: string, tooltip: string, cb: () => void, actionName?: string) => {
+    const iconBtn = (
+      icon: string,
+      tooltip: string,
+      cb: () => void,
+      actionName?: string,
+      /** Activity animation: rotation is reserved for refresh. */
+      anim: "spin" | "pulse" | "sweep-down" | "sweep-up" = "pulse"
+    ) => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
       b.setAttribute("aria-label", tooltip);
-      setIcon(b, icon);
-      if (actionName && running === actionName) {
-        b.addClass("ngb-spin");
+      const active = Boolean(actionName) && running === actionName;
+      if (active && (anim === "sweep-down" || anim === "sweep-up")) {
+        // Travelling highlight along the arrow: down for pull/fetch, up for push.
+        applySweepIcon(b, anim === "sweep-down" ? "down" : "up");
         b.addClass("ngb-sv-icon-active");
+      } else {
+        setIcon(b, icon);
+        if (active) {
+          b.addClass(`ngb-anim-${anim}`);
+          b.addClass("ngb-sv-icon-active");
+        }
       }
       b.addEventListener("click", cb);
     };
-    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync, "sync");
-    iconBtn("check", "Commit", this.actions.commit, "commit");
-    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all");
-    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all");
-    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch");
-    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull");
-    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push");
-    iconBtn("file-clock", "Operation log", this.actions.openLog);
-    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status");
+    iconBtn(NGB_ICON_SYNC, "Sync", this.actions.sync, "sync", "pulse");
+    iconBtn("check", "Commit", this.actions.commit, "commit", "pulse");
+    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all", "pulse");
+    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all", "pulse");
+    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch", "sweep-down");
+    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
+    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
+    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
 
     // --- header line ---
     const head = c.createDiv({ cls: "ngb-sv-header" });
@@ -174,6 +204,12 @@ export class StatusView extends ItemView {
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
 
+    const footActions = foot.createDiv({ cls: "ngb-sv-foot-actions" });
+    const logBtn = footActions.createEl("button", { cls: "ngb-sv-foot-btn" });
+    setIcon(logBtn.createSpan(), "file-clock");
+    logBtn.createSpan({ text: " Operation log" });
+    logBtn.addEventListener("click", this.actions.openLog);
+
     if (d.progress) {
       const p = foot.createDiv({ cls: "ngb-sv-progress" });
       p.createSpan({ text: d.progress });
@@ -218,7 +254,9 @@ export class StatusView extends ItemView {
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
       const act = (icon: string, tooltip: string, cb: () => void, warn = false, spinning = false) => {
         const b = acts.createEl("button", {
-          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-spin" : ""}`,
+          cls:
+            `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}` +
+            `${spinning ? " ngb-anim-pulse ngb-sv-icon-active" : ""}`,
         });
         b.setAttribute("aria-label", tooltip);
         setIcon(b, icon);
