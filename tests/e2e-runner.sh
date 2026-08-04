@@ -281,6 +281,25 @@ req "r-20260804T130004Z-stg002" stage-file "$TOKEN" '{"path":"Private/AgentsMemo
 bash "$RUNNER"
 check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260804T130004Z-stg002.json" >/dev/null' "staging a protected path is blocked"
 
+echo "# source control: stage all / unstage all (protected paths excluded)"
+printf 'bulk1\n' > Notes/bulk1.md
+printf 'bulk2\n' > Notes/bulk2.md
+mkdir -p Private/AgentsMemory && printf 'leak\n' > Private/AgentsMemory/leak2.md
+req "r-20260804T140000Z-sta001" stage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T140000Z-sta001.json"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RES" >/dev/null' "stage-all blocked while a protected path is dirty"
+rm -f Private/AgentsMemory/leak2.md
+req "r-20260804T140001Z-sta002" stage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T140001Z-sta002.json" >/dev/null' "stage-all ok once clean"
+check '[ "$(git diff --cached --name-only | grep -c "Notes/bulk")" = "2" ]' "both files staged"
+req "r-20260804T140002Z-uns002" unstage-all "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T140002Z-uns002.json" >/dev/null' "unstage-all ok"
+check '[ -z "$(git diff --cached --name-only)" ]' "index empty after unstage-all"
+rm -f Notes/bulk1.md Notes/bulk2.md
+
 echo "# regression: large repo payloads must not break result serialization (execve 128KB arg limit)"
 mkdir -p Bulk
 python3 - <<'GEN'

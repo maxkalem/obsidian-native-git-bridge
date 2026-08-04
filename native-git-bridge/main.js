@@ -59,7 +59,9 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "abort-merge",
   "stage-file",
   "unstage-file",
-  "discard-file"
+  "discard-file",
+  "stage-all",
+  "unstage-all"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -1524,10 +1526,23 @@ var import_obsidian9 = require("obsidian");
 var import_obsidian8 = require("obsidian");
 var NGB_ICON_PUSH = "ngb-push";
 var NGB_ICON_PULL = "ngb-pull";
-var STROKE_WRAP = (path) => `<g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${path}</g>`;
+var NGB_ICON_STAGE_ALL = "ngb-stage-all";
+var NGB_ICON_UNSTAGE_ALL = "ngb-unstage-all";
+var SCALE = 100 / 24;
+function scaled(path, strokeWidth = 2) {
+  return `<g transform="scale(${SCALE})" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round">${path}</g>`;
+}
 function registerIcons() {
-  (0, import_obsidian8.addIcon)(NGB_ICON_PUSH, STROKE_WRAP('<path d="M12 15V3M7 8l5-5 5 5M5 21h14"/>'));
-  (0, import_obsidian8.addIcon)(NGB_ICON_PULL, STROKE_WRAP('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'));
+  (0, import_obsidian8.addIcon)(NGB_ICON_PUSH, scaled('<path d="M12 15V3M7 8l5-5 5 5M5 21h14"/>'));
+  (0, import_obsidian8.addIcon)(NGB_ICON_PULL, scaled('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'));
+  (0, import_obsidian8.addIcon)(
+    NGB_ICON_STAGE_ALL,
+    scaled('<path d="M4 6h9M4 11h9M4 16h5M17 10v8M13 14h8"/>')
+  );
+  (0, import_obsidian8.addIcon)(
+    NGB_ICON_UNSTAGE_ALL,
+    scaled('<path d="M4 6h9M4 11h9M4 16h5M13 14h8"/>')
+  );
 }
 
 // src/ui/StatusView.ts
@@ -1576,18 +1591,26 @@ var StatusView = class extends import_obsidian9.ItemView {
     c.addClass("ngb-status-view");
     const d = this.data;
     const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
-    const iconBtn = (icon, tooltip, cb) => {
+    const running = d?.runningAction;
+    const iconBtn = (icon, tooltip, cb, actionName) => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
       b.setAttribute("aria-label", tooltip);
       (0, import_obsidian9.setIcon)(b, icon);
+      if (actionName && running === actionName) {
+        b.addClass("ngb-spin");
+        b.addClass("ngb-sv-icon-active");
+      }
       b.addEventListener("click", cb);
     };
-    iconBtn("refresh-cw", "Refresh status", this.actions.refresh);
-    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull);
-    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push);
-    iconBtn("git-commit-horizontal", "Commit", this.actions.commit);
-    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync);
+    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync, "sync");
+    iconBtn("check", "Commit", this.actions.commit, "commit");
+    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all");
+    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all");
+    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch");
+    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull");
+    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push");
     iconBtn("file-clock", "Operation log", this.actions.openLog);
+    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status");
     const head = c.createDiv({ cls: "ngb-sv-header" });
     head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
     head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
@@ -1660,9 +1683,9 @@ var StatusView = class extends import_obsidian9.ItemView {
       main.addEventListener("click", () => this.actions.openFile(it.path));
       main.createSpan({ cls: "ngb-sv-file-kind", text: CHANGE_LABEL[it.code] ?? it.code });
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-      const act = (icon, tooltip, cb, warn = false) => {
+      const act = (icon, tooltip, cb, warn = false, spinning = false) => {
         const b = acts.createEl("button", {
-          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`
+          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-spin" : ""}`
         });
         b.setAttribute("aria-label", tooltip);
         (0, import_obsidian9.setIcon)(b, icon);
@@ -1671,12 +1694,13 @@ var StatusView = class extends import_obsidian9.ItemView {
           cb();
         });
       };
+      const busy = this.data?.runningAction;
       if (group === "staged") {
-        act("minus", "Unstage", () => this.actions.unstage(it.path));
+        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file");
       } else {
-        act("plus", "Stage", () => this.actions.stage(it.path));
+        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true);
+      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
     }
   }
 };
@@ -1795,6 +1819,13 @@ var OperationLogModal = class extends import_obsidian10.Modal {
     this.modalEl.addClass("ngb-modal");
     this.titleEl.setText("Native Git Bridge: operation log");
     const c = this.contentEl;
+    const topBar = c.createDiv({ cls: "ngb-buttons ngb-buttons-top" });
+    addCopyButton(topBar, () => this.logAsText(), "Copy log", "Log copied.");
+    const clearTop = topBar.createEl("button", { text: "Clear log" });
+    clearTop.addEventListener("click", () => {
+      this.log.clear();
+      this.close();
+    });
     const entries = this.log.list();
     if (entries.length === 0) {
       c.createEl("p", { text: "Log is empty." });
@@ -1813,15 +1844,6 @@ var OperationLogModal = class extends import_obsidian10.Modal {
         }
       }
     }
-    const btns = c.createDiv({ cls: "ngb-buttons" });
-    addCopyButton(btns, () => this.logAsText(), "Copy log", "Log copied.");
-    const clear = btns.createEl("button", { text: "Clear log" });
-    clear.addEventListener("click", () => {
-      this.log.clear();
-      this.close();
-    });
-    const close = btns.createEl("button", { text: "Close", cls: "mod-cta" });
-    close.addEventListener("click", () => this.close());
   }
   logAsText() {
     return this.log.list().map((e) => `${e.ts} [${e.level}] ${e.action}: ${e.message}${e.detail ? "\n  " + e.detail.replace(/\n/g, "\n  ") : ""}`).join("\n");
@@ -1842,6 +1864,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     this.statusBar = null;
     this.activeCancel = null;
     this.progressText = null;
+    this.runningAction = null;
     this.lastStatus = null;
     this.lastAutoSyncMs = 0;
   }
@@ -1871,7 +1894,10 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
         sync: () => void this.cmdSync(),
         pull: () => void this.cmdPull(),
         push: () => void this.cmdPush(),
+        fetch: () => void this.cmdFetch(),
         commit: () => void this.cmdCommit(),
+        stageAll: () => void this.cmdStageAll(),
+        unstageAll: () => void this.cmdUnstageAll(),
         openLog: () => new OperationLogModal(this.app, this.log).open(),
         cancel: () => void this.cmdCancel(),
         openFile: (p) => this.openVaultFile(p),
@@ -2159,6 +2185,8 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
       { id: "commit", name: "Native Git: Commit", cb: () => void this.cmdCommit() },
       { id: "sync", name: "Native Git: Sync", cb: () => void this.cmdSync() },
       { id: "fetch", name: "Native Git: Fetch", cb: () => void this.cmdFetch() },
+      { id: "stage-all", name: "Native Git: Stage all changes", cb: () => void this.cmdStageAll() },
+      { id: "unstage-all", name: "Native Git: Unstage all changes", cb: () => void this.cmdUnstageAll() },
       { id: "show-history-current-file", name: "Native Git: Show history for current file", cb: () => this.cmdFileHistory() },
       { id: "show-diff-current-file", name: "Native Git: Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
       { id: "show-file-at-commit", name: "Native Git: Show selected file at commit", cb: () => this.cmdFileHistory() },
@@ -2207,6 +2235,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     this.log.add("info", action, `Queued request ${req.id}.`);
     void this.openStatusPanel(false);
     const startedAt = Date.now();
+    this.runningAction = action;
     this.progressText = `${action}\u2026 0s`;
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
@@ -2250,6 +2279,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     } finally {
       window.clearInterval(ticker);
       this.progressText = null;
+      this.runningAction = null;
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
@@ -2655,6 +2685,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
       sparse: this.lastStatus?.sparse,
       activeOperation: this.lock.active ? this.lock.active.action : void 0,
       progress: this.progressText ?? void 0,
+      runningAction: this.runningAction ?? void 0,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? void 0,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? `${this.deviceSettings.integrationType}` : "disabled"
@@ -2697,6 +2728,24 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     }).open();
   }
   // ------------------------------------------------- per-file staging actions
+  async cmdStageAll() {
+    const result = await this.runOperation("stage-all", {
+      protectedPaths: this.deviceSettings.protectedPaths
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
+    this.absorbStatusData(result.data ?? {});
+    new import_obsidian11.Notice("Staged all permitted changes (protected paths excluded).");
+  }
+  async cmdUnstageAll() {
+    const result = await this.runOperation("unstage-all", {
+      protectedPaths: this.deviceSettings.protectedPaths
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
+    this.absorbStatusData(result.data ?? {});
+    new import_obsidian11.Notice("Unstaged all changes.");
+  }
   async cmdStageFile(path) {
     const result = await this.runOperation("stage-file", {
       path,

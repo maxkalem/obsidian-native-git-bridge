@@ -670,6 +670,32 @@ action_unstage_file() {
   collect_status_fields
 }
 
+action_stage_all() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+  safety_gate || return 1
+  if ! stage_all_except_protected; then
+    ERROR=$(err_json GIT_FAILED "git add failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  safety_gate || return 1
+  collect_status_fields
+}
+
+action_unstage_all() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+  local -a specs=(".")
+  local p
+  for p in "${PPATHS[@]}"; do specs+=(":(exclude)$p"); done
+  if ! run_git restore --staged -- "${specs[@]}"; then
+    # Repos without any commit yet cannot use restore --staged.
+    if ! run_git reset -q -- "${specs[@]}"; then
+      ERROR=$(err_json GIT_FAILED "Unstaging failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
+  collect_status_fields
+}
+
 action_discard_file() {
   local req_file="$1" path tracked
   path=$(jq -r '.args.path // empty' "$req_file")
@@ -749,6 +775,8 @@ process_request() {
     stage-file)            action_stage_file "$req_file" || { ok=false; ec=1; } ;;
     unstage-file)          action_unstage_file "$req_file" || { ok=false; ec=1; } ;;
     discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
+    stage-all)             action_stage_all "$req_file" || { ok=false; ec=1; } ;;
+    unstage-all)           action_unstage_all "$req_file" || { ok=false; ec=1; } ;;
     *)
       ok=false; ec=1
       ERROR=$(err_json "BAD_REQUEST" "Action not allowed: $action" "" "")

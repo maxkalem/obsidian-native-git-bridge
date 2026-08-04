@@ -1,6 +1,11 @@
 import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
-import { NGB_ICON_PULL, NGB_ICON_PUSH } from "./icons";
+import {
+  NGB_ICON_PULL,
+  NGB_ICON_PUSH,
+  NGB_ICON_STAGE_ALL,
+  NGB_ICON_UNSTAGE_ALL,
+} from "./icons";
 
 export const NGB_STATUS_VIEW = "native-git-bridge-status";
 
@@ -17,6 +22,8 @@ export interface StatusViewData {
   activeOperation?: string;
   /** Progress line shown at the bottom while an operation runs. */
   progress?: string;
+  /** Action currently running; its toolbar button is animated. */
+  runningAction?: string;
   lastSyncAt?: string;
   fetchedAt?: string;
   bridge: string;
@@ -27,7 +34,10 @@ export interface StatusViewActions {
   sync: () => void;
   pull: () => void;
   push: () => void;
+  fetch: () => void;
   commit: () => void;
+  stageAll: () => void;
+  unstageAll: () => void;
   openLog: () => void;
   cancel: () => void;
   openFile: (path: string) => void;
@@ -92,20 +102,28 @@ export class StatusView extends ItemView {
     c.addClass("ngb-status-view");
     const d = this.data;
 
-    // --- toolbar: icon buttons, same visual language as obsidian-git ---
+    // --- toolbar: fixed order, animated while the matching action runs ---
     const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
-    const iconBtn = (icon: string, tooltip: string, cb: () => void) => {
+    const running = d?.runningAction;
+    const iconBtn = (icon: string, tooltip: string, cb: () => void, actionName?: string) => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
       b.setAttribute("aria-label", tooltip);
       setIcon(b, icon);
+      if (actionName && running === actionName) {
+        b.addClass("ngb-spin");
+        b.addClass("ngb-sv-icon-active");
+      }
       b.addEventListener("click", cb);
     };
-    iconBtn("refresh-cw", "Refresh status", this.actions.refresh);
-    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull);
-    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push);
-    iconBtn("git-commit-horizontal", "Commit", this.actions.commit);
-    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync);
+    iconBtn("refresh-ccw-dot", "Sync", this.actions.sync, "sync");
+    iconBtn("check", "Commit", this.actions.commit, "commit");
+    iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all");
+    iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all");
+    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch");
+    iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull");
+    iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push");
     iconBtn("file-clock", "Operation log", this.actions.openLog);
+    iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status");
 
     // --- header line ---
     const head = c.createDiv({ cls: "ngb-sv-header" });
@@ -198,9 +216,9 @@ export class StatusView extends ItemView {
       main.createSpan({ cls: "ngb-sv-file-kind", text: CHANGE_LABEL[it.code] ?? it.code });
 
       const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-      const act = (icon: string, tooltip: string, cb: () => void, warn = false) => {
+      const act = (icon: string, tooltip: string, cb: () => void, warn = false, spinning = false) => {
         const b = acts.createEl("button", {
-          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`,
+          cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-spin" : ""}`,
         });
         b.setAttribute("aria-label", tooltip);
         setIcon(b, icon);
@@ -209,12 +227,13 @@ export class StatusView extends ItemView {
           cb();
         });
       };
+      const busy = this.data?.runningAction;
       if (group === "staged") {
-        act("minus", "Unstage", () => this.actions.unstage(it.path));
+        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file");
       } else {
-        act("plus", "Stage", () => this.actions.stage(it.path));
+        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true);
+      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
     }
   }
 }

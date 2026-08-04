@@ -70,3 +70,11 @@
 }
 .ngb-sv-cancel { font-size: var(--font-ui-smaller); }
 .ngb-copy-btn { display: inline-flex; align-items: center; gap: 4px; }
+
+/* Toolbar icon sizing + activity animation (matches obsidian-git's spinning refresh) */
+.ngb-sv-toolbar .ngb-sv-icon { padding: var(--size-4-1); }
+.ngb-sv-toolbar .ngb-sv-icon svg { width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
+.ngb-sv-icon-active { color: var(--text-accent); }
+@keyframes ngb-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.ngb-spin svg { animation: ngb-rotate 1.2s linear infinite; transform-origin: 50% 50%; }
+.ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }

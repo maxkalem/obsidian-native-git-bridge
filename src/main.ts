@@ -81,6 +81,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   private activeCancel: CancelToken | null = null;
   private progressText: string | null = null;
+  private runningAction: string | null = null;
   private lastStatus: { status: GitStatusSummary; sparse: SparseStateSummary; lastCommit?: { hash: string; date: string; subject: string }; fetchedAt: string } | null = null;
 
   async onload(): Promise<void> {
@@ -116,7 +117,10 @@ export default class NativeGitBridgePlugin extends Plugin {
           sync: () => void this.cmdSync(),
           pull: () => void this.cmdPull(),
           push: () => void this.cmdPush(),
+          fetch: () => void this.cmdFetch(),
           commit: () => void this.cmdCommit(),
+          stageAll: () => void this.cmdStageAll(),
+          unstageAll: () => void this.cmdUnstageAll(),
           openLog: () => new OperationLogModal(this.app, this.log).open(),
           cancel: () => void this.cmdCancel(),
           openFile: (p) => this.openVaultFile(p),
@@ -445,6 +449,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "commit", name: "Native Git: Commit", cb: () => void this.cmdCommit() },
       { id: "sync", name: "Native Git: Sync", cb: () => void this.cmdSync() },
       { id: "fetch", name: "Native Git: Fetch", cb: () => void this.cmdFetch() },
+      { id: "stage-all", name: "Native Git: Stage all changes", cb: () => void this.cmdStageAll() },
+      { id: "unstage-all", name: "Native Git: Unstage all changes", cb: () => void this.cmdUnstageAll() },
       { id: "show-history-current-file", name: "Native Git: Show history for current file", cb: () => this.cmdFileHistory() },
       { id: "show-diff-current-file", name: "Native Git: Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
       { id: "show-file-at-commit", name: "Native Git: Show selected file at commit", cb: () => this.cmdFileHistory() },
@@ -503,6 +509,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     // cover the editor on mobile). The panel is opened if it is not visible yet.
     void this.openStatusPanel(false);
     const startedAt = Date.now();
+    this.runningAction = action;
     this.progressText = `${action}… 0s`;
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
@@ -548,6 +555,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     } finally {
       window.clearInterval(ticker);
       this.progressText = null;
+      this.runningAction = null;
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
@@ -993,6 +1001,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparse: this.lastStatus?.sparse,
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
       progress: this.progressText ?? undefined,
+      runningAction: this.runningAction ?? undefined,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled
@@ -1039,6 +1048,26 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   // ------------------------------------------------- per-file staging actions
+
+  async cmdStageAll(): Promise<void> {
+    const result = await this.runOperation("stage-all", {
+      protectedPaths: this.deviceSettings.protectedPaths,
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
+    this.absorbStatusData(result.data ?? {});
+    new Notice("Staged all permitted changes (protected paths excluded).");
+  }
+
+  async cmdUnstageAll(): Promise<void> {
+    const result = await this.runOperation("unstage-all", {
+      protectedPaths: this.deviceSettings.protectedPaths,
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
+    this.absorbStatusData(result.data ?? {});
+    new Notice("Unstaged all changes.");
+  }
 
   async cmdStageFile(path: string): Promise<void> {
     const result = await this.runOperation("stage-file", {

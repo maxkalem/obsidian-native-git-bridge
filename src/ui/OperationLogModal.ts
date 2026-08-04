@@ -11,6 +11,13 @@ export class OperationLogModal extends Modal {
     this.modalEl.addClass("ngb-modal");
     this.titleEl.setText("Native Git Bridge: operation log");
     const c = this.contentEl;
+    const topBar = c.createDiv({ cls: "ngb-buttons ngb-buttons-top" });
+    addCopyButton(topBar, () => this.logAsText(), "Copy log", "Log copied.");
+    const clearTop = topBar.createEl("button", { text: "Clear log" });
+    clearTop.addEventListener("click", () => {
+      this.log.clear();
+      this.close();
+    });
     const entries = this.log.list();
     if (entries.length === 0) {
       c.createEl("p", { text: "Log is empty." });
@@ -29,15 +36,6 @@ export class OperationLogModal extends Modal {
         }
       }
     }
-    const btns = c.createDiv({ cls: "ngb-buttons" });
-    addCopyButton(btns, () => this.logAsText(), "Copy log", "Log copied.");
-    const clear = btns.createEl("button", { text: "Clear log" });
-    clear.addEventListener("click", () => {
-      this.log.clear();
-      this.close();
-    });
-    const close = btns.createEl("button", { text: "Close", cls: "mod-cta" });
-    close.addEventListener("click", () => this.close());
   }
 
   private logAsText(): string {

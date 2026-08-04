@@ -18,7 +18,9 @@ export type BridgeAction =
   | "abort-merge"
   | "stage-file"
   | "unstage-file"
-  | "discard-file";
+  | "discard-file"
+  | "stage-all"
+  | "unstage-all";
 
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
   "ping",
@@ -40,6 +42,8 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "stage-file",
   "unstage-file",
   "discard-file",
+  "stage-all",
+  "unstage-all",
 ]);
 
 export interface BridgeRequest {
