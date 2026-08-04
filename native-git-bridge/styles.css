@@ -62,13 +62,23 @@
   margin-top: var(--size-4-3); padding-top: var(--size-4-2);
   border-top: 1px solid var(--background-modifier-border);
 }
-.ngb-sv-progress {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--size-4-2);
-  margin-top: var(--size-4-2); padding: var(--size-4-2);
-  background: var(--background-secondary); border-radius: var(--radius-s);
-  color: var(--text-accent); font-size: var(--font-ui-small);
+/* Operation strip: [cancel] progress ............ [log] */
+.ngb-sv-strip {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--size-4-2); min-height: 2em;
+  padding-bottom: var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: var(--size-4-2);
 }
-.ngb-sv-cancel { font-size: var(--font-ui-smaller); }
+.ngb-sv-strip-left { display: flex; align-items: center; gap: var(--size-4-1); min-width: 0; }
+.ngb-sv-progress-text {
+  color: var(--text-accent); font-size: var(--font-ui-small);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ngb-sv-progress-idle { color: var(--text-muted); }
+/* The cancel button keeps its space when idle: invisible but non-collapsing. */
+.ngb-sv-cancel-slot { flex: 0 0 auto; }
+.ngb-slot-inactive { visibility: hidden; pointer-events: none; }
 .ngb-copy-btn { display: inline-flex; align-items: center; gap: 4px; }
 
 /* Toolbar icon sizing + activity animation (matches obsidian-git's spinning refresh) */
@@ -85,20 +95,38 @@
 /* pull/fetch and push use an SVG gradient sweep instead of a CSS keyframe */
 .ngb-anim-spin svg     { animation: ngb-rotate 1.2s linear infinite; transform-origin: 50% 50%; }
 .ngb-anim-pulse svg    { animation: ngb-pulse 1s ease-in-out infinite; transform-origin: 50% 50%; }
-.ngb-sweep-wrap { display: inline-flex; align-items: center; justify-content: center; }
-.ngb-sweep-wrap svg { width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
+/* Directional thirds animation for pull/fetch (down) and push (up):
+   a bright accent layer is clipped to one third of the glyph and steps along. */
+.ngb-sweep { position: relative; display: inline-flex; width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
+.ngb-sweep-base, .ngb-sweep-lit { position: absolute; inset: 0; display: inline-flex; }
+.ngb-sweep-base { color: var(--text-faint); }
+.ngb-sweep-base svg, .ngb-sweep-lit svg { width: 100% !important; height: 100% !important; }
+.ngb-sweep-base, .ngb-sweep-lit { align-items: center; justify-content: center; }
+.ngb-sweep-lit {
+  color: var(--interactive-accent);
+  filter: drop-shadow(0 0 3px var(--interactive-accent));
+  animation-duration: 0.66s;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+.ngb-sweep-down { animation-name: ngb-thirds-down; }
+@keyframes ngb-thirds-down {
+  0%,   32.9% { clip-path: inset(0 0 66.7% 0); }
+  33.3%, 65.9% { clip-path: inset(33.3% 0 33.3% 0); }
+  66.6%, 100% { clip-path: inset(66.7% 0 0 0); }
+}
+.ngb-sweep-up   { animation-name: ngb-thirds-up; }
+@keyframes ngb-thirds-up {
+  0%,   32.9% { clip-path: inset(66.7% 0 0 0); }
+  33.3%, 65.9% { clip-path: inset(33.3% 0 33.3% 0); }
+  66.6%, 100% { clip-path: inset(0 0 66.7% 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ngb-sweep-lit { animation-duration: 1.8s; }
+}
 @media (prefers-reduced-motion: reduce) {
   .ngb-anim-spin svg, .ngb-anim-pulse svg { animation-duration: 2.4s; }
 }
 .ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }
 
-/* Footer actions (log moved out of the crowded toolbar) */
-.ngb-sv-foot-actions { margin-top: var(--size-4-2); }
-.ngb-sv-foot-btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  background: transparent; border: none; box-shadow: none;
-  color: var(--text-muted); font-size: var(--font-ui-small);
-  padding: var(--size-4-1) 0; cursor: pointer;
-}
-.ngb-sv-foot-btn:hover { color: var(--text-normal); }
 .ngb-sv-toolbar { justify-content: space-between; }

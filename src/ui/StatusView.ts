@@ -68,6 +68,8 @@ const CHANGE_LABEL: Record<string, string> = {
  */
 export class StatusView extends ItemView {
   private data: StatusViewData | null = null;
+  private progressEl: HTMLElement | null = null;
+  private cancelBtn: HTMLElement | null = null;
   private collapsed: Record<Group, boolean> = {
     conflicted: false,
     staged: false,
@@ -92,6 +94,35 @@ export class StatusView extends ItemView {
   setData(data: StatusViewData): void {
     this.data = data;
     this.render();
+  }
+
+  /**
+   * Update only the elapsed-time text. A full re-render would recreate the
+   * toolbar buttons every tick and restart their CSS animations from the first
+   * frame, which made the activity animation look erratic.
+   */
+  updateProgressText(text: string | null): void {
+    if (this.data) this.data.progress = text ?? undefined;
+    if (this.progressEl && this.cancelBtn) {
+      this.applyStripState(text, this.data?.activeOperation ?? null);
+      return;
+    }
+    this.render();
+  }
+
+  /** Toggle the reserved cancel slot and the label without rebuilding the row. */
+  private applyStripState(progress: string | null, activeOperation: string | null): void {
+    const running = progress !== null && progress !== "";
+    if (this.cancelBtn) {
+      this.cancelBtn.toggleClass("ngb-slot-inactive", !running);
+      this.cancelBtn.setAttribute("aria-disabled", running ? "false" : "true");
+    }
+    if (this.progressEl) {
+      this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
+      this.progressEl.setText(
+        running ? progress! : activeOperation ? `${activeOperation} pending…` : "Idle"
+      );
+    }
   }
 
   async onOpen(): Promise<void> {
@@ -134,8 +165,9 @@ export class StatusView extends ItemView {
       b.setAttribute("aria-label", tooltip);
       const active = Boolean(actionName) && running === actionName;
       if (active && (anim === "sweep-down" || anim === "sweep-up")) {
-        // Travelling highlight along the arrow: down for pull/fetch, up for push.
-        applySweepIcon(b, anim === "sweep-down" ? "down" : "up");
+        // Travelling highlight along the button's OWN icon: downwards for
+        // pull/fetch, upwards for push.
+        applySweepIcon(b, icon, anim === "sweep-down" ? "down" : "up");
         b.addClass("ngb-sv-icon-active");
       } else {
         setIcon(b, icon);
@@ -154,6 +186,26 @@ export class StatusView extends ItemView {
     iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
     iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
     iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
+
+    // --- operation strip: one operation runs at a time, so it lives here,
+    // directly above the repository state. Cancel on the left, log on the right.
+    const strip = c.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    // The cancel slot is ALWAYS created so the row never reflows and the button
+    // cannot go missing when only the elapsed-time text is refreshed.
+    const cancel = stripLeft.createEl("button", {
+      cls: "clickable-icon ngb-sv-icon ngb-sv-icon-warn ngb-sv-cancel-slot",
+    });
+    cancel.setAttribute("aria-label", "Cancel current operation");
+    setIcon(cancel, "x");
+    cancel.addEventListener("click", () => this.actions.cancel());
+    this.cancelBtn = cancel;
+    this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
+    this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null);
+    const logBtn = strip.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    logBtn.setAttribute("aria-label", "Operation log");
+    setIcon(logBtn, "file-clock");
+    logBtn.addEventListener("click", this.actions.openLog);
 
     // --- header line ---
     const head = c.createDiv({ cls: "ngb-sv-header" });
@@ -204,18 +256,6 @@ export class StatusView extends ItemView {
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
 
-    const footActions = foot.createDiv({ cls: "ngb-sv-foot-actions" });
-    const logBtn = footActions.createEl("button", { cls: "ngb-sv-foot-btn" });
-    setIcon(logBtn.createSpan(), "file-clock");
-    logBtn.createSpan({ text: " Operation log" });
-    logBtn.addEventListener("click", this.actions.openLog);
-
-    if (d.progress) {
-      const p = foot.createDiv({ cls: "ngb-sv-progress" });
-      p.createSpan({ text: d.progress });
-      const cancel = p.createEl("button", { text: "Cancel", cls: "ngb-sv-cancel" });
-      cancel.addEventListener("click", this.actions.cancel);
-    }
   }
 
   private renderGroup(

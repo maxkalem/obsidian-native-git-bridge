@@ -26,7 +26,7 @@ __export(main_exports, {
   default: () => NativeGitBridgePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
@@ -1520,7 +1520,7 @@ var FileHistoryModal = class extends import_obsidian7.Modal {
 };
 
 // src/ui/StatusView.ts
-var import_obsidian9 = require("obsidian");
+var import_obsidian10 = require("obsidian");
 
 // src/ui/icons.ts
 var import_obsidian8 = require("obsidian");
@@ -1551,40 +1551,14 @@ function registerIcons() {
 }
 
 // src/ui/animatedIcons.ts
-var gradientSeq = 0;
-var PATHS = {
-  // Same glyphs as the static icons (24x24 coordinate system).
-  down: "M12 3v12M7 10l5 5 5-5M5 21h14",
-  up: "M12 15V3M7 8l5-5 5 5M5 21h14"
-};
-function directionalHighlightSvg(direction) {
-  const id = `ngb-grad-${++gradientSeq}`;
-  const from = direction === "down" ? "0 -24" : "0 24";
-  const to = "0 0";
-  return `
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="ngb-anim-sweep-svg">
-  <defs>
-    <linearGradient id="${id}" gradientUnits="userSpaceOnUse"
-                    x1="0" y1="0" x2="0" y2="24" spreadMethod="repeat">
-      <stop offset="0"    stop-color="var(--text-muted)"/>
-      <stop offset="0.28" stop-color="var(--text-muted)"/>
-      <stop offset="0.5"  stop-color="var(--text-accent)"/>
-      <stop offset="0.72" stop-color="var(--text-muted)"/>
-      <stop offset="1"    stop-color="var(--text-muted)"/>
-      <animateTransform attributeName="gradientTransform" type="translate"
-                        from="${from}" to="${to}" dur="1s" repeatCount="indefinite"/>
-    </linearGradient>
-  </defs>
-  <g fill="none" stroke="url(#${id})" stroke-width="2"
-     stroke-linecap="round" stroke-linejoin="round">
-    <path d="${PATHS[direction]}"/>
-  </g>
-</svg>`.trim();
-}
-function applySweepIcon(button, direction) {
+var import_obsidian9 = require("obsidian");
+function applySweepIcon(button, iconName, direction) {
   button.empty();
-  const wrapper = button.createSpan({ cls: "ngb-sweep-wrap" });
-  wrapper.innerHTML = directionalHighlightSvg(direction);
+  const wrap = button.createSpan({ cls: "ngb-sweep" });
+  const base = wrap.createSpan({ cls: "ngb-sweep-base" });
+  (0, import_obsidian9.setIcon)(base, iconName);
+  const lit = wrap.createSpan({ cls: `ngb-sweep-lit ngb-sweep-${direction}` });
+  (0, import_obsidian9.setIcon)(lit, iconName);
 }
 
 // src/ui/StatusView.ts
@@ -1599,11 +1573,13 @@ var CHANGE_LABEL = {
   U: "conflicted",
   "?": "untracked"
 };
-var StatusView = class extends import_obsidian9.ItemView {
+var StatusView = class extends import_obsidian10.ItemView {
   constructor(leaf, actions) {
     super(leaf);
     this.actions = actions;
     this.data = null;
+    this.progressEl = null;
+    this.cancelBtn = null;
     this.collapsed = {
       conflicted: false,
       staged: false,
@@ -1623,6 +1599,33 @@ var StatusView = class extends import_obsidian9.ItemView {
   setData(data) {
     this.data = data;
     this.render();
+  }
+  /**
+   * Update only the elapsed-time text. A full re-render would recreate the
+   * toolbar buttons every tick and restart their CSS animations from the first
+   * frame, which made the activity animation look erratic.
+   */
+  updateProgressText(text) {
+    if (this.data) this.data.progress = text ?? void 0;
+    if (this.progressEl && this.cancelBtn) {
+      this.applyStripState(text, this.data?.activeOperation ?? null);
+      return;
+    }
+    this.render();
+  }
+  /** Toggle the reserved cancel slot and the label without rebuilding the row. */
+  applyStripState(progress, activeOperation) {
+    const running = progress !== null && progress !== "";
+    if (this.cancelBtn) {
+      this.cancelBtn.toggleClass("ngb-slot-inactive", !running);
+      this.cancelBtn.setAttribute("aria-disabled", running ? "false" : "true");
+    }
+    if (this.progressEl) {
+      this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
+      this.progressEl.setText(
+        running ? progress : activeOperation ? `${activeOperation} pending\u2026` : "Idle"
+      );
+    }
   }
   async onOpen() {
     this.render();
@@ -1647,10 +1650,10 @@ var StatusView = class extends import_obsidian9.ItemView {
       b.setAttribute("aria-label", tooltip);
       const active = Boolean(actionName) && running === actionName;
       if (active && (anim === "sweep-down" || anim === "sweep-up")) {
-        applySweepIcon(b, anim === "sweep-down" ? "down" : "up");
+        applySweepIcon(b, icon, anim === "sweep-down" ? "down" : "up");
         b.addClass("ngb-sv-icon-active");
       } else {
-        (0, import_obsidian9.setIcon)(b, icon);
+        (0, import_obsidian10.setIcon)(b, icon);
         if (active) {
           b.addClass(`ngb-anim-${anim}`);
           b.addClass("ngb-sv-icon-active");
@@ -1666,6 +1669,21 @@ var StatusView = class extends import_obsidian9.ItemView {
     iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
     iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
     iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
+    const strip = c.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    const cancel = stripLeft.createEl("button", {
+      cls: "clickable-icon ngb-sv-icon ngb-sv-icon-warn ngb-sv-cancel-slot"
+    });
+    cancel.setAttribute("aria-label", "Cancel current operation");
+    (0, import_obsidian10.setIcon)(cancel, "x");
+    cancel.addEventListener("click", () => this.actions.cancel());
+    this.cancelBtn = cancel;
+    this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
+    this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null);
+    const logBtn = strip.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    logBtn.setAttribute("aria-label", "Operation log");
+    (0, import_obsidian10.setIcon)(logBtn, "file-clock");
+    logBtn.addEventListener("click", this.actions.openLog);
     const head = c.createDiv({ cls: "ngb-sv-header" });
     head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
     head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
@@ -1705,24 +1723,13 @@ var StatusView = class extends import_obsidian9.ItemView {
     row("Bridge", d.bridge);
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
-    const footActions = foot.createDiv({ cls: "ngb-sv-foot-actions" });
-    const logBtn = footActions.createEl("button", { cls: "ngb-sv-foot-btn" });
-    (0, import_obsidian9.setIcon)(logBtn.createSpan(), "file-clock");
-    logBtn.createSpan({ text: " Operation log" });
-    logBtn.addEventListener("click", this.actions.openLog);
-    if (d.progress) {
-      const p = foot.createDiv({ cls: "ngb-sv-progress" });
-      p.createSpan({ text: d.progress });
-      const cancel = p.createEl("button", { text: "Cancel", cls: "ngb-sv-cancel" });
-      cancel.addEventListener("click", this.actions.cancel);
-    }
   }
   renderGroup(parent, group, title, items, danger) {
     if (items.length === 0) return;
     const wrap = parent.createDiv({ cls: "ngb-sv-group" });
     const header = wrap.createDiv({ cls: "ngb-sv-group-header" });
     const chevron = header.createSpan({ cls: "ngb-sv-chevron" });
-    (0, import_obsidian9.setIcon)(chevron, this.collapsed[group] ? "chevron-right" : "chevron-down");
+    (0, import_obsidian10.setIcon)(chevron, this.collapsed[group] ? "chevron-right" : "chevron-down");
     header.createSpan({
       cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
       text: title
@@ -1748,7 +1755,7 @@ var StatusView = class extends import_obsidian9.ItemView {
           cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${spinning ? " ngb-anim-pulse ngb-sv-icon-active" : ""}`
         });
         b.setAttribute("aria-label", tooltip);
-        (0, import_obsidian9.setIcon)(b, icon);
+        (0, import_obsidian10.setIcon)(b, icon);
         b.addEventListener("click", (e) => {
           e.stopPropagation();
           cb();
@@ -1866,11 +1873,11 @@ function baseName(p) {
 }
 
 // src/main.ts
-var import_obsidian12 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/ui/OperationLogModal.ts
-var import_obsidian10 = require("obsidian");
-var OperationLogModal = class extends import_obsidian10.Modal {
+var import_obsidian11 = require("obsidian");
+var OperationLogModal = class extends import_obsidian11.Modal {
   constructor(app, log) {
     super(app);
     this.log = log;
@@ -1917,7 +1924,7 @@ var OperationLogModal = class extends import_obsidian10.Modal {
 var DEFAULT_SHARED_PREFS = { showStatusBar: true, showRibbonIcon: true };
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
-var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
+var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
@@ -2101,7 +2108,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     return disabled !== "true";
   }
   warnIfObsidianGitEnabledOnAndroid() {
-    if (!import_obsidian11.Platform.isAndroidApp) return;
+    if (!import_obsidian12.Platform.isAndroidApp) return;
     if (this.deviceSettings.suppressObsidianGitWarning) return;
     if (!this.isObsidianGitActiveOnDevice()) return;
     this.log.add("warn", "compat", "obsidian-git ACTIVE on this Android device alongside Native Git Bridge.");
@@ -2149,7 +2156,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
         } catch {
         }
         this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
-        new import_obsidian11.Notice("Native Git Bridge: paired with the Termux runner.");
+        new import_obsidian12.Notice("Native Git Bridge: paired with the Termux runner.");
       };
       const current = this.deviceSettings.authToken;
       if (current === "" || current === pairing.token) {
@@ -2220,7 +2227,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     this.store.reset();
     this.deviceSettings = this.store.read();
     this.refreshStatusBarIdle();
-    new import_obsidian11.Notice("Native Git Bridge: device-local settings reset.");
+    new import_obsidian12.Notice("Native Git Bridge: device-local settings reset.");
   }
   refreshStatusBarIdle() {
     if (!this.statusBar) return;
@@ -2267,25 +2274,25 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
   async runOperation(action, args = {}) {
     const s = this.deviceSettings;
     if (!s.enabledOnThisDevice) {
-      new import_obsidian11.Notice("Native Git Bridge is disabled on this device (see settings).");
+      new import_obsidian12.Notice("Native Git Bridge is disabled on this device (see settings).");
       return null;
     }
     if (!s.termuxIntegrationEnabled) {
-      new import_obsidian11.Notice("Termux integration is disabled on this device (see settings).");
+      new import_obsidian12.Notice("Termux integration is disabled on this device (see settings).");
       return null;
     }
     if (!s.authToken) {
-      new import_obsidian11.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
+      new import_obsidian12.Notice("No pairing token set. Run the Termux installer, then paste the token in settings.");
       return null;
     }
     const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
-      new import_obsidian11.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
+      new import_obsidian12.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
       return null;
     }
     if (!mutating && this.lock.active && MUTATING_ACTIONS.has(this.lock.active.action)) {
-      new import_obsidian11.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
+      new import_obsidian12.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
       return null;
     }
     const cancel = new CancelToken();
@@ -2301,7 +2308,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     const ticker = window.setInterval(() => {
       const secs = Math.round((Date.now() - startedAt) / 1e3);
       this.progressText = `${action}\u2026 ${secs}s`;
-      this.pushStatusToView();
+      this.updateProgressInView(this.progressText);
     }, 1e3);
     try {
       await this.client.submit(req);
@@ -2309,7 +2316,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
       const outcome = transport.trigger(req.id);
       if (outcome.kind === "manual" && outcome.instruction) {
         this.statusBar?.set("waiting-tap");
-        new import_obsidian11.Notice(outcome.instruction, 1e4);
+        new import_obsidian12.Notice(outcome.instruction, 1e4);
       }
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1e3, cancel);
       if (waited.kind === "timeout") {
@@ -2320,7 +2327,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
       if (waited.kind === "cancelled") {
         await this.client.requestCancel(req.id);
         this.log.add("warn", action, `Request ${req.id} cancelled by user.`);
-        new import_obsidian11.Notice(`Native Git: ${action} cancelled.`);
+        new import_obsidian12.Notice(`Native Git: ${action} cancelled.`);
         return null;
       }
       const result = waited.result;
@@ -2418,7 +2425,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
   async cmdVerifySparseSafety() {
     const protectedPaths = this.deviceSettings.protectedPaths;
     if (protectedPaths.length === 0) {
-      new import_obsidian11.Notice("No protected sparse paths configured (see settings).");
+      new import_obsidian12.Notice("No protected sparse paths configured (see settings).");
       return;
     }
     const result = await this.runOperation("verify-sparse-safety", { protectedPaths });
@@ -2514,8 +2521,8 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
   }
   openVaultFile(path) {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (f instanceof import_obsidian12.TFile) void this.app.workspace.getLeaf(false).openFile(f);
-    else new import_obsidian11.Notice(`Cannot open ${path} (not found in vault).`);
+    if (f instanceof import_obsidian13.TFile) void this.app.workspace.getLeaf(false).openFile(f);
+    else new import_obsidian12.Notice(`Cannot open ${path} (not found in vault).`);
   }
   async cmdFetch() {
     const result = await this.runOperation("fetch");
@@ -2523,7 +2530,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     if (!result.ok) return this.renderMutationError("Native Git: fetch failed", result);
     this.absorbStatusData(result.data ?? {});
     const st = this.lastStatus?.status;
-    new import_obsidian11.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
+    new import_obsidian12.Notice(`Fetched. Ahead ${st?.ahead ?? "?"}, behind ${st?.behind ?? "?"}.`);
   }
   async cmdPull(silent = false) {
     const result = await this.runOperation("pull", {
@@ -2588,7 +2595,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
       `Committed: ${result.data?.committed ?? "false"} \xB7 Pushed: ${result.data?.pushed ?? "false"}`
     ];
     this.log.add("info", "sync", "Sync completed successfully.");
-    if (silent) new import_obsidian11.Notice("Native Git: sync completed.");
+    if (silent) new import_obsidian12.Notice("Native Git: sync completed.");
     else new ResultModal(this.app, "Native Git: sync completed", lines, { stdout: result.data?.pullOutput }).open();
   }
   async cmdAbortMerge() {
@@ -2609,7 +2616,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
         this.absorbStatusData(result.data ?? {});
-        new import_obsidian11.Notice("Merge aborted; repository restored.");
+        new import_obsidian12.Notice("Merge aborted; repository restored.");
       }
     ).open();
   }
@@ -2617,7 +2624,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
   activeFilePath() {
     const f = this.app.workspace.getActiveFile();
     if (!f) {
-      new import_obsidian11.Notice("No active file.");
+      new import_obsidian12.Notice("No active file.");
       return null;
     }
     return f.path;
@@ -2707,7 +2714,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
             bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
           );
           this.log.add("info", "restore-file", `Restored ${currentPath} from ${e.hash} (historical name ${e.pathAtCommit}).`);
-          new import_obsidian11.Notice("File content restored from the selected version.");
+          new import_obsidian12.Notice("File content restored from the selected version.");
           return;
         }
         const result = await this.runOperation("restore-file", {
@@ -2718,7 +2725,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: restore failed", result);
         this.absorbStatusData(result.data ?? {});
-        new import_obsidian11.Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
+        new import_obsidian12.Notice(`Restored ${currentPath} from ${e.hash.slice(0, 8)}.`);
       }
     ).open();
   }
@@ -2735,6 +2742,13 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     await leaf.setViewState({ type: NGB_STATUS_VIEW, active: reveal });
     if (reveal) this.app.workspace.revealLeaf(leaf);
     this.pushStatusToView();
+  }
+  /** Tick the elapsed-time label without rebuilding the panel. */
+  updateProgressInView(text) {
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof StatusView) view.updateProgressText(text);
+    }
   }
   /** Mirror current state into the sidebar panel (works on mobile). */
   pushStatusToView() {
@@ -2795,7 +2809,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage all failed", result);
     this.absorbStatusData(result.data ?? {});
-    new import_obsidian11.Notice("Staged all permitted changes (protected paths excluded).");
+    new import_obsidian12.Notice("Staged all permitted changes (protected paths excluded).");
   }
   async cmdUnstageAll() {
     const result = await this.runOperation("unstage-all", {
@@ -2804,7 +2818,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage all failed", result);
     this.absorbStatusData(result.data ?? {});
-    new import_obsidian11.Notice("Unstaged all changes.");
+    new import_obsidian12.Notice("Unstaged all changes.");
   }
   async cmdStageFile(path) {
     const result = await this.runOperation("stage-file", {
@@ -2846,7 +2860,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
         this.absorbStatusData(result.data ?? {});
-        new import_obsidian11.Notice(`Discarded changes in ${path}.`);
+        new import_obsidian12.Notice(`Discarded changes in ${path}.`);
       }
     ).open();
   }
@@ -2854,7 +2868,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     const report = { pluginSide: {}, problems: [] };
     const s = this.deviceSettings;
     report.pluginSide["Plugin version"] = this.manifest.version;
-    report.pluginSide["Platform"] = import_obsidian11.Platform.isAndroidApp ? "Android app" : import_obsidian11.Platform.isMobile ? "mobile" : "desktop";
+    report.pluginSide["Platform"] = import_obsidian12.Platform.isAndroidApp ? "Android app" : import_obsidian12.Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Integration type"] = s.integrationType;
@@ -2866,7 +2880,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");
-    if (import_obsidian11.Platform.isAndroidApp) {
+    if (import_obsidian12.Platform.isAndroidApp) {
       if (this.isObsidianGitActiveOnDevice()) {
         report.problems.push(
           "obsidian-git is ACTIVE on this device (not device-disabled): incompatible with a native sparse-checkout index. Use its 'Disable on this device' toggle."
@@ -2889,7 +2903,7 @@ var NativeGitBridgePlugin = class extends import_obsidian11.Plugin {
   }
   async cmdCancel() {
     if (!this.activeCancel) {
-      new import_obsidian11.Notice("No operation is currently awaiting a result.");
+      new import_obsidian12.Notice("No operation is currently awaiting a result.");
       return;
     }
     this.activeCancel.cancel();

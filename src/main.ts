@@ -515,7 +515,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     const ticker = window.setInterval(() => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
       this.progressText = `${action}… ${secs}s`;
-      this.pushStatusToView();
+      // Text-only update: a full re-render would restart the toolbar animations.
+      this.updateProgressInView(this.progressText);
     }, 1000);
 
     try {
@@ -990,6 +991,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     await leaf.setViewState({ type: NGB_STATUS_VIEW, active: reveal });
     if (reveal) this.app.workspace.revealLeaf(leaf);
     this.pushStatusToView();
+  }
+
+  /** Tick the elapsed-time label without rebuilding the panel. */
+  private updateProgressInView(text: string | null): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof StatusView) view.updateProgressText(text);
+    }
   }
 
   /** Mirror current state into the sidebar panel (works on mobile). */
