@@ -46,6 +46,8 @@ export interface StatusViewActions {
   stage: (path: string) => void;
   unstage: (path: string) => void;
   discard: (path: string) => void;
+  /** Fill a context menu with the Git entries for this path (long press / right click). */
+  fileMenu: (menu: Menu, path: string) => void;
 }
 
 type Group = "conflicted" | "staged" | "unstaged" | "untracked";
@@ -305,6 +307,43 @@ export class StatusView extends ItemView {
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
       main.addEventListener("click", () => this.actions.openFile(it.path));
+
+      // Same Git menu as the file explorer, on the whole row: right click on
+      // desktop, long press on touch (Obsidian maps contextmenu for both, but
+      // WebViews are inconsistent about it, so a touch timer backs it up).
+      const openMenu = (ev: MouseEvent | TouchEvent) => {
+        const menu = new Menu();
+        this.actions.fileMenu(menu, it.path);
+        // showAtMouseEvent needs a MouseEvent; for touch, anchor the menu to
+        // the row itself (MenuPositionDef takes x/y, not a DOMRect).
+        if (ev instanceof MouseEvent) {
+          menu.showAtMouseEvent(ev);
+        } else {
+          const r = rowEl.getBoundingClientRect();
+          menu.showAtPosition({ x: r.left, y: r.bottom });
+        }
+      };
+      rowEl.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        openMenu(ev);
+      });
+      let longPress: number | null = null;
+      const clearLongPress = () => {
+        if (longPress !== null) {
+          window.clearTimeout(longPress);
+          longPress = null;
+        }
+      };
+      rowEl.addEventListener("touchstart", (ev) => {
+        clearLongPress();
+        longPress = window.setTimeout(() => {
+          longPress = null;
+          openMenu(ev);
+        }, 500);
+      }, { passive: true });
+      for (const e of ["touchend", "touchmove", "touchcancel"]) {
+        rowEl.addEventListener(e, clearLongPress, { passive: true });
+      }
       // Tooltips are unavailable on touch, so the change is spelled out there.
       if (Platform.isMobile) {
         main.createSpan({ cls: "ngb-sv-file-kind", text: kind });

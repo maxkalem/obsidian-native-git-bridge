@@ -1,4 +1,4 @@
-import { Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
+import { Menu, Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
 import {
   DEFAULT_TIMEOUT_SECONDS,
   PLUGIN_ID,
@@ -140,6 +140,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           stage: (p) => void this.cmdStageFile(p),
           unstage: (p) => void this.cmdUnstageFile(p),
           discard: (p) => this.cmdDiscardFile(p),
+          fileMenu: (menu, p) => this.buildGitMenu(menu, p),
         })
     );
 
@@ -162,9 +163,20 @@ export default class NativeGitBridgePlugin extends Plugin {
   private registerFileMenu(): void {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
+        this.buildGitMenu(menu, file.path);
+      })
+    );
+  }
+
+  /**
+   * The Git entries for one file or folder. Shared by the file explorer's
+   * file-menu and the long-press / right-click menu on rows in the status
+   * panel, so the two can never drift apart.
+   */
+  buildGitMenu(menu: Menu, path: string): void {
+    {
         if (!Platform.isAndroidApp) return;
         if (!this.deviceSettings.enabledOnThisDevice) return;
-        const path = file.path;
         const v = validateRepoRelativePath(path);
         if (!v.ok) return;
         const p = v.normalized;
@@ -233,8 +245,7 @@ export default class NativeGitBridgePlugin extends Plugin {
               .onClick(() => void this.cmdExcludeChange(p, true))
           );
         }
-      })
-    );
+    }
   }
 
   private lastAutoSyncMs = 0;

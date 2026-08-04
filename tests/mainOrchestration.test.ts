@@ -630,6 +630,56 @@ describe("file context menu", () => {
     __setPlatformAndroid(false);
     expect(h.app.workspace.fireFileMenu("Notes/a.md")).toHaveLength(0);
   });
+
+  it("the status panel row menu offers exactly the same entries as the explorer", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    // The panel calls buildGitMenu directly (same seam the explorer uses), so
+    // the two lists cannot drift apart.
+    const explorer = h.app.workspace.fireFileMenu("Notes/a.md");
+    const titles: string[] = [];
+    const menu: Any = {
+      addItem: (fn: (i: Any) => void) => {
+        const item: Any = {
+          setTitle: (t: string) => {
+            titles.push(t);
+            return item;
+          },
+          setIcon: () => item,
+          onClick: () => item,
+        };
+        fn(item);
+        return menu;
+      },
+    };
+    h.plugin.buildGitMenu(menu, "Notes/a.md");
+    expect(titles).toEqual(explorer);
+    expect(titles.length).toBeGreaterThan(0);
+  });
+
+  it("the panel menu also honours the per-group toggles", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ menuGitignore: false, menuSparse: false, menuExclude: false });
+    const titles: string[] = [];
+    const menu: Any = {
+      addItem: (fn: (i: Any) => void) => {
+        const item: Any = {
+          setTitle: (t: string) => {
+            titles.push(t);
+            return item;
+          },
+          setIcon: () => item,
+          onClick: () => item,
+        };
+        fn(item);
+        return menu;
+      },
+    };
+    h.plugin.buildGitMenu(menu, "Notes/a.md");
+    // Only Stage/Unstage remain.
+    expect(titles.every((t) => t.startsWith("Git: Stage") || t.startsWith("Git: Unstage"))).toBe(true);
+  });
 });
 
 describe("sync on close (fire and forget)", () => {

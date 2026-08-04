@@ -2045,6 +2045,37 @@ var StatusView = class extends import_obsidian10.ItemView {
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
       main.addEventListener("click", () => this.actions.openFile(it.path));
+      const openMenu = (ev) => {
+        const menu = new import_obsidian10.Menu();
+        this.actions.fileMenu(menu, it.path);
+        if (ev instanceof MouseEvent) {
+          menu.showAtMouseEvent(ev);
+        } else {
+          const r = rowEl.getBoundingClientRect();
+          menu.showAtPosition({ x: r.left, y: r.bottom });
+        }
+      };
+      rowEl.addEventListener("contextmenu", (ev) => {
+        ev.preventDefault();
+        openMenu(ev);
+      });
+      let longPress = null;
+      const clearLongPress = () => {
+        if (longPress !== null) {
+          window.clearTimeout(longPress);
+          longPress = null;
+        }
+      };
+      rowEl.addEventListener("touchstart", (ev) => {
+        clearLongPress();
+        longPress = window.setTimeout(() => {
+          longPress = null;
+          openMenu(ev);
+        }, 500);
+      }, { passive: true });
+      for (const e of ["touchend", "touchmove", "touchcancel"]) {
+        rowEl.addEventListener(e, clearLongPress, { passive: true });
+      }
       if (import_obsidian10.Platform.isMobile) {
         main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
       }
@@ -2303,7 +2334,8 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
         openFile: (p) => this.openVaultFile(p),
         stage: (p) => void this.cmdStageFile(p),
         unstage: (p) => void this.cmdUnstageFile(p),
-        discard: (p) => this.cmdDiscardFile(p)
+        discard: (p) => this.cmdDiscardFile(p),
+        fileMenu: (menu, p) => this.buildGitMenu(menu, p)
       })
     );
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
@@ -2323,58 +2355,67 @@ var _NativeGitBridgePlugin = class _NativeGitBridgePlugin extends import_obsidia
   registerFileMenu() {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (!import_obsidian12.Platform.isAndroidApp) return;
-        if (!this.deviceSettings.enabledOnThisDevice) return;
-        const path = file.path;
-        const v = validateRepoRelativePath(path);
-        if (!v.ok) return;
-        const p = v.normalized;
-        const st = this.lastStatus?.status;
-        const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
-        const unstaged = (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) || (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
-        if (unstaged || !st) {
-          menu.addItem(
-            (i) => i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
-          );
-        }
-        if (staged) {
-          menu.addItem(
-            (i) => i.setTitle("Git: Unstage").setIcon("minus-circle").onClick(() => void this.cmdUnstageFile(p))
-          );
-        }
-        if (this.deviceSettings.menuGitignore) {
-          if (this.isGitignored(p)) {
-            menu.addItem(
-              (i) => i.setTitle("Git: Remove from .gitignore").setIcon("eye").onClick(() => void this.gitignoreRemove(`/${p}`))
-            );
-          } else {
-            menu.addItem(
-              (i) => i.setTitle("Git: Add to .gitignore").setIcon("eye-off").onClick(() => void this.gitignoreAdd(`/${p}`))
-            );
-          }
-        }
-        if (!this.deviceSettings.menuSparse) {
-        } else if (this.isSparseExcluded(p)) {
-          menu.addItem(
-            (i) => i.setTitle("Git: Show again (remove sparse exclusion)").setIcon("eye").onClick(() => void this.cmdSparseExclude(p, false))
-          );
-        } else {
-          menu.addItem(
-            (i) => i.setTitle("Git: Hide on this device (sparse)").setIcon("eye-off").onClick(() => void this.cmdSparseExclude(p, true))
-          );
-        }
-        if (!this.deviceSettings.menuExclude) {
-        } else if (this.isExcluded(p)) {
-          menu.addItem(
-            (i) => i.setTitle("Git: Remove from .git exclude").setIcon("eye").onClick(() => void this.cmdExcludeChange(p, false))
-          );
-        } else {
-          menu.addItem(
-            (i) => i.setTitle("Git: Add to .git exclude (local ignore)").setIcon("eye-off").onClick(() => void this.cmdExcludeChange(p, true))
-          );
-        }
+        this.buildGitMenu(menu, file.path);
       })
     );
+  }
+  /**
+   * The Git entries for one file or folder. Shared by the file explorer's
+   * file-menu and the long-press / right-click menu on rows in the status
+   * panel, so the two can never drift apart.
+   */
+  buildGitMenu(menu, path) {
+    {
+      if (!import_obsidian12.Platform.isAndroidApp) return;
+      if (!this.deviceSettings.enabledOnThisDevice) return;
+      const v = validateRepoRelativePath(path);
+      if (!v.ok) return;
+      const p = v.normalized;
+      const st = this.lastStatus?.status;
+      const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
+      const unstaged = (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) || (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
+      if (unstaged || !st) {
+        menu.addItem(
+          (i) => i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
+        );
+      }
+      if (staged) {
+        menu.addItem(
+          (i) => i.setTitle("Git: Unstage").setIcon("minus-circle").onClick(() => void this.cmdUnstageFile(p))
+        );
+      }
+      if (this.deviceSettings.menuGitignore) {
+        if (this.isGitignored(p)) {
+          menu.addItem(
+            (i) => i.setTitle("Git: Remove from .gitignore").setIcon("eye").onClick(() => void this.gitignoreRemove(`/${p}`))
+          );
+        } else {
+          menu.addItem(
+            (i) => i.setTitle("Git: Add to .gitignore").setIcon("eye-off").onClick(() => void this.gitignoreAdd(`/${p}`))
+          );
+        }
+      }
+      if (!this.deviceSettings.menuSparse) {
+      } else if (this.isSparseExcluded(p)) {
+        menu.addItem(
+          (i) => i.setTitle("Git: Show again (remove sparse exclusion)").setIcon("eye").onClick(() => void this.cmdSparseExclude(p, false))
+        );
+      } else {
+        menu.addItem(
+          (i) => i.setTitle("Git: Hide on this device (sparse)").setIcon("eye-off").onClick(() => void this.cmdSparseExclude(p, true))
+        );
+      }
+      if (!this.deviceSettings.menuExclude) {
+      } else if (this.isExcluded(p)) {
+        menu.addItem(
+          (i) => i.setTitle("Git: Remove from .git exclude").setIcon("eye").onClick(() => void this.cmdExcludeChange(p, false))
+        );
+      } else {
+        menu.addItem(
+          (i) => i.setTitle("Git: Add to .git exclude (local ignore)").setIcon("eye-off").onClick(() => void this.cmdExcludeChange(p, true))
+        );
+      }
+    }
   }
   registerAutomaticActions() {
     const s = this.deviceSettings;
