@@ -12,9 +12,12 @@
 
 export const __notices: string[] = [];
 export const __openedModals: string[] = [];
+/** obsidian:// protocol handlers registered by the plugin (action -> handler). */
+export const __protocolHandlers = new Map<string, (params: Record<string, string>) => void>();
 export function __resetObsidianMock(): void {
   __notices.length = 0;
   __openedModals.length = 0;
+  __protocolHandlers.clear();
   __setPlatformAndroid(true);
 }
 
@@ -223,6 +226,9 @@ export class Plugin {
   registerView(): void {}
   registerEvent(): void {}
   registerDomEvent(): void {}
+  registerObsidianProtocolHandler(action: string, handler: (params: Record<string, string>) => void): void {
+    __protocolHandlers.set(action, handler);
+  }
   registerInterval(id: number): number {
     return id;
   }

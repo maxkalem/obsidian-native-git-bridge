@@ -1,5 +1,11 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { __notices, __openedModals, __resetObsidianMock, __setPlatformAndroid } from "./mocks/obsidian";
+import {
+  __notices,
+  __openedModals,
+  __protocolHandlers,
+  __resetObsidianMock,
+  __setPlatformAndroid,
+} from "./mocks/obsidian";
 import NativeGitBridgePlugin from "../src/main";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
@@ -105,6 +111,7 @@ function installGlobals(runner: FakeRunner, adapter: MemAdapter): void {
     setInterval: (fn: Any, ms: Any) => setInterval(fn, ms),
     clearInterval: (id: Any) => clearInterval(id),
     setTimeout: (fn: Any, ms: Any) => setTimeout(fn, ms),
+    clearTimeout: (id: Any) => clearTimeout(id),
     open: (uri: string) => {
       runner.uris.push(uri);
       const m = /id=([^&]+)/.exec(uri);
@@ -112,8 +119,20 @@ function installGlobals(runner: FakeRunner, adapter: MemAdapter): void {
       return {}; // truthy: the anchor-click fallback is not needed
     },
   };
+  const visListeners = new Set<() => void>();
   (globalThis as Any).document = {
     visibilityState: "visible",
+    addEventListener: (ev: string, cb: () => void) => {
+      if (ev === "visibilitychange") visListeners.add(cb);
+    },
+    removeEventListener: (ev: string, cb: () => void) => {
+      visListeners.delete(cb);
+    },
+    /** Test hook: simulate Android bringing another app to the front. */
+    __goHidden: () => {
+      (globalThis as Any).document.visibilityState = "hidden";
+      for (const cb of [...visListeners]) cb();
+    },
     createElement: () => ({ href: "", rel: "", click: () => undefined, remove: () => undefined }),
     body: { appendChild: () => undefined },
   };
@@ -296,6 +315,54 @@ describe("runOperation round trip through the transport seam", () => {
     // …and the local bridge check surfaced (it needs no Termux round trip).
     expect(__openedModals).toContain("ResultModal");
     expect(h.plugin.lock.active).toBeNull();
+    // The companion setup checklist was opened to show which link is broken…
+    expect(h.runner.uris).toContain("nativegitbridge://setup");
+    // …but only once per session: a second timeout must not reopen it.
+    await h.plugin.cmdStatus(true);
+    expect(h.runner.uris.filter((u) => u === "nativegitbridge://setup")).toHaveLength(1);
+    // Companion answered (app switch happened): drain the probe cleanly.
+    (globalThis as Any).document.__goHidden();
+    await new Promise((r) => setTimeout(r, 1));
+  });
+
+  it("offers the APK download link when the setup URI produces neither ack nor app switch", async () => {
+    const h = await loadPlugin();
+    h.plugin.companionProbeMs = 5; // nobody will answer
+    await h.plugin.openCompanionSetup();
+    expect(h.runner.uris).toContain("nativegitbridge://setup");
+    expect(__openedModals).toContain("ConfirmModal");
+  });
+
+  it("treats the companion ack as proof of installation (no visibility change needed)", async () => {
+    const h = await loadPlugin();
+    h.plugin.companionProbeMs = 50;
+    const p = h.plugin.openCompanionSetup();
+    // The companion bounced obsidian://native-git-bridge-ack back through the
+    // protocol handler the plugin registered in onload.
+    __protocolHandlers.get("native-git-bridge-ack")!({ src: "setup" });
+    await p;
+    expect(__openedModals).not.toContain("ConfirmModal");
+  });
+
+  it("falls back to the app-switch signal for pre-ack companions", async () => {
+    const h = await loadPlugin();
+    h.plugin.companionProbeMs = 50;
+    const p = h.plugin.openCompanionSetup();
+    (globalThis as Any).document.__goHidden(); // old companion: opens, never acks
+    await p;
+    expect(__openedModals).not.toContain("ConfirmModal");
+  });
+
+  it("does not blame the companion for a timeout it acknowledged (runner-side break)", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ opTimeoutSeconds: 1 });
+    h.useFastClient({ advancePerSleepMs: 10_000 });
+    // Companion is alive and acks the trigger, but Termux never answers.
+    h.runner.onTrigger = () => h.plugin.onCompanionAck("run");
+    await h.plugin.cmdStatus(true);
+    expect(h.runner.uris.filter((u) => u === "nativegitbridge://setup")).toHaveLength(0);
+    expect(__openedModals).toContain("ResultModal"); // the local self-check still surfaced
   });
 
   it("cancellation writes the cancel flag for the runner and notifies", async () => {

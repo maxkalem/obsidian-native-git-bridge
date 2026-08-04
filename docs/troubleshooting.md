@@ -8,8 +8,19 @@ status panel).
 ## TIMEOUT — the plugin stopped waiting
 
 The request never got an answer. The plugin writes a cancel flag, so the
-operation will **not** execute later; it also runs the local bridge check
-automatically. In order of likelihood:
+operation will **not** execute later, and runs the local bridge check
+automatically. The companion (≥ 0.4.0) acknowledges every trigger back to the
+plugin, which splits the diagnosis in two:
+
+- **No acknowledgement** — the trigger never reached the companion. The plugin
+  opens the companion's checklist automatically (once per session); if neither
+  an ack nor an app switch follows, it offers the APK download link, because
+  that means the companion is not installed at all.
+- **Acknowledged but no result** — the companion is fine; the break is further
+  down (Termux force-stopped, runner missing/outdated, wrong vault path). See
+  the bridge-check verdict.
+
+In order of likelihood:
 
 1. **Companion app missing or unpermitted.** Open the companion — all three
    checklist items must be green.

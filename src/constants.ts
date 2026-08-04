@@ -28,6 +28,13 @@ export const STORAGE_PREFIX = "ngb:v1";
 export const REPO_RAW_BASE = "https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge";
 export const PAIRING_FILE = "pairing.json";
 
+/** Opens the companion app's setup checklist (permission + Termux + round trip). */
+export const COMPANION_SETUP_URI = "nativegitbridge://setup";
+
+/** Where the companion APK lives (shown when the setup URI opens nothing). */
+export const COMPANION_RELEASES_URL =
+  "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
+
 /** Shown whenever the Termux-side runner is older than RUNNER_MIN_VERSION. */
 export const RUNNER_OUTDATED_HINT =
   "The Termux runner script is outdated. Updating the plugin does not update it — " +

@@ -30,6 +30,7 @@
 | T9 | isomorphic-git (obsidian-git mobile) corrupting the native index | On Android the plugin detects an enabled `obsidian-git` plugin and shows a prominent incompatibility warning; it never disables it without explicit user confirmation. |
 
 | T10 | Pairing token intercepted during initial pairing | `pairing.json` transits vault storage exactly once (installer → plugin), then is deleted by the plugin. An attacker reading it during that window holds the same position as T1 (and the same bounded consequence). Replacing an existing token requires explicit user confirmation in the plugin. |
+| T11 | Forged companion acknowledgement (`obsidian://native-git-bridge-ack` is openable by any app) | The ack carries no payload and grants nothing: it only suppresses the "companion missing" hint and shifts a timeout diagnosis toward the runner side. No operation, path, or token ever flows through it. Worst case is a misleading troubleshooting hint. |
 
 ## Review log
 - 2026-08-04 (runner v3): full re-audit of the runner against this model.

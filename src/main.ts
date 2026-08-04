@@ -52,7 +52,13 @@ import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
-import { PAIRING_FILE, RUNNER_MIN_VERSION, RUNNER_OUTDATED_HINT } from "./constants";
+import {
+  COMPANION_RELEASES_URL,
+  COMPANION_SETUP_URI,
+  PAIRING_FILE,
+  RUNNER_MIN_VERSION,
+  RUNNER_OUTDATED_HINT,
+} from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
 
@@ -494,9 +500,16 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "open-operation-log", name: "Native Git: Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
       { id: "open-status-panel", name: "Native Git: Open status panel", cb: () => void this.openStatusPanel() },
       { id: "bridge-self-check", name: "Native Git: Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
+      { id: "open-companion-setup", name: "Native Git: Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "cancel-operation", name: "Native Git: Cancel current operation when possible", cb: () => void this.cmdCancel() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
+
+    // The companion bounces this back for every URI it handles — the
+    // deterministic "companion installed and reachable" signal.
+    this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) =>
+      this.onCompanionAck((params as Record<string, string> | undefined)?.src)
+    );
   }
 
   // ------------------------------------------------------------ operations
@@ -562,6 +575,7 @@ export default class NativeGitBridgePlugin extends Plugin {
 
     try {
       await this.client.submit(req);
+      const ackBaseline = this.lastCompanionAckMs;
       this.makeTransport().trigger(req.id);
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1000, cancel);
       if (waited.kind === "timeout") {
@@ -577,6 +591,22 @@ export default class NativeGitBridgePlugin extends Plugin {
         );
         // Diagnose locally right away: a Termux round trip would time out too.
         await this.cmdSelfCheck(true);
+        // A timeout usually means the trigger never reached the runner
+        // (companion missing, permission not granted, allow-external-apps off).
+        // If the companion ACKED this very trigger, it is installed and
+        // reachable — the break is further down (Termux / runner / paths), so
+        // opening its checklist would point at the wrong suspect. Otherwise
+        // open the checklist — once per session, not on every retry.
+        if (this.lastCompanionAckMs > ackBaseline) {
+          this.log.add(
+            "warn",
+            action,
+            "Companion acknowledged the trigger but no result arrived: the problem is on the Termux/runner side (see the bridge check)."
+          );
+        } else if (!this.companionSetupAutoOpened) {
+          this.companionSetupAutoOpened = true;
+          void this.openCompanionSetup(); // fire-and-forget: the probe must not delay the caller
+        }
         return null;
       }
       if (waited.kind === "cancelled") {
@@ -617,6 +647,7 @@ export default class NativeGitBridgePlugin extends Plugin {
    * RUNNER_INTERNAL / serialization errors).
    */
   private runnerVersionWarned = false;
+  private companionSetupAutoOpened = false;
   private checkRunnerVersion(result: BridgeResult): void {
     const version = typeof result.runnerVersion === "number" ? result.runnerVersion : 1;
     if (version >= RUNNER_MIN_VERSION || this.runnerVersionWarned) return;
@@ -634,24 +665,133 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   private makeTransport(): TriggerTransport {
-    return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) => {
-      // Primary path; some WebViews return null without dispatching, so fall
-      // back to a synthetic anchor click, which Obsidian routes to Android.
-      let opened: Window | null = null;
-      try {
-        opened = window.open(uri);
-      } catch {
-        opened = null;
-      }
-      if (!opened) {
-        const a = document.createElement("a");
-        a.href = uri;
-        a.rel = "noopener";
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+    return new CompanionIntentTransport(this.deviceSettings.companionUriTemplate, (uri) =>
+      this.openExternalUri(uri)
+    );
+  }
+
+  private openExternalUri(uri: string): void {
+    // Primary path; some WebViews return null without dispatching, so fall
+    // back to a synthetic anchor click, which Obsidian routes to Android.
+    let opened: Window | null = null;
+    try {
+      opened = window.open(uri);
+    } catch {
+      opened = null;
+    }
+    if (!opened) {
+      const a = document.createElement("a");
+      a.href = uri;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+  }
+
+  /** Probe window used by the missing-companion detection; tests shrink it. */
+  companionProbeMs = 4000;
+  /** Time of the last obsidian://native-git-bridge-ack from the companion. */
+  private lastCompanionAckMs = 0;
+  private ackWaiters: Array<() => void> = [];
+
+  /**
+   * The companion (>= 0.4.0) bounces obsidian://native-git-bridge-ack back for
+   * every URI it receives, giving a DETERMINISTIC "companion is installed and
+   * reachable" signal. Registered in onload.
+   */
+  onCompanionAck(src?: string): void {
+    this.lastCompanionAckMs = Date.now();
+    this.log.add("info", "companion", `Companion acknowledged (${src ?? "unknown"}).`);
+    for (const w of this.ackWaiters.splice(0)) w();
+  }
+
+  private awaitCompanionAck(timeoutMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(() => {
+        const i = this.ackWaiters.indexOf(waiter);
+        if (i >= 0) this.ackWaiters.splice(i, 1);
+        resolve(false);
+      }, timeoutMs);
+      const waiter = () => {
+        window.clearTimeout(timer);
+        resolve(true);
+      };
+      this.ackWaiters.push(waiter);
     });
+  }
+
+  /**
+   * Secondary signal: the WebView losing visibility when another activity
+   * comes to the front. Kept alongside the ack because a pre-0.4.0 companion
+   * never acks — visibility is the only evidence it opened. Noisy by nature
+   * (Obsidian goes background for many reasons), which is why the ack, when
+   * available, decides first.
+   */
+  private awaitAppSwitch(): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (document.visibilityState === "hidden") return resolve(true);
+      const onChange = () => {
+        cleanup();
+        resolve(true);
+      };
+      const timer = window.setTimeout(() => {
+        cleanup();
+        resolve(false);
+      }, this.companionProbeMs);
+      const cleanup = () => {
+        window.clearTimeout(timer);
+        document.removeEventListener("visibilitychange", onChange);
+      };
+      document.addEventListener("visibilitychange", onChange);
+    });
+  }
+
+  /** True when the companion showed any sign of life within the probe window. */
+  private async probeCompanion(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let misses = 0;
+      const done = (alive: boolean) => {
+        if (alive) resolve(true);
+        else if (++misses === 2) resolve(false);
+      };
+      void this.awaitCompanionAck(this.companionProbeMs).then(done);
+      void this.awaitAppSwitch().then(done);
+    });
+  }
+
+  /**
+   * Open the companion app's setup checklist. When nothing opens (no handler
+   * for the scheme), the companion is not installed — explain and hand the
+   * user the APK download link.
+   */
+  async openCompanionSetup(): Promise<void> {
+    if (!Platform.isAndroidApp) {
+      new Notice("The companion app exists only on Android.");
+      return;
+    }
+    this.log.add("info", "companion", "Opening companion setup checklist.");
+    this.openExternalUri(COMPANION_SETUP_URI);
+    if (await this.probeCompanion()) return;
+    this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Companion app not installed?",
+        body: [
+          "Nothing opened, which usually means the Git Bridge Companion app is not installed on this device.",
+          "The companion is the only supported trigger: it holds the Android permission to run the Termux runner. Without it, requests just time out.",
+          `Download its APK from ${COMPANION_RELEASES_URL} (asset: git-bridge-companion), install it, grant the 'Run commands in Termux environment' permission, then try again.`,
+        ],
+        confirmLabel: "Copy download link",
+        cancelLabel: "Close",
+      },
+      async (copy) => {
+        if (!copy) return;
+        await navigator.clipboard.writeText(COMPANION_RELEASES_URL);
+        new Notice("Download link copied.");
+      }
+    ).open();
   }
 
   // ------------------------------------------------------------- command impls

@@ -71,6 +71,16 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Companion app checklist")
+      .setDesc(
+        "Opens the Git Bridge Companion setup screen: Termux detected, 'Run commands in Termux' " +
+          "permission, and a live round-trip test. Open it whenever operations time out."
+      )
+      .addButton((b) =>
+        b.setButtonText("Open companion setup").onClick(() => void this.plugin.openCompanionSetup())
+      );
+
+    new Setting(containerEl)
       .setName("Enable on this device")
       .setDesc("Master switch. Off by default on every new device.")
       .addToggle((t) =>
