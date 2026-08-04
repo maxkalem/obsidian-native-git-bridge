@@ -19,6 +19,9 @@ export function validateRepoRelativePath(input: string): PathValidationResult {
   if (/^[A-Za-z]:/.test(p)) return { ok: false, reason: "Absolute (drive) paths are not allowed." };
   if (p.startsWith("/")) return { ok: false, reason: "Absolute paths are not allowed." };
   if (p.startsWith("~")) return { ok: false, reason: "Home-relative paths are not allowed." };
+  // A leading ':' is git pathspec magic (":/", ":(exclude)…", ":!…") and would
+  // change what the path MEANS to git (e.g. ":/" addresses the whole repo).
+  if (p.startsWith(":")) return { ok: false, reason: "Paths must not start with ':' (git pathspec magic)." };
   p = p.replace(/\/{2,}/g, "/");
   while (p.startsWith("./")) p = p.slice(2);
   p = p.replace(/\/+$/, "");
@@ -26,7 +29,10 @@ export function validateRepoRelativePath(input: string): PathValidationResult {
   const segments = p.split("/");
   if (segments.some((s) => s === "..")) return { ok: false, reason: "Path traversal ('..') is not allowed." };
   if (segments.some((s) => s === "")) return { ok: false, reason: "Empty path segment." };
-  if (segments[0]!.toLowerCase() === ".git") return { ok: false, reason: "Paths inside .git are not allowed." };
+  // Any .git segment is rejected, not just a leading one: Android shared
+  // storage is case-insensitive, and nested .git dirs must stay untouchable.
+  if (segments.some((s) => s.toLowerCase() === ".git"))
+    return { ok: false, reason: "Paths inside .git are not allowed." };
   return { ok: true, normalized: p };
 }
 

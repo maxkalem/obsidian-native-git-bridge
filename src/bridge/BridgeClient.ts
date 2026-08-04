@@ -110,7 +110,15 @@ export class BridgeClient {
   async cleanupOld(): Promise<number> {
     let removed = 0;
     const cutoff = this.now() - RESULT_RETENTION_MS;
-    for (const dir of [this.paths.resultsDir, this.paths.cancelDir, this.paths.doneDir]) {
+    // requestsDir is swept too: a request that never reached Termux (companion
+    // missing, transport broken) must not linger forever — and must certainly
+    // not execute days later when a trigger finally succeeds.
+    for (const dir of [
+      this.paths.requestsDir,
+      this.paths.resultsDir,
+      this.paths.cancelDir,
+      this.paths.doneDir,
+    ]) {
       let files: string[];
       try {
         files = await this.fs.listFiles(dir);

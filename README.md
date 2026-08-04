@@ -4,12 +4,13 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Termux** — with first-class **sparse checkout** support. No isomorphic-git, no
 HTTP server, no open ports, nothing running in the background.
 
-> Status: Phases 1–4 implemented — status, sparse safety, pull/commit/push/
-> sync/fetch with conflict handling, per-file history (rename-aware), view at
-> commit, diffs, and confirmed restore. Version History Diff exposes no public
-> provider API (it consumes obsidian-git's private API), so the history/diff UX
-> is provided by this plugin's own views; an upstream adapter PR remains an
-> option (see docs/research-notes.md).
+> Status: implemented — status, sparse safety, pull/commit/push/, sync/fetch with 
+> conflict handling, per-file history (rename-aware), view at commit, diffs, 
+> confirmed restore, plus hardening (parser fuzzing, recovery paths, request 
+> expiry, security re-audit) and release workflows. 
+> Version History Diff exposes no public provider API (it consumes obsidian-git's
+> private API), so the history/diff UX is provided by this plugin's own views; 
+> an upstream adapter PR remains an option (see docs/research-notes.md).
 
 ## Why
 
@@ -46,6 +47,10 @@ in which protected sparse paths appear as changes.
 curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/native-git-bridge/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
+> [!warning] WARNING
+> Be sure to replace \<YourVault\> in this command with the path to your vault. 
+> ==DO NOT== COPY THE COMMAND AS-IS.
+
 The installer sets up everything inside Termux: packages (git, jq, openssh),
 storage access, `allow-external-apps` for the companion, an SSH key (it prints
 the public key to add as a repo deploy key), repo + sparse verification, the
@@ -61,12 +66,12 @@ instead of hanging, and diagnostics reports the detected auth method.
 
 ## Sparse checkout safety
 
-Configure protected paths (defaults: `Private/AgentsMemory`, `Projects/Backus`)
+Configure protected paths (defaults: `Private/AgentsMemory`, `Projects/Backups`)
 in the settings. Before any commit or push the bridge runs
 
 ```
-git status --porcelain=v1 -- "Private/AgentsMemory" "Projects/Backus"
-git diff --cached --name-status -- "Private/AgentsMemory" "Projects/Backus"
+git status --porcelain=v1 -- "Private/AgentsMemory" "Projects/Backups"
+git diff --cached --name-status -- "Private/AgentsMemory" "Projects/Backups"
 ```
 
 and blocks the operation if either reports anything. Sparse omissions are never
@@ -88,16 +93,18 @@ npm run test:e2e  # runner end-to-end against a real sparse-checkout repo
 npm run build     # type check + bundle to main.js
 ```
 
-Docs: `docs/ADR-001-android-invocation.md`, `docs/threat-model.md`,
+Docs: [setup guide](docs/setup.md) · [troubleshooting](docs/troubleshooting.md)
+· [updating](docs/update.md) · [release engineering](docs/release.md) ·
+`docs/ADR-001-android-invocation.md`, `docs/threat-model.md`,
 `docs/protocol.md`, `docs/limitations.md`, `docs/research-notes.md`.
 
 ----
-# HOW TO INSTALL THE PLUGIN
+# HOW TO INSTALL THE PLUGIN MANUALLY
 
 1. Copy the entire "native-git-bridge" folder into your vault at:
- 
+     ``` 
      (YourVault)/.obsidian/plugins/native-git-bridge/
- 
+     ``` 
    After copying it must contain: main.js, manifest.json, styles.css
    (the termux/ folder holds helper scripts; Obsidian ignores it).
  

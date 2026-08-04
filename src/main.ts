@@ -556,7 +556,16 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.makeTransport().trigger(req.id);
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1000, cancel);
       if (waited.kind === "timeout") {
-        this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
+        // Write the cancel flag so an operation the user stopped waiting for
+        // can never execute at some arbitrary later trigger (the runner skips
+        // and archives cancelled requests; one already mid-flight in Termux is
+        // unaffected and its orphan result is reconciled/swept later).
+        await this.client.requestCancel(req.id);
+        this.log.add(
+          "warn",
+          action,
+          `Request ${req.id} timed out after ${req.timeoutSeconds}s (cancel flag written to prevent late execution).`
+        );
         // Diagnose locally right away: a Termux round trip would time out too.
         await this.cmdSelfCheck(true);
         return null;

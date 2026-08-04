@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 2;
+export const RUNNER_MIN_VERSION = 3;
 
 export const DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
 

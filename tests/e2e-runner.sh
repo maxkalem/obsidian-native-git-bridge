@@ -55,8 +55,10 @@ export NGB_CONFIG="$ROOT/conf/config"
 req() { # $1 id, $2 action, $3 token, $4 extra-args-json
   local args="${4:-}"
   [ -z "$args" ] && args='{}'
+  # createdAt must be fresh: the runner expires requests older than
+  # timeoutSeconds + NGB_EXPIRY_GRACE instead of executing them.
   cat > "$RUNTIME/requests/$1.json" <<REQ
-{"protocolVersion":1,"id":"$1","token":"$3","action":"$2","createdAt":"2026-08-03T10:00:00Z","timeoutSeconds":30,"args":$args}
+{"protocolVersion":1,"id":"$1","token":"$3","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":$args}
 REQ
 }
 
@@ -111,6 +113,24 @@ echo "# test: path traversal in protectedPaths rejected"
 req "r-20260803T100006Z-trav01" verify-sparse-safety "$TOKEN" '{"protectedPaths":["../outside"]}'
 bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-trav01.json" >/dev/null' "traversal path -> BAD_REQUEST"
+
+echo "# test: git pathspec magic in file paths rejected (':/' would address the whole repo)"
+req "r-20260803T100006Z-mag001" stage-file "$TOKEN" '{"path":":/","protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-mag001.json" >/dev/null' "stage-file ':/' -> BAD_REQUEST (no repo-wide staging)"
+check 'git diff --cached --quiet' "nothing was staged by the pathspec-magic attempt"
+req "r-20260803T100006Z-mag002" file-log "$TOKEN" '{"path":":(glob)**"}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-mag002.json" >/dev/null' "file-log ':(glob)**' -> BAD_REQUEST"
+
+echo "# test: .git may not appear as any path segment, in any case"
+req "r-20260803T100006Z-git001" discard-file "$TOKEN" '{"path":".GIT/config","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-git001.json" >/dev/null' "discard-file '.GIT/config' -> BAD_REQUEST (case-insensitive guard)"
+check '[ -f .git/config ]' ".git/config untouched"
+req "r-20260803T100006Z-git002" stage-file "$TOKEN" '{"path":"sub/.git/hooks/pre-commit","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100006Z-git002.json" >/dev/null' "nested .git segment -> BAD_REQUEST"
 
 echo "# test: sparse-reapply"
 req "r-20260803T100007Z-reap01" sparse-reapply "$TOKEN"
@@ -345,7 +365,7 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "2" ]' "runnerVersion = 2 reported to the plugin"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "3" ]' "runnerVersion = 3 reported to the plugin"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -353,6 +373,35 @@ mkdir -p "$RUNTIME/processing"
 mv "$RUNTIME/requests/r-20260804T150100Z-intr01.json" "$RUNTIME/processing/"
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150100Z-intr01.json" >/dev/null' "interrupted request recovered and completed"
+check '[ -z "$(ls "$RUNTIME/processing" 2>/dev/null)" ]' "processing/ left empty (no markers, no requests)"
+
+echo "# resilience: a request interrupted TWICE is not retried forever"
+req "r-20260804T150101Z-intr02" status "$TOKEN"
+mv "$RUNTIME/requests/r-20260804T150101Z-intr02.json" "$RUNTIME/processing/"
+: > "$RUNTIME/processing/r-20260804T150101Z-intr02.json.retried"   # simulate: already requeued once
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T150101Z-intr02.json"
+check 'jq -e ".ok == false and .error.code == \"RUNNER_INTERNAL\"" "$RES" >/dev/null' "twice-interrupted request -> RUNNER_INTERNAL result (no infinite requeue)"
+check '[ ! -e "$RUNTIME/processing/r-20260804T150101Z-intr02.json" ]' "poison request archived out of processing/"
+check '[ ! -e "$RUNTIME/processing/r-20260804T150101Z-intr02.json.retried" ]' "retry marker removed"
+
+echo "# recovery: stale requests expire instead of executing much later"
+cat > "$RUNTIME/requests/r-20260803T090000Z-exp001.json" <<REQ
+{"protocolVersion":1,"id":"r-20260803T090000Z-exp001","token":"$TOKEN","action":"sync","createdAt":"2026-08-03T09:00:00Z","timeoutSeconds":30,"args":{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"stale sync that must never run"}}
+REQ
+HEAD_BEFORE_EXP="$(git rev-parse HEAD)"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260803T090000Z-exp001.json"
+check 'jq -e ".ok == false and .error.code == \"EXPIRED\"" "$RES" >/dev/null' "day-old sync -> EXPIRED, not executed"
+check '[ "$(git rev-parse HEAD)" = "$HEAD_BEFORE_EXP" ]' "no commit was created by the expired request"
+check '! git log --format=%s | grep -q "stale sync that must never run"' "stale message never entered history"
+
+echo "# recovery: a fresh request with an unparsable createdAt still executes (fail open)"
+cat > "$RUNTIME/requests/r-20260804T150102Z-exp002.json" <<REQ
+{"protocolVersion":1,"id":"r-20260804T150102Z-exp002","token":"$TOKEN","action":"ping","createdAt":"not-a-date","timeoutSeconds":30,"args":{}}
+REQ
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150102Z-exp002.json" >/dev/null' "unparsable createdAt fails open (broken clock cannot brick the bridge)"
 
 echo "# phase 5: detached HEAD - status works, push refuses (no force, no guessing)"
 MAIN_BRANCH="$(git symbolic-ref --short HEAD)"
@@ -423,7 +472,7 @@ CONF
 req_ub() { # $1 id, $2 action, $3 extra-args-json
   local args="${3:-}"; [ -z "$args" ] && args='{}'
   cat > "$UB_RUNTIME/requests/$1.json" <<REQ
-{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"2026-08-04T16:00:00Z","timeoutSeconds":30,"args":$args}
+{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":$args}
 REQ
 }
 req_ub "r-20260804T160300Z-unb001" status

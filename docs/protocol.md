@@ -61,7 +61,8 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
   `sparseCheckoutList`); parsing happens in TypeScript so bash stays trivial and
   auditable.
 - `error`: `{ "code": "AUTH" | "BAD_REQUEST" | "GIT_FAILED" | "CANCELLED" |
-  "SAFETY_BLOCKED" | "TIMEOUT", "message": "…" , "stdout": "…", "stderr": "…" }`.
+  "SAFETY_BLOCKED" | "TIMEOUT" | "EXPIRED" | "RUNNER_INTERNAL" | "CONFLICT" |
+  "FILE_ABSENT" | "TOO_LARGE", "message": "…" , "stdout": "…", "stderr": "…" }`.
 - Written atomically: `results/<id>.json.tmp` → `mv` → `results/<id>.json`.
 
 ## `status` result data
@@ -76,11 +77,22 @@ The **plugin** computes the verdict; the runner additionally refuses `commit`/`p
 `sync` actions itself if either output is non-empty (defense in depth).
 
 ## Lifecycle rules
-- Plugin polls `results/<id>.json` every 400 ms until `timeoutSeconds` (then reports
-  TIMEOUT but leaves the request in place — the runner may still be waiting for a tap).
+- Plugin polls `results/<id>.json` every 400 ms until `timeoutSeconds`. On timeout it
+  reports TIMEOUT, writes `cancel/<id>` (so the request can never *execute* at some
+  later trigger) and leaves the request file for the runner to archive.
 - Cancellation: plugin creates `cancel/<id>`; a not-yet-started request is skipped by
   the runner with a CANCELLED result; a running mutating git command is never killed
   mid-flight (index safety) — cancellation applies between steps.
-- Both sides delete `done/`, `results/`, `cancel/` entries older than 24 h.
+- Expiry (runner ≥ 3): a queued request older than `createdAt + timeoutSeconds +
+  600 s` is answered with an EXPIRED error instead of being executed — a days-old
+  `sync` must never surprise the user with a commit. An unparsable `createdAt`
+  fails open (executes), so a broken clock cannot brick the bridge.
+- Interrupted requests (found in `processing/` at startup) are requeued exactly
+  once, tracked by a `<name>.retried` marker; a second interruption yields a
+  RUNNER_INTERNAL result and the request is archived, so `processing/` never
+  accumulates and a poison request cannot loop forever.
+- Both sides delete `done/`, `results/`, `cancel/` entries older than 24 h; the
+  plugin also sweeps `requests/` older than 24 h (a request that never reached
+  Termux must not linger), and the runner sweeps orphaned `.retried` markers.
 - The runner processes requests oldest-first, one at a time, and exits when the
   queue is empty. It never daemonizes.

@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=2
+RUNNER_VERSION=3
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -56,13 +56,22 @@ valid_id() { printf '%s' "$1" | grep -Eq '^r-[0-9A-Za-z.TZ:-]{1,64}$'; }
 
 valid_rel_path() {
   # repository-relative: not empty, no leading /, no backslash, no '..' segment,
-  # no control chars, not inside .git
+  # no control chars, not inside .git, no git pathspec magic.
   local p="$1"
   [ -n "$p" ] || return 1
   case "$p" in
-    /*|*\\*|~*) return 1 ;;
+    # A leading ':' is git pathspec magic (":/", ":(exclude)…", ":!…"). It
+    # would change what a path argument MEANS to git — ":/" as a stage-file
+    # path would stage the whole repo, bypassing the protected-path excludes.
+    /*|*\\*|~*|:*) return 1 ;;
     ..|../*|*/..|*/../*) return 1 ;;
-    .git|.git/*) return 1 ;;
+  esac
+  # Reject .git as ANY segment, case-insensitively: Android shared storage is
+  # case-insensitive, so ".GIT/config" would resolve to the real .git/config.
+  local lower
+  lower="$(printf '%s' "$p" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    .git|.git/*|*/.git|*/.git/*) return 1 ;;
   esac
   printf '%s' "$p" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
   return 0
@@ -276,6 +285,9 @@ action_diagnostics() {
 # ---- phase 3 helpers ----------------------------------------------------------
 
 NGB_NET_TIMEOUT="${NGB_NET_TIMEOUT:-120}"
+# Seconds past createdAt+timeoutSeconds before a queued request is expired
+# instead of executed (covers a manual recovery run of the runner).
+NGB_EXPIRY_GRACE="${NGB_EXPIRY_GRACE:-600}"
 
 run_git_net() {
   # Network git commands wrapped in a hard timeout so a dead link cannot hang the runner.
@@ -756,6 +768,27 @@ process_request() {
     return
   fi
 
+  # Expiry guard: a request the plugin has long stopped waiting for must not
+  # execute at an arbitrary later trigger (a days-old "sync" surprising the
+  # user with a commit). Grace covers the documented manual-recovery run.
+  # Unparsable timestamps fail OPEN (execute) so a broken clock cannot brick
+  # the bridge; the plugin additionally writes a cancel flag on timeout.
+  local created created_s now_s timeout_s
+  created=$(jq -r '.createdAt // empty' "$req_file")
+  timeout_s=$(jq -r '.timeoutSeconds // 90' "$req_file")
+  printf '%s' "$timeout_s" | grep -Eq '^[0-9]{1,5}$' || timeout_s=90
+  if [ -n "$created" ] && created_s="$(date -u -d "$created" +%s 2>/dev/null)"; then
+    now_s="$(date -u +%s)"
+    if [ $((now_s - created_s)) -gt $((timeout_s + NGB_EXPIRY_GRACE)) ]; then
+      log "EXPIRED $id (action=$action created=$created timeout=${timeout_s}s)"
+      write_result "$id" "$action" false 1 'null' \
+        "$(err_json EXPIRED "Request expired before execution (created $created; the plugin stopped waiting long ago). Nothing was executed - run the operation again." "" "")" \
+        "$started"
+      mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
+      return
+    fi
+  fi
+
   DATA='null'; ERROR='null'
   local ok=true ec=0
   case "$action" in
@@ -796,6 +829,10 @@ process_request() {
 
 cleanup_old() {
   find "$DONE_DIR" "$RES_DIR" "$CAN_DIR" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
+  # Backstop for orphaned retry markers (their request is long gone). Live
+  # *.json in processing/ never accumulates: the recovery loop drains it on
+  # every run (requeue once, then give up with a result).
+  find "$PROC_DIR" -maxdepth 1 -type f -name '*.retried' -mmin +1440 -delete 2>/dev/null || true
 }
 
 # ---- main --------------------------------------------------------------------
@@ -824,11 +861,29 @@ acquire_lock() {
 
 acquire_lock
 
-# Requests interrupted mid-flight (device killed Termux) are retried once.
+# Requests interrupted mid-flight (device killed Termux) are retried ONCE.
+# A `.retried` marker enforces the cap: a request that reliably kills the
+# runner must not requeue forever. Markers are removed on completion, on
+# give-up, and (as a backstop) by the 24 h sweep.
 shopt -s nullglob
 for stale in "$PROC_DIR"/*.json; do
-  log "RECOVER requeueing interrupted request $(basename "$stale")"
-  mv "$stale" "$REQ_DIR/" 2>/dev/null || rm -f "$stale"
+  if [ -e "$stale.retried" ]; then
+    log "RECOVER giving up on $(basename "$stale") (already retried once)"
+    rid=$(jq -r '.id // empty' "$stale" 2>/dev/null)
+    ract=$(jq -r '.action // empty' "$stale" 2>/dev/null)
+    if valid_id "$rid"; then
+      write_result "$rid" "${ract:-unknown}" false 1 'null' \
+        "$(err_json RUNNER_INTERNAL "The request was interrupted twice and will not be retried again (see runner.log)." "" "")" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    mv "$stale" "$DONE_DIR/" 2>/dev/null || rm -f "$stale"
+    rm -f "$stale.retried"
+    json_cleanup
+  else
+    : > "$stale.retried"
+    log "RECOVER requeueing interrupted request $(basename "$stale")"
+    mv "$stale" "$REQ_DIR/" 2>/dev/null || rm -f "$stale"
+  fi
 done
 
 pending=("$REQ_DIR"/*.json)
@@ -842,6 +897,7 @@ else
     claimed="$PROC_DIR/$(basename "$f")"
     if mv "$f" "$claimed" 2>/dev/null; then
       process_request "$claimed"
+      rm -f "$claimed.retried"   # completed: forget any interruption marker
     else
       log "SKIP $(basename "$f") already claimed"
     fi

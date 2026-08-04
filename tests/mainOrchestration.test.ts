@@ -78,7 +78,7 @@ interface FakeRunner {
   onTrigger: ((id: string) => void) | null;
 }
 
-function okStatusResult(id: string, runnerVersion = 2) {
+function okStatusResult(id: string, runnerVersion = 3) {
   return JSON.stringify({
     protocolVersion: 1,
     id,
@@ -272,15 +272,17 @@ describe("runOperation round trip through the transport seam", () => {
     expect(second).toBe(1); // warned once per session, not per operation
   });
 
-  it("on timeout leaves the request queued and runs the local self-check", async () => {
+  it("on timeout writes the cancel flag (no late execution) and runs the local self-check", async () => {
     const h = await loadPlugin();
     await enableBridge(h);
     await h.plugin.updateDeviceSettings({ opTimeoutSeconds: 1 });
     h.useFastClient({ advancePerSleepMs: 10_000 }); // one sleep blows the deadline
     h.runner.onTrigger = null; // nobody answers
     await h.plugin.cmdStatus(true);
-    // The request stays queued for the next successful trigger to drain…
+    // The request file stays for the runner to archive, but the cancel flag
+    // guarantees it can never EXECUTE at some arbitrary later trigger.
     expect(requestFiles(h.adapter)).toHaveLength(1);
+    expect(cancelFiles(h.adapter)).toHaveLength(1);
     // …and the local bridge check surfaced (it needs no Termux round trip).
     expect(__openedModals).toContain("ResultModal");
     expect(h.plugin.lock.active).toBeNull();

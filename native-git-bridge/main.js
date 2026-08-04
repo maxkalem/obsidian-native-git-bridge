@@ -31,7 +31,7 @@ var import_obsidian12 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 2;
+var RUNNER_MIN_VERSION = 3;
 var DEFAULT_PROTECTED_PATHS = ["Private/AgentsMemory", "Projects/Backus"];
 var RUNTIME_DIR_NAME = "runtime";
 var REQUESTS_DIR = "requests";
@@ -206,6 +206,7 @@ function validateRepoRelativePath(input) {
   if (/^[A-Za-z]:/.test(p)) return { ok: false, reason: "Absolute (drive) paths are not allowed." };
   if (p.startsWith("/")) return { ok: false, reason: "Absolute paths are not allowed." };
   if (p.startsWith("~")) return { ok: false, reason: "Home-relative paths are not allowed." };
+  if (p.startsWith(":")) return { ok: false, reason: "Paths must not start with ':' (git pathspec magic)." };
   p = p.replace(/\/{2,}/g, "/");
   while (p.startsWith("./")) p = p.slice(2);
   p = p.replace(/\/+$/, "");
@@ -213,7 +214,8 @@ function validateRepoRelativePath(input) {
   const segments = p.split("/");
   if (segments.some((s) => s === "..")) return { ok: false, reason: "Path traversal ('..') is not allowed." };
   if (segments.some((s) => s === "")) return { ok: false, reason: "Empty path segment." };
-  if (segments[0].toLowerCase() === ".git") return { ok: false, reason: "Paths inside .git are not allowed." };
+  if (segments.some((s) => s.toLowerCase() === ".git"))
+    return { ok: false, reason: "Paths inside .git are not allowed." };
   return { ok: true, normalized: p };
 }
 function validateProtectedPaths(inputs) {
@@ -747,7 +749,12 @@ var BridgeClient = class {
   async cleanupOld() {
     let removed = 0;
     const cutoff = this.now() - RESULT_RETENTION_MS;
-    for (const dir of [this.paths.resultsDir, this.paths.cancelDir, this.paths.doneDir]) {
+    for (const dir of [
+      this.paths.requestsDir,
+      this.paths.resultsDir,
+      this.paths.cancelDir,
+      this.paths.doneDir
+    ]) {
       let files;
       try {
         files = await this.fs.listFiles(dir);
@@ -2377,7 +2384,12 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       this.makeTransport().trigger(req.id);
       const waited = await this.client.awaitResult(req.id, req.timeoutSeconds * 1e3, cancel);
       if (waited.kind === "timeout") {
-        this.log.add("warn", action, `Request ${req.id} timed out after ${req.timeoutSeconds}s (request left queued).`);
+        await this.client.requestCancel(req.id);
+        this.log.add(
+          "warn",
+          action,
+          `Request ${req.id} timed out after ${req.timeoutSeconds}s (cancel flag written to prevent late execution).`
+        );
         await this.cmdSelfCheck(true);
         return null;
       }

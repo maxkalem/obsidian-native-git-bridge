@@ -135,18 +135,23 @@ describe("BridgeClient recovery paths", () => {
     expect(polls).toBe(3);
   });
 
-  it("sweeps results, cancel flags and done archives — but never files with unparsable ids", async () => {
+  it("sweeps queued requests, results, cancel flags and done archives — but never files with unparsable ids", async () => {
     const fs = memFS();
     const nowRef = { t: Date.parse("2026-08-05T00:00:00Z") };
     const c = client(fs, nowRef);
+    // A request that never reached Termux must not linger (nor execute later).
+    fs.files.set(paths.requestFile("r-20260801T000000Z-old"), "{}");
     fs.files.set(paths.resultFile("r-20260801T000000Z-old"), "{}");
     fs.files.set(paths.cancelFile("r-20260801T000000Z-old"), "");
     fs.files.set(`${paths.doneDir}/r-20260801T000000Z-old.json`, "{}");
+    // A FRESH queued request must survive the sweep.
+    fs.files.set(paths.requestFile("r-20260804T235900Z-new"), "{}");
     // A name the retention logic cannot date must never be deleted.
     fs.files.set(`${paths.resultsDir}/not-a-request-id.json`, "{}");
     fs.files.set(`${paths.doneDir}/invalid-1754300000.json`, "{}");
     const removed = await c.cleanupOld();
-    expect(removed).toBe(3);
+    expect(removed).toBe(4);
+    expect(fs.files.has(paths.requestFile("r-20260804T235900Z-new"))).toBe(true);
     expect(fs.files.has(`${paths.resultsDir}/not-a-request-id.json`)).toBe(true);
     expect(fs.files.has(`${paths.doneDir}/invalid-1754300000.json`)).toBe(true);
   });

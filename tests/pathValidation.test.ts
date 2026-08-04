@@ -31,6 +31,26 @@ describe("validateRepoRelativePath", () => {
     expect(validateRepoRelativePath("a\u0000b").ok).toBe(false);
     expect(validateRepoRelativePath("a\nb").ok).toBe(false);
   });
+  it("rejects .git as ANY segment, case-insensitively (Android storage is case-insensitive)", () => {
+    expect(validateRepoRelativePath(".GIT/config").ok).toBe(false);
+    expect(validateRepoRelativePath(".Git/hooks/pre-commit").ok).toBe(false);
+    expect(validateRepoRelativePath("sub/.git/config").ok).toBe(false);
+    expect(validateRepoRelativePath("sub/.GiT/hooks/x").ok).toBe(false);
+    expect(validateRepoRelativePath("nested/repo/.git").ok).toBe(false);
+    // Lookalikes that are NOT .git stay valid.
+    expect(validateRepoRelativePath(".gitignore").ok).toBe(true);
+    expect(validateRepoRelativePath("sub/.github/workflows/x.yml").ok).toBe(true);
+  });
+  it("rejects git pathspec magic (leading ':')", () => {
+    // ':/' would address the whole repo; ':(exclude)x' / ':!x' invert meaning.
+    expect(validateRepoRelativePath(":/").ok).toBe(false);
+    expect(validateRepoRelativePath(":/Notes/a.md").ok).toBe(false);
+    expect(validateRepoRelativePath(":(exclude)Private").ok).toBe(false);
+    expect(validateRepoRelativePath(":!Private").ok).toBe(false);
+    // ':' elsewhere in a name is a plain character ("a:b.md" is already
+    // rejected by the drive-letter rule; a longer prefix is not).
+    expect(validateRepoRelativePath("ab:c.md").ok).toBe(true);
+  });
 });
 
 describe("validateProtectedPaths", () => {
