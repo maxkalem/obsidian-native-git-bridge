@@ -28,9 +28,13 @@ echo "backus spec" > Projects/Backus/spec.md
 git add -A && git commit -qm "initial" && git push -q origin HEAD
 
 echo "# setup: non-cone sparse checkout excluding protected dirs"
-git sparse-checkout init 2>/dev/null
-git sparse-checkout set '/*' '!Private/AgentsMemory/' '!Projects/Backus/' 2>/dev/null
+# git >= 2.36 defaults `sparse-checkout set` to cone mode, which rejects
+# exclusion patterns ("specify directories rather than patterns") and would
+# silently leave the cone default `/* !/*/` in place. Request pattern mode
+# explicitly — the user's real vault uses non-cone rules.
+git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' 2>/dev/null
 check '[ "$(git config core.sparseCheckout)" = "true" ]' "core.sparseCheckout enabled"
+check '[ "$(git config core.sparseCheckoutCone 2>/dev/null || echo false)" != "true" ]' "non-cone (pattern) mode active"
 check '[ ! -e Private/AgentsMemory/mem.md ]' "protected file removed from worktree by sparse checkout"
 check 'git ls-files -v | grep -q "^S Private/AgentsMemory/mem.md"' "skip-worktree bit set on protected file"
 check '[ -z "$(git status --porcelain=v1)" ]' "sparse omission does NOT appear as a change (not a deletion)"
@@ -310,8 +314,11 @@ for i in range(3000):
         f.write("x\n")
 GEN
 git add -A >/dev/null 2>&1 && git commit -qm "bulk: many files"
-# mark them skip-worktree so `git ls-files -v | grep ^S` output exceeds 128KB
-git ls-files Bulk | xargs -d '\n' git update-index --skip-worktree
+# Hide them via a sparse exclusion so `git ls-files -v | grep ^S` exceeds 128KB.
+# (Manual `update-index --skip-worktree` is ignored for worktree-present files
+# when sparse checkout is active on git >= 2.35; real vaults get their S bits
+# from sparse patterns anyway, so this is also the more faithful fixture.)
+git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' '!Bulk/' 2>/dev/null
 SKIP_BYTES="$(git ls-files -v | grep '^S ' | wc -c)"
 check '[ "$SKIP_BYTES" -gt 131072 ]' "test fixture really exceeds the 128KB argument limit ($SKIP_BYTES bytes)"
 req "r-20260804T110000Z-big001" status "$TOKEN"
@@ -321,9 +328,10 @@ check '[ -f "$RES" ]' "result file written despite huge payload"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok on a large sparse repo"
 check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 3000 ]' "skip-worktree count reported (not the full list)"
 check '! grep -q "ERROR building" "$RUNTIME/runner.log"' "no serialization errors in runner.log"
-# clean up the fixture so later assertions are unaffected
-git ls-files Bulk | xargs -d '\n' git update-index --no-skip-worktree
-git rm -rq --cached Bulk >/dev/null 2>&1 || true
+# clean up the fixture so later assertions are unaffected: restore the original
+# sparse rules (Bulk reappears in the worktree), then remove it for real
+git sparse-checkout set --no-cone '/*' '!Private/AgentsMemory/' '!Projects/Backus/' 2>/dev/null
+git rm -rq Bulk >/dev/null 2>&1 || true
 rm -rf Bulk
 git commit -qm "bulk: remove" >/dev/null 2>&1 || true
 
@@ -345,6 +353,135 @@ mkdir -p "$RUNTIME/processing"
 mv "$RUNTIME/requests/r-20260804T150100Z-intr01.json" "$RUNTIME/processing/"
 bash "$RUNNER"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150100Z-intr01.json" >/dev/null' "interrupted request recovered and completed"
+
+echo "# phase 5: detached HEAD - status works, push refuses (no force, no guessing)"
+MAIN_BRANCH="$(git symbolic-ref --short HEAD)"
+git checkout -q --detach
+req "r-20260804T160000Z-det001" status "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T160000Z-det001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok on detached HEAD"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head (detached)"' "detached state reported"
+req "r-20260804T160001Z-det002" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T160001Z-det002.json"
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "push on detached HEAD -> GIT_FAILED"
+check 'jq -er ".error.message" "$RES" | grep -qi "detached"' "error names the detached HEAD"
+git checkout -q "$MAIN_BRANCH"
+
+echo "# phase 5: non-fast-forward push is rejected (and never forced)"
+# The conflict test above intentionally left local and remote histories diverged
+# on Notes/note.md (abort-merge keeps the local commit). Reconcile that
+# OUT-OF-BAND first (the bridge never auto-resolves), so this section tests a
+# pure non-fast-forward, not the leftover content conflict.
+git fetch -q origin
+git merge --no-edit -q "origin/$MAIN_BRANCH" >/dev/null 2>&1 || true
+git checkout --theirs -- Notes/note.md 2>/dev/null || true
+git add -A && git commit -qm "e2e: resolve standing conflict out-of-band" 2>/dev/null || true
+git push -q origin "$MAIN_BRANCH"
+check '[ "$(git rev-parse HEAD)" = "$(git -C "$ROOT/remote.git" rev-parse HEAD)" ]' "slate clean before non-ff test"
+echo "remote goes first" > "$ROOT/other/NffRemote.md"
+git -C "$ROOT/other" pull -q --no-rebase 2>/dev/null || true
+git -C "$ROOT/other" add -A && git -C "$ROOT/other" commit -qm "other: nff" && git -C "$ROOT/other" push -q
+REMOTE_NFF="$(git -C "$ROOT/remote.git" rev-parse HEAD)"
+echo "local diverges" > Notes/nff-local.md
+git add Notes/nff-local.md && git commit -qm "local: nff"
+req "r-20260804T160100Z-nff001" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T160100Z-nff001.json"
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "non-ff push -> GIT_FAILED"
+check 'jq -er ".error.stderr" "$RES" | grep -Eqi "rejected|fetch first|non-fast-forward"' "rejection reason surfaced to the user"
+check '[ "$(git -C "$ROOT/remote.git" rev-parse HEAD)" = "$REMOTE_NFF" ]' "remote untouched (no force push)"
+# sync integrates the remote commit (different files: clean merge) and publishes
+req "r-20260804T160101Z-nff002" sync "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"],"message":"e2e: recover from nff"}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T160101Z-nff002.json" >/dev/null' "sync recovers from non-ff (merge + push)"
+check '[ "$(git rev-parse HEAD)" = "$(git -C "$ROOT/remote.git" rev-parse HEAD)" ]' "remote equals local after recovery"
+
+echo "# phase 5: branch without upstream - push -u publishes and binds it"
+git checkout -q -b e2e-no-upstream
+echo "nub" > Notes/nub.md
+git add Notes/nub.md && git commit -qm "nub: local only"
+req "r-20260804T160200Z-nub001" push "$TOKEN" '{"protectedPaths":["Private/AgentsMemory","Projects/Backus"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T160200Z-nub001.json" >/dev/null' "push ok on branch without upstream"
+check 'git -C "$ROOT/remote.git" rev-parse --verify -q refs/heads/e2e-no-upstream >/dev/null' "remote branch created"
+check '[ "$(git rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null)" = "origin/e2e-no-upstream" ]' "upstream bound by push -u"
+git checkout -q "$MAIN_BRANCH"
+
+echo "# phase 5: unborn branch (fresh repo, no commit yet)"
+UB_DIR="$ROOT/unborn"
+git init -q "$UB_DIR"
+git -C "$UB_DIR" config user.email u@e; git -C "$UB_DIR" config user.name u
+UB_RUNTIME="$UB_DIR/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$UB_RUNTIME/requests" "$ROOT/conf-unborn"
+cat > "$ROOT/conf-unborn/config" <<CONF
+NGB_REPO_DIR="$UB_DIR"
+NGB_TOKEN="$TOKEN"
+NGB_RUNTIME_DIR="$UB_RUNTIME"
+CONF
+req_ub() { # $1 id, $2 action, $3 extra-args-json
+  local args="${3:-}"; [ -z "$args" ] && args='{}'
+  cat > "$UB_RUNTIME/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"2026-08-04T16:00:00Z","timeoutSeconds":30,"args":$args}
+REQ
+}
+req_ub "r-20260804T160300Z-unb001" status
+NGB_CONFIG="$ROOT/conf-unborn/config" bash "$RUNNER"
+RES="$UB_RUNTIME/results/r-20260804T160300Z-unb001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok on unborn branch"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.oid (initial)"' "unborn state reported as (initial)"
+echo "first" > "$UB_DIR/first.md"
+req_ub "r-20260804T160301Z-unb002" commit '{"protectedPaths":[],"message":"e2e: first commit on unborn branch"}'
+NGB_CONFIG="$ROOT/conf-unborn/config" bash "$RUNNER"
+RES="$UB_RUNTIME/results/r-20260804T160301Z-unb002.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "first commit ok"
+check '[ "$(jq -r ".data.committed" "$RES")" = "true" ]' "root commit created"
+check '[ "$(git -C "$UB_DIR" rev-list --count HEAD)" = "1" ]' "repository has exactly one commit"
+
+echo "# phase 5: repo without a remote - deterministic results, no hang"
+# `git fetch --prune` with no remote configured is a successful no-op (exit 0),
+# so the runner reports ok=true; push names origin explicitly and must fail.
+req_ub "r-20260804T160400Z-nrm001" fetch
+NGB_CONFIG="$ROOT/conf-unborn/config" bash "$RUNNER"
+RES="$UB_RUNTIME/results/r-20260804T160400Z-nrm001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "fetch without remote is a no-op success (git semantics)"
+check '[ "$(jq -r ".data.remoteUrl" "$RES")" = "" ]' "status data shows no remote URL"
+req_ub "r-20260804T160401Z-nrm002" push '{"protectedPaths":[]}'
+NGB_CONFIG="$ROOT/conf-unborn/config" bash "$RUNNER"
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$UB_RUNTIME/results/r-20260804T160401Z-nrm002.json" >/dev/null' "push without remote -> GIT_FAILED"
+
+echo "# phase 5: expired PAT - non-interactive fast failure, credentials never leak"
+PORT_FILE="$ROOT/http401.port"
+python3 - "$PORT_FILE" <<'PY' &
+import sys, http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def _reply(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="git"')
+        self.end_headers()
+    do_GET = do_POST = do_HEAD = lambda self: self._reply()
+    def log_message(self, *a): pass
+with socketserver.TCPServer(("127.0.0.1", 0), H) as srv:
+    open(sys.argv[1], "w").write(str(srv.server_address[1]))
+    srv.serve_forever()
+PY
+SRV_PID=$!
+for _ in $(seq 1 50); do [ -s "$PORT_FILE" ] && break; sleep 0.1; done
+PORT="$(cat "$PORT_FILE")"
+ORIG_URL="$(git remote get-url origin)"
+git remote set-url origin "http://user:expiredpat123@127.0.0.1:$PORT/repo.git"
+T0=$(date +%s)
+req "r-20260804T160500Z-pat001" fetch "$TOKEN"
+bash "$RUNNER"
+T1=$(date +%s)
+RES="$RUNTIME/results/r-20260804T160500Z-pat001.json"
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "expired PAT -> GIT_FAILED (no hang on a prompt)"
+check '[ $((T1 - T0)) -lt 30 ]' "auth failure is fast ($((T1 - T0))s), not a timeout"
+check '! grep -q "expiredpat123" "$RES"' "credential never appears in the result (redacted)"
+check '! grep -q "expiredpat123" "$RUNTIME/runner.log"' "credential never appears in runner.log"
+git remote set-url origin "$ORIG_URL"
+kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
 
 echo "# test: runner exits (no daemon) and log has no token"
 check '! grep -q "$TOKEN" "$RUNTIME/runner.log"' "token never written to runner.log"

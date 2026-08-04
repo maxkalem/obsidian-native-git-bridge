@@ -1,0 +1,109 @@
+name: Release
+
+# Obsidian convention: the release tag is the manifest version WITHOUT a "v"
+# prefix (e.g. `0.5.0`), and `main.js` / `manifest.json` / `styles.css` are
+# attached as top-level release assets.
+on:
+  push:
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Verify tag matches manifest version
+        run: |
+          MV=$(jq -r .version manifest.json)
+          [ "$MV" = "${GITHUB_REF_NAME}" ] \
+            || { echo "Tag ${GITHUB_REF_NAME} != manifest version $MV"; exit 1; }
+
+      - name: Install dependencies (locked)
+        run: npm ci
+
+      - name: Tests (unit + e2e)
+        run: |
+          npm test
+          npm run test:e2e
+
+      - name: Build plugin
+        run: npm run build
+
+      # Release assets must be byte-identical to what a manual install (copying
+      # native-git-bridge/) or BRAT (fetching the release) delivers.
+      - name: Committed artifacts must match the build exactly
+        run: |
+          git diff --exit-code -- \
+            manifest.json styles.css versions.json \
+            native-git-bridge/main.js \
+            native-git-bridge/manifest.json \
+            native-git-bridge/styles.css
+
+      # ---- companion APK -----------------------------------------------------
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build companion APKs (debug + unsigned release)
+        run: |
+          gradle -p companion :app:assembleDebug :app:assembleRelease
+          cp companion/app/build/outputs/apk/debug/app-debug.apk \
+             git-bridge-companion-debug.apk
+          cp companion/app/build/outputs/apk/release/app-release-unsigned.apk \
+             git-bridge-companion-release-unsigned.apk
+
+      # Signing runs only when the keystore secrets are configured — see
+      # docs/release.md for how to create the keystore and add the secrets.
+      - name: Sign release APK (optional)
+        if: ${{ vars.NGB_HAS_KEYSTORE == 'true' }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.NGB_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.NGB_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.NGB_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.NGB_KEY_PASSWORD }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > /tmp/ngb-release.jks
+          BT="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$BT/zipalign" -f 4 git-bridge-companion-release-unsigned.apk \
+            git-bridge-companion.apk
+          "$BT/apksigner" sign \
+            --ks /tmp/ngb-release.jks \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            git-bridge-companion.apk
+          "$BT/apksigner" verify git-bridge-companion.apk
+          rm -f /tmp/ngb-release.jks
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
+          body: |
+            Plugin `${{ github.ref_name }}`. Remember: updating `main.js` in the
+            vault does **not** update the Termux runner — re-run the install
+            command in Termux after updating (see docs/update.md).
+          files: |
+            native-git-bridge/main.js
+            native-git-bridge/manifest.json
+            native-git-bridge/styles.css
+            native-git-bridge/termux/native-git-bridge-runner.sh
+            native-git-bridge/termux/install.sh
+            native-git-bridge/termux/bootstrap.sh
+            git-bridge-companion-debug.apk
+            git-bridge-companion-release-unsigned.apk
+            git-bridge-companion.apk
+        # The signed APK is only present when signing ran; softprops tolerates
+        # missing patterns with fail_on_unmatched_files unset.

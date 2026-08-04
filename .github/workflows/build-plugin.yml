@@ -1,0 +1,62 @@
+name: Build plugin
+
+on:
+  push:
+    paths-ignore: ["companion/**", "docs/**", "*.md"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies (locked)
+        run: npm ci
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      - name: End-to-end tests (real git, sparse repo)
+        run: npm run test:e2e
+
+      - name: Type-check and bundle (strict tsc + esbuild)
+        run: npm run build
+
+      # The build syncs root manifest.json/styles.css into native-git-bridge/
+      # and rebuilds main.js. If anything differs from what is committed, the
+      # committed artifacts are STALE (src/ changed without rebuilding, or the
+      # copies were edited by hand) — that would make manual install, BRAT and
+      # releases ship different bytes. Fail loudly.
+      - name: Committed artifacts must match the build exactly
+        run: |
+          git diff --exit-code -- \
+            manifest.json styles.css versions.json \
+            native-git-bridge/main.js \
+            native-git-bridge/manifest.json \
+            native-git-bridge/styles.css \
+          || { echo "::error::Committed build artifacts are stale. Run 'npm run build' and commit the result."; exit 1; }
+
+      - name: Version consistency (manifest vs package vs versions.json)
+        run: |
+          MV=$(jq -r .version manifest.json)
+          PV=$(jq -r .version package.json)
+          [ "$MV" = "$PV" ] || { echo "manifest.json ($MV) != package.json ($PV)"; exit 1; }
+          jq -e --arg v "$MV" 'has($v)' versions.json >/dev/null \
+            || { echo "versions.json has no entry for $MV"; exit 1; }
+
+      - name: Upload plugin bundle
+        uses: actions/upload-artifact@v5
+        with:
+          name: native-git-bridge-plugin
+          path: |
+            native-git-bridge/main.js
+            native-git-bridge/manifest.json
+            native-git-bridge/styles.css
+            native-git-bridge/termux/
