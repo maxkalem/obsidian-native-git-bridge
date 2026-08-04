@@ -4,6 +4,12 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Termux** — with first-class **sparse checkout** support. No isomorphic-git, no
 HTTP server, no open ports, nothing running in the background.
 
+**Android-only by design.** On desktop the plugin loads, explains itself in the
+settings tab and disables every operation — there is no Termux to bridge to;
+use git directly or [obsidian-git](https://github.com/Vinzent03/obsidian-git)
+there. Its natural habitat is a vault synced between a desktop (any git
+tooling) and an Android device (this bridge).
+
 > Status: implemented — status, sparse safety, pull/commit/push/, sync/fetch with 
 > conflict handling, per-file history (rename-aware), view at commit, diffs, 
 > confirmed restore, plus hardening (parser fuzzing, recovery paths, request 

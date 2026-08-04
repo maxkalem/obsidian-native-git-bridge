@@ -472,6 +472,13 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     const { containerEl } = this;
     containerEl.empty();
     const s = this.plugin.deviceSettings;
+    if (!import_obsidian3.Platform.isAndroidApp) {
+      containerEl.createDiv({
+        cls: "ngb-warning",
+        text: "Native Git Bridge works on Android only: it delegates every Git operation to the real git binary inside Termux, triggered through a companion app. There is nothing to configure on this device \u2014 on desktop, use git directly or the obsidian-git plugin. Settings appear when you open this tab on your Android device (they are stored per device and never synced through the vault)."
+      });
+      return;
+    }
     containerEl.createEl("p", {
       cls: "ngb-settings-note",
       text: "All settings below are stored on this device only (never synced through the vault), so each device can be enabled and configured independently."
@@ -2342,6 +2349,12 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   /** Guard + queue + trigger + await one bridge operation. */
   async runOperation(action, args = {}) {
     const s = this.deviceSettings;
+    if (!import_obsidian12.Platform.isAndroidApp) {
+      new import_obsidian12.Notice(
+        "Native Git Bridge works on Android only (it delegates git to Termux). On desktop, use git directly or the obsidian-git plugin."
+      );
+      return null;
+    }
     if (!s.enabledOnThisDevice) {
       new import_obsidian12.Notice("Native Git Bridge is disabled on this device (see settings).");
       return null;
@@ -2967,6 +2980,10 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";
     report.pluginSide["Pending requests"] = String(await this.client.pendingRequestCount());
     report.pluginSide["Active operation"] = this.lock.active ? `${this.lock.active.action} (${this.lock.active.id})` : "none";
+    if (!import_obsidian12.Platform.isAndroidApp)
+      report.problems.push(
+        "Not an Android device: the bridge (companion app + Termux) exists only on Android, so all operations are disabled here."
+      );
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");

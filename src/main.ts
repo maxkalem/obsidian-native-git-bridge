@@ -507,6 +507,15 @@ export default class NativeGitBridgePlugin extends Plugin {
     args: Record<string, unknown> = {}
   ): Promise<BridgeResult | null> {
     const s = this.deviceSettings;
+    if (!Platform.isAndroidApp) {
+      // The whole transport (companion app -> Termux RUN_COMMAND) exists only
+      // on Android; anywhere else a request could only ever time out.
+      new Notice(
+        "Native Git Bridge works on Android only (it delegates git to Termux). " +
+          "On desktop, use git directly or the obsidian-git plugin."
+      );
+      return null;
+    }
     if (!s.enabledOnThisDevice) {
       new Notice("Native Git Bridge is disabled on this device (see settings).");
       return null;
@@ -1198,6 +1207,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     report.pluginSide["Pending requests"] = String(await this.client.pendingRequestCount());
     report.pluginSide["Active operation"] = this.lock.active ? `${this.lock.active.action} (${this.lock.active.id})` : "none";
 
+    if (!Platform.isAndroidApp)
+      report.problems.push(
+        "Not an Android device: the bridge (companion app + Termux) exists only on Android, so all operations are disabled here."
+      );
     if (this.store.isVolatile) report.problems.push("Device-local storage is unavailable; settings will not persist.");
     if (!s.authToken) report.problems.push("No pairing token configured.");
     if (s.protectedPaths.length === 0) report.problems.push("No protected sparse paths configured.");

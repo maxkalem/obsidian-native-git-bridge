@@ -1,5 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { __notices, __openedModals, __resetObsidianMock } from "./mocks/obsidian";
+import { __notices, __openedModals, __resetObsidianMock, __setPlatformAndroid } from "./mocks/obsidian";
 import NativeGitBridgePlugin from "../src/main";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
@@ -200,6 +200,16 @@ beforeEach(() => {
 });
 
 describe("runOperation guards", () => {
+  it("refuses on non-Android platforms even when fully configured (nothing to bridge to)", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h); // fully paired and enabled…
+    __setPlatformAndroid(false); // …but this is a desktop
+    await h.plugin.cmdStatus(true);
+    expect(__notices.join(" ")).toContain("Android only");
+    expect(requestFiles(h.adapter)).toHaveLength(0);
+    expect(h.runner.uris).toHaveLength(0);
+  });
+
   it("refuses when the bridge is disabled on this device and queues nothing", async () => {
     const h = await loadPlugin();
     await h.plugin.cmdStatus(true);

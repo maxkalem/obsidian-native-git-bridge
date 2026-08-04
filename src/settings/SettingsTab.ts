@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, Platform, PluginSettingTab, Setting } from "obsidian";
 import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
 import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
@@ -15,6 +15,22 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     const s = this.plugin.deviceSettings;
+
+    // The bridge (companion app + Termux RUN_COMMAND) exists only on Android.
+    // Elsewhere: explain, and show no settings at all — every one of them is
+    // device-local, so configuring them on desktop could never do anything.
+    if (!Platform.isAndroidApp) {
+      containerEl.createDiv({
+        cls: "ngb-warning",
+        text:
+          "Native Git Bridge works on Android only: it delegates every Git operation " +
+          "to the real git binary inside Termux, triggered through a companion app. " +
+          "There is nothing to configure on this device — on desktop, use git directly " +
+          "or the obsidian-git plugin. Settings appear when you open this tab on your " +
+          "Android device (they are stored per device and never synced through the vault).",
+      });
+      return;
+    }
 
     containerEl.createEl("p", {
       cls: "ngb-settings-note",

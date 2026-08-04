@@ -15,6 +15,7 @@ export const __openedModals: string[] = [];
 export function __resetObsidianMock(): void {
   __notices.length = 0;
   __openedModals.length = 0;
+  __setPlatformAndroid(true);
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -49,12 +50,22 @@ export class Notice {
   hide(): void {}
 }
 
+// Tests simulate the plugin's real target platform (Android) by default;
+// __resetObsidianMock restores this. Individual tests may flip it to exercise
+// the desktop guard.
 export const Platform = {
-  isAndroidApp: false,
-  isMobileApp: false,
-  isMobile: false,
-  isDesktop: true,
+  isAndroidApp: true,
+  isMobileApp: true,
+  isMobile: true,
+  isDesktop: false,
 };
+
+export function __setPlatformAndroid(android: boolean): void {
+  Platform.isAndroidApp = android;
+  Platform.isMobileApp = android;
+  Platform.isMobile = android;
+  Platform.isDesktop = !android;
+}
 
 export class TFile {}
 export class TFolder {}
