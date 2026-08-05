@@ -26,6 +26,13 @@ export interface StatusViewData {
   progress?: string;
   /** Action currently running; its toolbar button is animated. */
   runningAction?: string;
+  /**
+   * Target of the running action when it is per-path (stage-file,
+   * unstage-file, discard-file). Scopes the row animation to the acted file —
+   * or, for a folder, to the folder row and its visible descendants — instead
+   * of every row whose button happens to share the action name.
+   */
+  runningPath?: string;
   lastSyncAt?: string;
   fetchedAt?: string;
   bridge: string;
@@ -363,13 +370,20 @@ export class StatusView extends ItemView {
           cb();
         });
       };
+      // A per-path action animates ONLY the acted row (or, for a folder, the
+      // folder row and its visible descendants) — never sibling rows that
+      // merely share the action name, and never the global toolbar buttons.
       const busy = this.data?.runningAction;
+      const hit = isRowAffected(this.data?.runningPath, it.path);
+      const rowBusy =
+        hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file");
+      if (rowBusy) rowEl.addClass("ngb-sv-file-busy");
       if (group === "staged") {
-        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file");
+        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file" && hit);
       } else {
-        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
+        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file" && hit);
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
+      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file" && hit);
 
       // The change letter lives at the END of the row: next to the file name it
       // read like part of the file name.
@@ -384,6 +398,21 @@ export class StatusView extends ItemView {
 
 function entry(e: GitFileEntry, code: string): { path: string; code: string } {
   return { path: e.path, code: code === "." ? "M" : code };
+}
+
+/**
+ * Whether a per-path operation on `actionPath` affects the row for `rowPath`:
+ * the row IS the acted path, or lives inside it when the acted path is a
+ * folder. Trailing slashes are normalised because git reports untracked
+ * directories as "Dir/" while menu actions may hand over "Dir". Pure prefix
+ * matching is segment-aware ("Doc" must not match "Docs/a.md").
+ */
+export function isRowAffected(actionPath: string | undefined, rowPath: string): boolean {
+  if (!actionPath) return false;
+  const a = actionPath.endsWith("/") ? actionPath.slice(0, -1) : actionPath;
+  const r = rowPath.endsWith("/") ? rowPath.slice(0, -1) : rowPath;
+  if (a === "") return false;
+  return r === a || r.startsWith(a + "/");
 }
 
 /**

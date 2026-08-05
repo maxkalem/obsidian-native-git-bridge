@@ -1,5 +1,7 @@
 # Native Git Bridge
 
+## Description 
+
 > **Android only.** This plugin needs Termux and a small companion app; it
 > cannot work on desktop, where it loads, explains itself and disables every
 > operation. On desktop use plain Git or
@@ -35,15 +37,14 @@ one of two approaches, and **neither can work with a native sparse-checkout
 index**, which is the entire reason this one exists:
 
 - **isomorphic-git in the app** — e.g.
-  [obsidian-git](https://github.com/Vinzent03/obsidian-git). A JavaScript Git
-  implementation that does not implement sparse checkout and does not honour
-  skip-worktree, so a sparse index can be misread as mass deletions.
+  [obsidian-git](https://github.com/Vinzent03/obsidian-git). A JavaScript Git implementation that does not implement 
+  sparse checkout and does not honour skip-worktree, so a sparse index can
+  be misread as mass deletions.
 - **The hosting provider's REST API** — e.g.
-  [Hybrid Git Sync](https://community.obsidian.md/plugins/hybrid-git-sync),
-  Fit, Git Vault Sync. There is no repository on the phone at all: files are
-  transferred over HTTP. That means no local history, no offline commits, no
-  SSH, provider-specific limits, and an access token stored in the plugin's
-  own settings.
+  [Hybrid Git Sync](https://community.obsidian.md/plugins/hybrid-git-sync), [Fit](https://community.obsidian.md/plugins/fit), [Git Vault Sync](https://community.obsidian.md/plugins/git-vault-sync). There is no repository on the 
+  phone at all: files are transferred over HTTP. That means no local history, 
+  no offline commits, no SSH, provider-specific limits, and an access token 
+  stored in the plugin's own settings.
 
 **Prefer one of those** if your vault is a normal full checkout, you sync only
 through GitHub/GitLab, and you would rather not install Termux and a companion
@@ -66,7 +67,7 @@ outside `data.json`.
    (locally excluded from Git via `.git/info/exclude`).
 3. The plugin opens `nativegitbridge://run`; the companion app (the only
    supported trigger) forwards a RUN_COMMAND intent to Termux, which executes
-   the fixed runner script once in the background. See
+   the fixed runner script once in the background. See 
    `docs/ADR-001-android-invocation.md` for why a companion app is required.
 4. The runner validates the pairing token, the action allow-list and all paths,
    runs git with argv arrays, writes `runtime/results/<id>.json` atomically and
@@ -138,12 +139,8 @@ npm run test:e2e  # runner end-to-end against a real sparse-checkout repo
 npm run build     # type check + bundle to main.js
 ```
 
-Docs: [setup guide](docs/setup.md) · [troubleshooting](docs/troubleshooting.md)
-· [updating](docs/update.md) · [release engineering](docs/release.md) ·
-[design notes for reviewers](docs/submission.md) ·
-[ADR-001: why a companion app](docs/ADR-001-android-invocation.md) ·
-[threat model](docs/threat-model.md) · [protocol](docs/protocol.md) ·
-[limitations](docs/limitations.md) · [research notes](docs/research-notes.md).
+## Docs:
+ [setup guide](docs/setup.md) · [troubleshooting](docs/troubleshooting.md) · [updating](docs/update.md) · [release engineering](docs/release.md)  · [design notes for reviewers](docs/submission.md) · [ADR-001: why a companion app](docs/ADR-001-android-invocation.md)  · [threat model](docs/threat-model.md) · [protocol](docs/protocol.md) · [limitations](docs/limitations.md) · [research notes](docs/research-notes.md).
 
 ----
 # HOW TO INSTALL THE PLUGIN MANUALLY

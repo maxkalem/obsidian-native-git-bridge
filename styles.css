@@ -145,6 +145,17 @@
 @media (prefers-reduced-motion: reduce) {
   .ngb-anim-spin svg, .ngb-anim-pulse svg { animation-duration: 2.4s; }
 }
+/* Row currently being acted on by a per-file/folder operation (stage, unstage,
+   discard): gentle background pulse on the row itself, in addition to the
+   pulsing action button. CSS-only, like every other activity animation. */
+@keyframes ngb-row-pulse {
+  0%, 100% { background-color: transparent; }
+  50%      { background-color: var(--background-modifier-hover); }
+}
+.ngb-sv-file-busy { animation: ngb-row-pulse 1s ease-in-out infinite; border-radius: var(--radius-s); }
+@media (prefers-reduced-motion: reduce) {
+  .ngb-sv-file-busy { animation-duration: 2.4s; }
+}
 .ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }
 
 .ngb-sv-toolbar { justify-content: space-between; }

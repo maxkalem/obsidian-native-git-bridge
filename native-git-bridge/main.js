@@ -2137,12 +2137,15 @@ var StatusView = class extends import_obsidian10.ItemView {
         });
       };
       const busy = this.data?.runningAction;
+      const hit = isRowAffected(this.data?.runningPath, it.path);
+      const rowBusy = hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file");
+      if (rowBusy) rowEl.addClass("ngb-sv-file-busy");
       if (group === "staged") {
-        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file");
+        act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file" && hit);
       } else {
-        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file");
+        act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file" && hit);
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file");
+      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file" && hit);
       const codeEl = rowEl.createSpan({
         cls: `ngb-sv-file-code ngb-code-${it.code}`,
         text: it.code
@@ -2153,6 +2156,13 @@ var StatusView = class extends import_obsidian10.ItemView {
 };
 function entry(e, code) {
   return { path: e.path, code: code === "." ? "M" : code };
+}
+function isRowAffected(actionPath, rowPath) {
+  if (!actionPath) return false;
+  const a = actionPath.endsWith("/") ? actionPath.slice(0, -1) : actionPath;
+  const r = rowPath.endsWith("/") ? rowPath.slice(0, -1) : rowPath;
+  if (a === "") return false;
+  return r === a || r.startsWith(a + "/");
 }
 function displayName(path) {
   const isDir = path.endsWith("/");
@@ -2316,6 +2326,8 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     this.activeCancel = null;
     this.progressText = null;
     this.runningAction = null;
+    /** Target path of the running action, when it is per-path (stage/unstage/discard file). */
+    this.runningPath = null;
     this.lastStatus = null;
     this.lastAutoSyncMs = 0;
     /**
@@ -2856,6 +2868,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     void this.openStatusPanel(false);
     const startedAt = Date.now();
     this.runningAction = action;
+    this.runningPath = typeof args["path"] === "string" ? args["path"] : null;
     this.progressText = `${action}\u2026 0s`;
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
@@ -2912,6 +2925,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       window.clearInterval(ticker);
       this.progressText = null;
       this.runningAction = null;
+      this.runningPath = null;
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
@@ -3626,6 +3640,7 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       activeOperation: this.lock.active ? this.lock.active.action : void 0,
       progress: this.progressText ?? void 0,
       runningAction: this.runningAction ?? void 0,
+      runningPath: this.runningPath ?? void 0,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? void 0,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled"

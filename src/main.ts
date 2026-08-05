@@ -96,6 +96,8 @@ export default class NativeGitBridgePlugin extends Plugin {
   private activeCancel: CancelToken | null = null;
   private progressText: string | null = null;
   private runningAction: string | null = null;
+  /** Target path of the running action, when it is per-path (stage/unstage/discard file). */
+  private runningPath: string | null = null;
   private lastStatus: { status: GitStatusSummary; sparse: SparseStateSummary; lastCommit?: { hash: string; date: string; subject: string }; fetchedAt: string } | null = null;
 
   async onload(): Promise<void> {
@@ -721,6 +723,9 @@ export default class NativeGitBridgePlugin extends Plugin {
     void this.openStatusPanel(false);
     const startedAt = Date.now();
     this.runningAction = action;
+    // Per-path actions carry their target so the status panel can animate the
+    // acted row only, instead of every control sharing the action name.
+    this.runningPath = typeof args["path"] === "string" ? (args["path"] as string) : null;
     this.progressText = `${action}… 0s`;
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
@@ -790,6 +795,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       window.clearInterval(ticker);
       this.progressText = null;
       this.runningAction = null;
+      this.runningPath = null;
       this.activeCancel = null;
       if (mutating) this.lock.release(req.id);
       this.refreshStatusBarIdle();
@@ -1596,6 +1602,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
       progress: this.progressText ?? undefined,
       runningAction: this.runningAction ?? undefined,
+      runningPath: this.runningPath ?? undefined,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled",
