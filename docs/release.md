@@ -10,9 +10,9 @@
 
 | File | Field | Consumer |
 |------|-------|----------|
-| `manifest.json` (root; synced to `native-git-bridge/` by the build) | `version` | Obsidian (must equal the release tag) |
+| `manifest.json`<br>(root; synced to `native-git-bridge/` by the build) | `version` | Obsidian (must equal the release tag) |
 | `package.json` | `version` | npm scripts / CI consistency check |
-| `versions.json` | new `"x.y.z": "minAppVersion"` entry | Obsidian update mechanism (the build fails if the manifest version is missing here) |
+| `versions.json` | new <br>`"x.y.z": "minAppVersion"`<br> entry | Obsidian update mechanism (the build fails if the manifest version is missing here) |
 | `native-git-bridge/termux/native-git-bridge-runner.sh` | `RUNNER_VERSION` | handshake (bump only when the runner changes) |
 | `src/constants.ts` | `RUNNER_MIN_VERSION` | handshake (bump together with `RUNNER_VERSION`) |
 | `companion/app/build.gradle.kts` | (none) | derived automatically from the root `manifest.json` (`versionName` = release version, `versionCode` = major×10000 + minor×100 + patch); nothing to bump by hand |

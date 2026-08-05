@@ -42,20 +42,22 @@ Rejected alternatives:
 ## Request/response flow (both transports)
 
 ```
-Obsidian plugin                    shared vault dir                    Termux
---------------                     ----------------                    ------
+Obsidian plugin                         shared vault dir                    Termux
+----------------                   --------------------------               -------
 1. acquire op lock
 2. write requests/<id>.json  ───►  .obsidian/plugins/<id>/runtime/
-3. trigger transport (notice or intent URI)
-                                                            4. runner starts (widget tap
-                                                               or RUN_COMMAND), reads
-                                                               request, validates token,
-                                                               action allow-list, paths
-                                                            5. runs git with argv arrays
-                                                            6. writes results/<id>.json.tmp,
-                                                               mv → results/<id>.json, exits
-7. poll results/<id>.json (400 ms, bounded by timeout)
-8. parse, render, cleanup, release lock
+3. trigger transport 
+  (notice or intent URI)                                            4. runner starts (widget tap
+                                                                       or RUN_COMMAND), reads
+                                                                       request, validates token,
+                                                                       action allow-list, paths
+                                                                    5. runs git with argv arrays
+                                                                    6. writes results/<id>.json.tmp,
+                                                                       mv → results/<id>.json, exits
+7. poll results/<id>.json 
+   (400 ms, bounded by timeout)
+8. parse, render, cleanup, 
+   release lock
 ```
 
 Nothing listens when no operation is active. If Obsidian is killed mid-operation, a dispatched runner may still finish writing the result file; on next launch the plugin reconciles the persisted "operation in flight" marker against the results directory.

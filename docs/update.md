@@ -4,7 +4,7 @@ The bridge is **three parts that update independently**. Knowing which is which 
 
 | Part | Lives at | Updated by |
 |------|----------|------------|
-| Plugin (`main.js`, `manifest.json`, `styles.css`) | `<vault>/.obsidian/plugins/native-git-bridge/` | copying new files / vault sync |
+| Plugin (`main.js`, `manifest.json`, `styles.css`) | `<vault>/.obsidian/plugins/native-git-bridge/` | copying new files / vault sync / community plugins update|
 | Termux runner | `~/.config/native-git-bridge/runner.sh` (Termux private) | re-running the install command |
 | Companion app | Android | installing a newer APK |
 

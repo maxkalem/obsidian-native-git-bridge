@@ -24,7 +24,6 @@
 | T7 | Plugin directory synced through Git carries another device's config | All device-scoped settings (enable flag, paths, token, transport, automation) live in `localStorage` scoped by vault identity, never in `data.json`. Runtime dir is in `.git/info/exclude`. |
 | T8 | Stale/orphaned operations after Obsidian is killed | Operation marker persisted device-locally; on startup the plugin reconciles marker ↔ results dir, expires stale locks, and cleans result files older than 24 h. Runner also cleans old files. |
 | T9 | isomorphic-git (obsidian-git mobile) corrupting the native index | On Android the plugin detects an enabled `obsidian-git` plugin and shows a prominent incompatibility warning; it never disables it without explicit user confirmation. |
-
 | T10 | Pairing token intercepted during initial pairing | `pairing.json` transits vault storage exactly once (installer → plugin), then is deleted by the plugin. An attacker reading it during that window holds the same position as T1 (and the same bounded consequence). Replacing an existing token requires explicit user confirmation in the plugin. |
 | T11 | Forged companion acknowledgement (`obsidian://native-git-bridge-ack` is openable by any app) | The ack carries no payload and grants nothing: it only suppresses the "companion missing" hint and shifts a timeout diagnosis toward the runner side. No operation, path, or token ever flows through it. Worst case is a misleading troubleshooting hint. |
 

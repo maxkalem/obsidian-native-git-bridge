@@ -4,11 +4,11 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
 
 ```
 .obsidian/plugins/native-git-bridge/runtime/
-  requests/<id>.json      written by plugin, consumed (moved to done/) by runner
-  results/<id>.json       written atomically by runner (tmp + mv)
-  cancel/<id>             empty flag file; runner checks between steps
-  done/<id>.json          processed requests (kept ≤ 24 h)
-  runner.log              runner log, secrets stripped, size-capped
+  requests/<id>.json                        written by plugin, consumed (moved to done/) by runner
+  results/<id>.json                         written atomically by runner (tmp + mv)
+  cancel/<id>                               empty flag file; runner checks between steps
+  done/<id>.json                            processed requests (kept ≤ 24 h)
+  runner.log                                runner log, secrets stripped, size-capped
 ```
 
 ## Request
@@ -27,10 +27,10 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
 
 - `id`: `^r-[0-9TZ.-]+-[a-z0-9]+$`, unique per request.
 - `action` (implemented): `ping` | `status` | `verify-sparse-safety` | `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` | `abort-merge`.
-  - Phase 4 (implemented): `file-log` (paginated, rename-aware via `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap, `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or commit→WORKTREE, 200 KB cap with `truncated` flag; a commit-ish may carry a single trailing `^` so the history panel can diff a commit against its parent), `restore-file` (worktree-only `git restore --source`, blocked for protected paths).
-  - Runner v5: `repo-log` (repository-wide paginated log for the history panel, same `\x1e`/`\x1f` record format as `file-log` with a `--name-status` block per commit, no `--follow`).
-  - Runner v6: `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses non-conflicted paths and protected paths, then `git checkout --<side>` + `git add` to mark the file resolved, only ever on an explicit user choice; the bridge never picks a side by itself).
-  - Runner v7: `diff-file` accepts the `INDEX` pseudo-ref (`HEAD→INDEX` = `git diff --cached`, `INDEX→WORKTREE` = plain `git diff`; INDEX pairs with nothing else), `stage-file` accepts `args.mode` = `all` (default) | `update` (`git add -u`, for folder rows in the tracked-changes group), FAILED mutating actions still attach fresh status fields to `data` (merged with any error payload such as `data.conflicts`), and the runner prints `NGB_RUNNER_VERSION=<n>` on stdout so the companion app's probe can learn the current runner version.
+  - **Runner v4**: `file-log` (paginated, rename-aware via `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap, `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or commit→WORKTREE, 200 KB cap with `truncated` flag; a commit-ish may carry a single trailing `^` so the history panel can diff a commit against its parent), `restore-file` (worktree-only `git restore --source`, blocked for protected paths).
+  - **Runner v5**: `repo-log` (repository-wide paginated log for the history panel, same `\x1e`/`\x1f` record format as `file-log` with a `--name-status` block per commit, no `--follow`).
+  - **Runner v6**: `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses non-conflicted paths and protected paths, then `git checkout --<side>` + `git add` to mark the file resolved, only ever on an explicit user choice; the bridge never picks a side by itself).
+  - **Runner v7**: `diff-file` accepts the `INDEX` pseudo-ref (`HEAD→INDEX` = `git diff --cached`, `INDEX→WORKTREE` = plain `git diff`; INDEX pairs with nothing else), `stage-file` accepts `args.mode` = `all` (default) | `update` (`git add -u`, for folder rows in the tracked-changes group), FAILED mutating actions still attach fresh status fields to `data` (merged with any error payload such as `data.conflicts`), and the runner prints `NGB_RUNNER_VERSION=<n>` on stdout so the companion app's probe can learn the current runner version.
   - `pull`/`commit`/`push`/`sync` require `args.protectedPaths` (validated on both sides) and enforce the sparse safety gate; `commit`/`sync` require `args.message` (`sync` falls back to a default). Conflicts are returned as `error.code = "CONFLICT"` with `data.conflicts`; safety violations as `error.code = "SAFETY_BLOCKED"` with `data.statusProtected`/`data.stagedProtected`. Staging always uses `git add -A -- . ":(exclude)<protected>"…`, so protected paths can never enter the index through the bridge.
 - `args` are action-specific; every path is repository-relative and validated on **both** sides.
 
