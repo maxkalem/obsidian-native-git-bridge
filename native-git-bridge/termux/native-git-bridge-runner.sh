@@ -571,7 +571,9 @@ action_abort_merge() {
 NGB_MAX_SHOW_BYTES="${NGB_MAX_SHOW_BYTES:-1048576}"
 NGB_MAX_DIFF_CHARS="${NGB_MAX_DIFF_CHARS:-200000}"
 
-valid_commitish() { printf '%s' "$1" | grep -Eq '^(HEAD|[0-9a-fA-F]{4,40})$'; }
+# A single trailing ^ (first parent) is allowed so the plugin can diff a commit
+# against its parent (history view). Still no ranges, no refs, no pathspecs.
+valid_commitish() { printf '%s' "$1" | grep -Eq '^(HEAD|[0-9a-fA-F]{4,40})\^?$'; }
 
 # git log --follow with rename tracking; fields separated by \x1f, records by \x1e,
 # plus --name-status lines so the TS side knows the file's path AT each commit.
@@ -591,6 +593,25 @@ action_file_log() {
     ERROR=$(err_json GIT_FAILED "git log failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
   DATA=$(obj_from_fields log "$GIT_OUT" path "$path" limit "$limit" skip "$skip")
+}
+
+# Repository-wide log for the history panel: same record format as file-log
+# (\x1e records, \x1f fields, --name-status block per commit) but across the
+# whole repository and without --follow (rename tracking is per-path only).
+action_repo_log() {
+  local req_file="$1"
+  local limit skip
+  limit=$(jq -r '.args.limit // 30' "$req_file")
+  skip=$(jq -r '.args.skip // 0' "$req_file")
+  printf '%s' "$limit" | grep -Eq '^[0-9]{1,3}$' || limit=30
+  [ "$limit" -gt 100 ] && limit=100
+  [ "$limit" -lt 1 ] && limit=1
+  printf '%s' "$skip" | grep -Eq '^[0-9]{1,6}$' || skip=0
+  if ! run_git log --name-status --find-renames --max-count="$limit" --skip="$skip" \
+      --format='%x1e%H%x1f%cI%x1f%an%x1f%s'; then
+    ERROR=$(err_json GIT_FAILED "git log failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  DATA=$(obj_from_fields log "$GIT_OUT" limit "$limit" skip "$skip")
 }
 
 action_show_file_at_commit() {
@@ -927,6 +948,7 @@ process_request() {
     sync)                  action_sync "$req_file" || { ok=false; ec=1; } ;;
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
     file-log)              action_file_log "$req_file" || { ok=false; ec=1; } ;;
+    repo-log)              action_repo_log "$req_file" || { ok=false; ec=1; } ;;
     show-file-at-commit)   action_show_file_at_commit "$req_file" || { ok=false; ec=1; } ;;
     diff-file)             action_diff_file "$req_file" || { ok=false; ec=1; } ;;
     restore-file)          action_restore_file "$req_file" || { ok=false; ec=1; } ;;

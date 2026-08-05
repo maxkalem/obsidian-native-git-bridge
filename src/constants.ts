@@ -3,6 +3,13 @@ export const PROTOCOL_VERSION = 1;
 export const RUNNER_MIN_VERSION = 5;
 
 /**
+ * git's canonical empty-tree object (constant across all repositories).
+ * Diffing the ROOT commit against its (non-existent) parent fails; diffing
+ * against the empty tree shows it as all-additions instead.
+ */
+export const EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/**
  * No baked-in defaults: protected paths are derived from the repository's own
  * sparse-checkout exclusions (read from git through the runner) plus whatever
  * the user adds manually in settings.

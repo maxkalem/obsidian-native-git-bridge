@@ -3,6 +3,7 @@ import {
   bytesToTextIfNotBinary,
   decodeBase64ToBytes,
   parseFileLog,
+  parseRepoLog,
 } from "../src/git/historyParsers";
 
 const RS = "\x1e";
@@ -55,5 +56,39 @@ describe("base64 helpers", () => {
   it("detects binary (NUL byte)", () => {
     const b64 = Buffer.from([0x50, 0x00, 0x51]).toString("base64");
     expect(bytesToTextIfNotBinary(decodeBase64ToBytes(b64))).toBeNull();
+  });
+});
+
+describe("parseRepoLog", () => {
+  const RS = "\x1e";
+  const FS = "\x1f";
+  it("parses commits with their full changed-file list", () => {
+    const raw =
+      `${RS}aaaa111122223333aaaa111122223333aaaa1111${FS}2026-08-01T10:00:00+02:00${FS}Alice${FS}two files\n\n` +
+      `M\tNotes/a.md\nA\tNotes/b.md\n` +
+      `${RS}bbbb111122223333aaaa111122223333aaaa1111${FS}2026-07-01T10:00:00Z${FS}Bob${FS}delete\n\nD\told.md\n`;
+    const es = parseRepoLog(raw);
+    expect(es).toHaveLength(2);
+    expect(es[0]).toMatchObject({ author: "Alice", subject: "two files" });
+    expect(es[0]!.files).toEqual([
+      { code: "M", path: "Notes/a.md" },
+      { code: "A", path: "Notes/b.md" },
+    ]);
+    expect(es[1]!.files).toEqual([{ code: "D", path: "old.md" }]);
+  });
+  it("keeps rename pairs with the score stripped from the code", () => {
+    const raw = `${RS}cccc111122223333aaaa111122223333aaaa1111${FS}2026-08-01T10:00:00Z${FS}A${FS}rename\n\nR100\told.md\tnew.md\n`;
+    const es = parseRepoLog(raw);
+    expect(es[0]!.files).toEqual([{ code: "R", path: "new.md", origPath: "old.md" }]);
+  });
+  it("unquotes unicode paths in the file list", () => {
+    const raw = `${RS}dddd111122223333aaaa111122223333aaaa1111${FS}2026-08-01T10:00:00Z${FS}A${FS}s\n\nM\t"F\\303\\274\\303\\237e.md"\n`;
+    expect(parseRepoLog(raw)[0]!.files[0]!.path).toBe("Füße.md");
+  });
+  it("tolerates commits without files (e.g. empty merges) and garbage records", () => {
+    const raw = `${RS}eeee111122223333aaaa111122223333aaaa1111${FS}2026-08-01T10:00:00Z${FS}A${FS}merge\n${RS}not-a-hash${FS}x${FS}y${FS}z\n`;
+    const es = parseRepoLog(raw);
+    expect(es).toHaveLength(1);
+    expect(es[0]!.files).toEqual([]);
   });
 });

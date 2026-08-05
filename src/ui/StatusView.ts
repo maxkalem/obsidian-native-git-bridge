@@ -54,8 +54,12 @@ export interface StatusViewActions {
   stageAll: () => void;
   unstageAll: () => void;
   openLog: () => void;
+  /** Open the repository-wide history panel. */
+  openHistory: () => void;
   cancel: () => void;
   openFile: (path: string) => void;
+  /** Open the diff for a changed file in an Obsidian pane (HEAD → worktree). */
+  openDiff: (path: string, group: Group) => void;
   stage: (path: string) => void;
   unstage: (path: string) => void;
   discard: (path: string) => void;
@@ -63,7 +67,7 @@ export interface StatusViewActions {
   fileMenu: (menu: Menu, path: string) => void;
 }
 
-type Group = "conflicted" | "staged" | "unstaged" | "untracked";
+export type Group = "conflicted" | "staged" | "unstaged" | "untracked";
 
 const CHANGE_LABEL: Record<string, string> = {
   M: "modified",
@@ -223,10 +227,17 @@ export class StatusView extends ItemView {
     this.cancelBtn = cancel;
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
     this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null);
-    const logBtn = strip.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
+    const logBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     logBtn.setAttribute("aria-label", "Operation log");
     setIcon(logBtn, "file-clock");
     logBtn.addEventListener("click", this.actions.openLog);
+    // Repository history lives right of the log button and uses the SAME icon
+    // as the history panel itself, so the two are visually one feature.
+    const histBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    histBtn.setAttribute("aria-label", "Repository history");
+    setIcon(histBtn, "history");
+    histBtn.addEventListener("click", this.actions.openHistory);
 
     // --- header line ---
     const head = c.createDiv({ cls: "ngb-sv-header" });
@@ -356,7 +367,15 @@ export class StatusView extends ItemView {
       const kind = CHANGE_LABEL[it.code] ?? it.code;
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
-      main.addEventListener("click", () => this.actions.openFile(it.path));
+      // Tap on a TRACKED change opens its diff in an Obsidian pane (obsidian-git
+      // convention); untracked files and folders have no diff, so they open
+      // directly. The dedicated go-to-file button always opens the file.
+      const isDir = it.path.endsWith("/");
+      if (group === "untracked" || isDir) {
+        main.addEventListener("click", () => this.actions.openFile(it.path));
+      } else {
+        main.addEventListener("click", () => this.actions.openDiff(it.path, group));
+      }
 
       // Same Git menu as the file explorer, on the whole row: right click on
       // desktop, long press on touch (Obsidian maps contextmenu for both, but
@@ -421,6 +440,11 @@ export class StatusView extends ItemView {
       const rowBusy =
         hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file");
       if (rowBusy) rowEl.addClass("ngb-sv-file-busy");
+      // Explicit open button (obsidian-git convention), since the name click
+      // now goes to the diff for tracked changes. Folders have nothing to open.
+      if (!it.path.endsWith("/")) {
+        act("go-to-file", "Open file", () => this.actions.openFile(it.path));
+      }
       if (group === "staged") {
         act("minus", "Unstage", () => this.actions.unstage(it.path), false, busy === "unstage-file" && hit);
       } else {

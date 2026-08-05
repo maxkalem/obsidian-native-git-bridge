@@ -53,6 +53,64 @@ export function parseFileLog(raw: string, currentPath: string): FileLogEntry[] {
   return out;
 }
 
+export interface RepoLogFile {
+  /** Change letter as git reports it: M, A, D, T, and R/C WITHOUT the score. */
+  code: string;
+  /** The file's path AT the commit (the NEW side of a rename/copy). */
+  path: string;
+  /** The old path for renames/copies. */
+  origPath?: string;
+}
+
+export interface RepoLogEntry {
+  hash: string;
+  date: string;
+  author: string;
+  subject: string;
+  files: RepoLogFile[];
+}
+
+/**
+ * Parse `git log --name-status --format='%x1e%H%x1f%cI%x1f%an%x1f%s'` across
+ * the whole repository (the history panel): one record per commit, each
+ * carrying the full changed-file list so a commit can expand without another
+ * Termux round trip.
+ */
+export function parseRepoLog(raw: string): RepoLogEntry[] {
+  const out: RepoLogEntry[] = [];
+  for (const record of raw.split(RS)) {
+    if (record.trim() === "") continue;
+    const lines = record.split("\n");
+    const header = lines[0] ?? "";
+    const [hash, date, author, ...subj] = header.split(FS);
+    if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) continue;
+    const files: RepoLogFile[] = [];
+    for (const rawLine of lines.slice(1)) {
+      const line = rawLine.replace(/\r$/, "");
+      if (line.trim() === "") continue;
+      const parts = line.split("\t");
+      const code = parts[0] ?? "";
+      if ((code.startsWith("R") || code.startsWith("C")) && parts.length >= 3) {
+        files.push({
+          code: code[0]!,
+          path: unquoteGitPath(parts[2]!),
+          origPath: unquoteGitPath(parts[1]!),
+        });
+      } else if (parts.length >= 2 && code !== "") {
+        files.push({ code: code[0]!, path: unquoteGitPath(parts[1]!) });
+      }
+    }
+    out.push({
+      hash,
+      date: date ?? "",
+      author: author ?? "",
+      subject: (subj ?? []).join(FS),
+      files,
+    });
+  }
+  return out;
+}
+
 /** Decode base64 (as produced by `base64 -w0`) into bytes. */
 export function decodeBase64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64.trim());

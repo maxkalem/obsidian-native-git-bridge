@@ -31,8 +31,12 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
   `abort-merge`. Phase 4 (implemented): `file-log` (paginated, rename-aware via
   `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap,
   `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or
-  commit→WORKTREE, 200 KB cap with `truncated` flag), `restore-file`
-  (worktree-only `git restore --source`, blocked for protected paths). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
+  commit→WORKTREE, 200 KB cap with `truncated` flag; a commit-ish may carry a
+  single trailing `^` so the history panel can diff a commit against its
+  parent), `restore-file` (worktree-only `git restore --source`, blocked for
+  protected paths). Runner v5: `repo-log` (repository-wide paginated log for
+  the history panel, same `\x1e`/`\x1f` record format as `file-log` with a
+  `--name-status` block per commit, no `--follow`). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
   (validated on both sides) and enforce the sparse safety gate; `commit`/`sync`
   require `args.message` (`sync` falls back to a default). Conflicts are returned
   as `error.code = "CONFLICT"` with `data.conflicts`; safety violations as

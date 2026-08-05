@@ -25,23 +25,24 @@ export type BridgeAction =
   | "sparse-exclude-remove"
   | "exclude-add"
   | "exclude-remove"
-  | "exclude-list";
+  | "exclude-list"
+  | "repo-log";
 
 /**
- * The runner version that introduced RUNNER4_ACTIONS. The pre-flight gate must
- * compare against THIS, not RUNNER_MIN_VERSION: the minimum moves with every
- * runner change (v5 added untrackedChildren), but a v4 runner still executes
- * these actions perfectly well.
+ * Runner version each late-added action first appeared in. The pre-flight gate
+ * compares against THESE, not RUNNER_MIN_VERSION: the minimum moves with every
+ * runner change, but e.g. a v4 runner still executes the v4 config-management
+ * actions perfectly well. Actions absent here exist since the first supported
+ * runner. An old runner would answer a bare BAD_REQUEST ("action not allowed"),
+ * which reads like a plugin bug — the gate names the real cause up front.
  */
-export const RUNNER4_INTRODUCED = 4;
-
-/** Actions that only exist from runner v4 on (config management). */
-export const RUNNER4_ACTIONS: ReadonlySet<BridgeAction> = new Set([
-  "sparse-exclude-add",
-  "sparse-exclude-remove",
-  "exclude-add",
-  "exclude-remove",
-  "exclude-list",
+export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
+  ["sparse-exclude-add", 4],
+  ["sparse-exclude-remove", 4],
+  ["exclude-add", 4],
+  ["exclude-remove", 4],
+  ["exclude-list", 4],
+  ["repo-log", 5],
 ]);
 
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([

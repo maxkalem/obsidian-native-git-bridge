@@ -1,6 +1,7 @@
 import { Menu, Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
 import {
   DEFAULT_TIMEOUT_SECONDS,
+  EMPTY_TREE_HASH,
   SPARSE_SAFETY_WARNING,
   STORAGE_PREFIX,
 } from "./constants";
@@ -11,7 +12,7 @@ import type {
   OperationMarker,
   SparseStateSummary,
 } from "./types";
-import { MUTATING_ACTIONS, RUNNER4_ACTIONS, RUNNER4_INTRODUCED } from "./types";
+import { ACTION_MIN_RUNNER, MUTATING_ACTIONS } from "./types";
 import {
   DeviceLocalSettingsStore,
   type DeviceLocalSettings,
@@ -53,10 +54,15 @@ import {
   bytesToTextIfNotBinary,
   decodeBase64ToBytes,
   parseFileLog,
+  parseRepoLog,
   type FileLogEntry,
+  type RepoLogEntry,
+  type RepoLogFile,
 } from "./git/historyParsers";
 import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
-import { NGB_STATUS_VIEW, StatusView, summaryToViewData } from "./ui/StatusView";
+import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
+import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
+import { DiffView, NGB_DIFF_VIEW, type DiffViewState } from "./ui/DiffView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
 import {
@@ -141,12 +147,32 @@ export default class NativeGitBridgePlugin extends Plugin {
           stageAll: () => void this.cmdStageAll(),
           unstageAll: () => void this.cmdUnstageAll(),
           openLog: () => new OperationLogModal(this.app, this.log).open(),
+          openHistory: () => void this.openHistoryPanel(),
           cancel: () => void this.cmdCancel(),
           openFile: (p) => this.openVaultFile(p),
+          openDiff: (p, group) => void this.openStatusDiff(p, group),
           stage: (p) => void this.cmdStageFile(p),
           unstage: (p) => void this.cmdUnstageFile(p),
           discard: (p) => this.cmdDiscardFile(p),
           fileMenu: (menu, p) => this.buildGitMenu(menu, p),
+        })
+    );
+
+    this.registerView(
+      NGB_HISTORY_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new HistoryView(leaf, {
+          loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
+          openDiffAtCommit: (file, entry) => void this.openCommitDiff(file, entry),
+          openFile: (p) => this.openVaultFile(p),
+        })
+    );
+
+    this.registerView(
+      NGB_DIFF_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new DiffView(leaf, {
+          loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
         })
     );
 
@@ -624,6 +650,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "diagnostics", name: "Native Git: Run diagnostics", cb: () => void this.cmdDiagnostics() },
       { id: "open-operation-log", name: "Native Git: Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
       { id: "open-status-panel", name: "Native Git: Open status panel", cb: () => void this.openStatusPanel() },
+      { id: "open-history-panel", name: "Native Git: Open history panel", cb: () => void this.openHistoryPanel() },
       { id: "bridge-self-check", name: "Native Git: Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "open-companion-setup", name: "Native Git: Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "setup-guide", name: "Native Git: Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
@@ -675,16 +702,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Actions introduced with a newer runner would come back as a bare
     // BAD_REQUEST ("action not allowed") from an old one, which reads like a
     // plugin bug. Name the real cause before spending a round trip.
+    const needsRunner = ACTION_MIN_RUNNER.get(action);
     if (
       this.lastRunnerVersion > 0 &&
-      this.lastRunnerVersion < RUNNER4_INTRODUCED &&
-      RUNNER4_ACTIONS.has(action)
+      needsRunner !== undefined &&
+      this.lastRunnerVersion < needsRunner
     ) {
       new ResultModal(
         this.app,
         "Termux runner is too old for this action",
         [
-          `'${action}' needs runner v${RUNNER4_INTRODUCED}; this device answers with v${this.lastRunnerVersion}.`,
+          `'${action}' needs runner v${needsRunner}; this device answers with v${this.lastRunnerVersion}.`,
           RUNNER_OUTDATED_HINT,
         ],
         {
@@ -1589,6 +1617,88 @@ export default class NativeGitBridgePlugin extends Plugin {
     await leaf.setViewState({ type: NGB_STATUS_VIEW, active: reveal });
     if (reveal) this.app.workspace.revealLeaf(leaf);
     this.pushStatusToView();
+  }
+
+  // ------------------------------------------------- repository history & diff panes
+
+  /** Open (or reveal and refresh) the repository-wide history panel. */
+  async openHistoryPanel(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW);
+    if (existing.length > 0) {
+      this.app.workspace.revealLeaf(existing[0]!);
+      const view = existing[0]!.view;
+      if (view instanceof HistoryView) await view.refresh();
+      return;
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: NGB_HISTORY_VIEW, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  private async loadRepoLogPage(skip: number, limit: number): Promise<RepoLogEntry[] | null> {
+    const result = await this.runOperation("repo-log", { skip, limit });
+    if (!result) return null;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: history failed", result);
+      return null;
+    }
+    return parseRepoLog(result.data?.log ?? "");
+  }
+
+  /** The diff a commit introduced for one file, in an Obsidian pane. */
+  private async openCommitDiff(file: RepoLogFile, entry: RepoLogEntry): Promise<void> {
+    const short = entry.hash.slice(0, 8);
+    await this.openDiffPane({
+      path: file.path,
+      from: `${entry.hash}^`,
+      to: entry.hash,
+      label: `${short}^ → ${short}`,
+    });
+  }
+
+  /** Tap on a changed file in the status panel: its current diff, in a pane. */
+  private async openStatusDiff(path: string, group: Group): Promise<void> {
+    await this.openDiffPane({
+      path,
+      from: "HEAD",
+      to: "WORKTREE",
+      label: group === "staged" ? "HEAD → working tree (includes staged)" : "HEAD → working tree",
+    });
+  }
+
+  private async openDiffPane(state: DiffViewState): Promise<void> {
+    // Reuse an existing diff pane instead of stacking a new tab per tap.
+    const existing = this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW);
+    const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: NGB_DIFF_VIEW,
+      active: true,
+      state: state as unknown as Record<string, unknown>,
+    });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Unified diff text for the diff pane. A root commit has no parent: when
+   * "<hash>^" fails, the diff is retried against git's canonical empty tree,
+   * so the first commit renders as all-additions instead of an error.
+   */
+  private async loadDiffText(
+    path: string,
+    from: string,
+    to: string
+  ): Promise<{ diff: string; truncated: boolean } | null> {
+    let result = await this.runOperation("diff-file", { path, from, to });
+    if (result && !result.ok && from.endsWith("^")) {
+      result = await this.runOperation("diff-file", { path, from: EMPTY_TREE_HASH, to });
+    }
+    if (!result) return null;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: diff failed", result);
+      return null;
+    }
+    return { diff: result.data?.diff ?? "", truncated: result.data?.truncated === "true" };
   }
 
   /** Tick the elapsed-time label without rebuilding the panel. */

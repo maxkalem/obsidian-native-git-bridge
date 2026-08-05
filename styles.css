@@ -88,6 +88,7 @@
   margin-bottom: var(--size-4-2);
 }
 .ngb-sv-strip-left { display: flex; align-items: center; gap: var(--size-4-1); min-width: 0; }
+.ngb-sv-strip-right { display: flex; align-items: center; gap: var(--size-4-1); flex: 0 0 auto; }
 .ngb-sv-progress-text {
   color: var(--text-accent); font-size: var(--font-ui-small);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -218,3 +219,101 @@
 
 /* Full-width textarea (was an inline style, which themes cannot override). */
 .ngb-textarea-full { width: 100%; }
+
+/* ---------------------------------------------------------------- history */
+
+.ngb-history-view .ngb-hist-list { margin-top: var(--size-4-2); }
+.ngb-hist-commit { margin-bottom: var(--size-4-1); }
+.ngb-hist-header { display: flex; align-items: center; gap: var(--size-2-2); }
+.ngb-hist-titles { flex: 1 1 auto; min-width: 0; }
+.ngb-hist-subject {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-weight: var(--font-medium);
+}
+.ngb-hist-meta { font-size: var(--font-smaller); }
+.ngb-hist-rename {
+  font-size: var(--font-smaller); margin-left: var(--size-2-2);
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+/* ------------------------------------------------------------- diff pane */
+
+.ngb-diff-view { padding: var(--size-4-2); overflow: auto; }
+.ngb-diff-pane-body { margin-top: var(--size-4-2); }
+
+/* diff2html (line-by-line) rendering, adapted to Obsidian CSS variables.
+   Derived from diff2html's MIT-licensed stylesheet
+   (https://github.com/rtfpessoa/diff2html/blob/master/LICENSE.md,
+   Copyright 2014-2016 Rodrigo Fernandes) with the Obsidian-variable
+   adaptations pioneered by obsidian-version-history-diff (MIT,
+   @kometenstaub and contributors). Scoped under .ngb-diff-view. */
+
+.ngb-diff-view {
+  --ngb-diff-del-bg: rgba(255, 71, 80, 0.25);
+  --ngb-diff-del-hl: rgba(150, 5, 10, 0.46);
+  --ngb-diff-ins-bg: rgba(104, 211, 104, 0.25);
+  --ngb-diff-ins-hl: rgba(35, 192, 35, 0.31);
+}
+.ngb-diff-view .d2h-d-none { display: none; }
+.ngb-diff-view .d2h-wrapper { text-align: left; border-radius: 0.25em; overflow: auto; }
+.ngb-diff-view .d2h-file-header { display: none; }
+.ngb-diff-view .d2h-file-wrapper {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 3px; margin-bottom: 1em; max-height: 100%;
+}
+.ngb-diff-view .d2h-diff-table {
+  border-collapse: collapse;
+  font-family: var(--font-monospace);
+  font-size: var(--font-smaller);
+  width: 100%;
+}
+.ngb-diff-view .d2h-files-diff { width: 100%; }
+.ngb-diff-view .d2h-file-diff { border-radius: 5px; }
+.ngb-diff-view .d2h-code-line { padding-left: 6em; padding-right: 1.5em; }
+.ngb-diff-view .d2h-code-line {
+  display: inline-block; user-select: none; white-space: nowrap; width: 100%;
+}
+.ngb-diff-view .d2h-code-line-ctn {
+  word-wrap: normal; background: none; display: inline-block; padding: 0;
+  user-select: text; vertical-align: middle; width: 100%; white-space: pre-wrap;
+}
+.ngb-diff-view .d2h-code-line del {
+  background-color: var(--ngb-diff-del-hl); color: var(--text-normal);
+}
+.ngb-diff-view .d2h-code-line del,
+.ngb-diff-view .d2h-code-line ins {
+  border-radius: 0.2em; display: inline-block; margin-top: -1px;
+  text-decoration: none; vertical-align: middle;
+}
+.ngb-diff-view .d2h-code-line ins {
+  background-color: var(--ngb-diff-ins-hl); text-align: left;
+}
+.ngb-diff-view .d2h-code-line-prefix {
+  word-wrap: normal; background: none; display: inline; padding: 0; white-space: pre;
+}
+.ngb-diff-view .line-num1 { float: left; }
+.ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
+  box-sizing: border-box; overflow: hidden; text-overflow: ellipsis;
+  width: 2.5em; padding-left: 0;
+}
+.ngb-diff-view .line-num2 { float: right; }
+.ngb-diff-view .d2h-code-linenumber {
+  background-color: var(--background-primary);
+  border: solid var(--background-modifier-border); border-width: 0 1px;
+  box-sizing: border-box; color: var(--text-faint); display: inline-block;
+  position: absolute; text-align: right; width: 5.5em; direction: rtl;
+  user-select: none;
+}
+.ngb-diff-view .d2h-code-linenumber:after { content: "\200b"; }
+.ngb-diff-view .d2h-emptyplaceholder {
+  background-color: var(--background-primary);
+  border-color: var(--background-modifier-border);
+}
+.ngb-diff-view .d2h-code-line-prefix, .ngb-diff-view .d2h-emptyplaceholder { user-select: none; }
+.ngb-diff-view .d2h-del { background-color: var(--ngb-diff-del-bg); border-color: var(--ngb-diff-del-hl); }
+.ngb-diff-view .d2h-ins { background-color: var(--ngb-diff-ins-bg); border-color: var(--ngb-diff-ins-hl); }
+.ngb-diff-view .d2h-info {
+  background-color: var(--background-primary);
+  border-color: var(--background-modifier-border);
+  color: var(--text-faint);
+}

@@ -12,6 +12,9 @@
   },
   "keywords": ["obsidian", "git", "termux", "android", "sparse-checkout"],
   "license": "MIT",
+  "dependencies": {
+    "diff2html": "^3.4.52"
+  },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "esbuild": "^0.21.5",

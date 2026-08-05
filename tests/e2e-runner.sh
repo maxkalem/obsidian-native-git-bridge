@@ -278,6 +278,37 @@ RES="$RUNTIME/results/r-20260804T100003Z-diff01.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "diff-file ok"
 check 'jq -r ".data.diff" "$RES" | grep -q "^+worktree"' "diff shows worktree addition"
 
+echo "# phase 4: repository-wide log for the history panel (repo-log)"
+req "r-20260804T100003Z-rlog01" repo-log "$TOKEN" '{"limit":10,"skip":0}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-rlog01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repo-log ok"
+check '[ "$(jq -r ".data.log" "$RES" | grep -c "hist:")" = "3" ]' "repo-log lists the three hist commits"
+check 'jq -r ".data.log" "$RES" | grep -q "^R[0-9]*.*hist note.md.*hist renamed.md"' "repo-log carries name-status rename lines"
+req "r-20260804T100003Z-rlog02" repo-log "$TOKEN" '{"limit":1,"skip":1}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-rlog02.json"
+check '[ "$(jq -r ".data.log" "$RES" | grep -c "^\x1e" || true)" -le 1 ]' "repo-log pagination honours limit"
+
+echo "# phase 4: diff of a commit against its parent (history panel taps)"
+REN_HASH="$(git log --format=%H --grep 'hist: rename' -n1)"
+req "r-20260804T100003Z-diff02" diff-file "$TOKEN" "{\"path\":\"Notes/hist renamed.md\",\"from\":\"$REN_HASH^\",\"to\":\"$REN_HASH\"}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-diff02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "diff-file accepts a single trailing ^ on a commit"
+check 'jq -r ".data.diff" "$RES" | grep -q "hist renamed.md"' "parent diff mentions the file"
+req "r-20260804T100003Z-diff03" diff-file "$TOKEN" '{"path":"Notes/note.md","from":"HEAD^^","to":"HEAD"}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T100003Z-diff03.json" >/dev/null' "double ^ is still rejected"
+
+echo "# phase 4: root commit diff against the canonical empty tree"
+ROOT_HASH="$(git rev-list --max-parents=0 HEAD | head -1)"
+req "r-20260804T100003Z-diff04" diff-file "$TOKEN" "{\"path\":\"Notes/note.md\",\"from\":\"4b825dc642cb6eb9a060e54bf8d69288fbee4904\",\"to\":\"$ROOT_HASH\"}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-diff04.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "empty-tree diff ok (root-commit fallback path)"
+check 'jq -r ".data.diff" "$RES" | grep -q "^+note"' "root commit renders as additions"
+
 echo "# phase 4: restore file from commit after confirmation (runner side)"
 HEAD_HASH="$(git rev-parse HEAD)"
 req "r-20260804T100004Z-rest01" restore-file "$TOKEN" "{\"path\":\"Notes/hist renamed.md\",\"commit\":\"$HEAD_HASH\",\"protectedPaths\":[\"Private/Hidden\",\"Projects/Archive\"]}"
