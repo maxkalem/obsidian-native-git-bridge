@@ -66,6 +66,11 @@
   color: var(--text-muted); margin-left: 2px;
 }
 .ngb-sv-file-actions { display: flex; gap: 0; flex: 0 0 auto; }
+/* File rows nested under an untracked folder row (the folder is a grouping
+   control, not a replacement for its files). Indent past the folder chevron. */
+.ngb-sv-file-child { padding-left: var(--size-4-6); }
+.ngb-sv-row-chevron { flex: 0 0 auto; display: inline-flex; align-items: center; padding-right: var(--size-2-2); cursor: pointer; }
+.ngb-sv-row-chevron svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
 .ngb-code-D { color: var(--text-error); }
 .ngb-code-A, .ngb-code-\? { color: var(--text-success, #08b94e); }
 .ngb-code-U { color: var(--text-error); font-weight: 700; }

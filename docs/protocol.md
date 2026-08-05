@@ -68,7 +68,14 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
 ## `status` result data
 `branchInfo` (git status --porcelain=v2 --branch), `sparseEnabled`,
 `sparseCone`, `sparseCheckoutList`, `skipWorktreeCount`, `lastCommit`
-(`git log -1 --format=%H%x09%cI%x09%s`), `remoteUrlRedacted`.
+(`git log -1 --format=%H%x09%cI%x09%s`), `remoteUrlRedacted`,
+`untrackedChildren` (runner v5+: newline-separated raw paths of the files
+inside fully untracked directories — git status collapses such a directory to
+one `dir/` entry, so without this field the plugin cannot show the files in a
+freshly created folder; collected via `git ls-files --others
+--exclude-standard -z`, so quoting never applies). The same fields ride along
+on every mutating action's result so the plugin can refresh without a second
+round trip.
 
 ## `verify-sparse-safety` result data
 `statusProtected` (porcelain v1 limited to protected paths), `stagedProtected`

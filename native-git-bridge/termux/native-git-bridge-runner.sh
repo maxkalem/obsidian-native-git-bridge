@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=4
+RUNNER_VERSION=5
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -186,6 +186,23 @@ action_ping() {
   DATA=$(obj_from_fields pong "pong" runnerVersion "$RUNNER_VERSION")
 }
 
+# Files hidden inside fully untracked directories: git status collapses such a
+# directory to a single "dir/" entry, so the plugin could not show (or act on)
+# the notes inside a freshly created folder. Enumerate them here, in the same
+# result — a second Termux round trip per folder would be far too expensive.
+# Everything runs -z (NUL-separated, never quoted, immune to core.quotePath),
+# then joins with newlines: vault file names cannot contain newlines (both the
+# plugin's path validation and this runner reject control characters).
+collect_untracked_children() {
+  UNTRACKED_CHILDREN=""
+  local dirs=() d
+  while IFS= read -r -d '' d; do
+    case "$d" in */) dirs+=("$d") ;; esac
+  done < <(git ls-files --others --exclude-standard --directory --no-empty-directory -z 2>/dev/null || true)
+  [ "${#dirs[@]}" -eq 0 ] && return 0
+  UNTRACKED_CHILDREN="$(git ls-files --others --exclude-standard -z -- "${dirs[@]}" 2>/dev/null | tr '\0' '\n')"
+}
+
 collect_status_fields() {
   run_git status --porcelain=v2 --branch || true; local branch_info="$GIT_OUT"
   local sparse_enabled sparse_cone sparse_list skip_count last_commit remote_url
@@ -196,6 +213,7 @@ collect_status_fields() {
   skip_count="$(git ls-files -v 2>/dev/null | grep -c '^S ' || true)"
   last_commit="$(git log -1 --format='%H%x09%cI%x09%s' 2>/dev/null || true)"
   remote_url="$(git remote get-url origin 2>/dev/null | redact_url || true)"
+  collect_untracked_children
   DATA=$(obj_from_fields \
     branchInfo "$branch_info" \
     sparseEnabled "$sparse_enabled" \
@@ -203,7 +221,8 @@ collect_status_fields() {
     sparseList "$sparse_list" \
     skipWorktreeCount "$skip_count" \
     lastCommit "$last_commit" \
-    remoteUrl "$remote_url")
+    remoteUrl "$remote_url" \
+    untrackedChildren "$UNTRACKED_CHILDREN")
 }
 
 action_status() { collect_status_fields; }

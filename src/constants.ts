@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 4;
+export const RUNNER_MIN_VERSION = 5;
 
 /**
  * No baked-in defaults: protected paths are derived from the repository's own

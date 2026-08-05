@@ -20,6 +20,12 @@ export interface StatusViewData {
   unstaged: GitFileEntry[];
   untracked: string[];
   conflicted: GitFileEntry[];
+  /**
+   * Files inside fully untracked directories, keyed by the "dir/" entry in
+   * `untracked` (v5+ runner). The folder row becomes a grouping control with
+   * the files rendered as actionable child rows underneath it.
+   */
+  untrackedChildren?: Record<string, string[]>;
   sparse?: SparseStateSummary;
   activeOperation?: string;
   /** Progress line shown at the bottom while an operation runs. */
@@ -85,6 +91,12 @@ export class StatusView extends ItemView {
     unstaged: false,
     untracked: true,
   };
+  /**
+   * Untracked folder rows the user collapsed. Folders start EXPANDED: the
+   * whole point of listing their children is that a freshly created folder
+   * must show the notes inside it as actionable rows.
+   */
+  private collapsedDirs = new Set<string>();
 
   constructor(leaf: WorkspaceLeaf, private actions: StatusViewActions) {
     super(leaf);
@@ -308,7 +320,38 @@ export class StatusView extends ItemView {
       return;
     }
     for (const it of items) {
-      const rowEl = list.createDiv({ cls: "ngb-sv-file" });
+      this.renderRow(list, group, it, 0);
+      // An untracked FOLDER is a grouping control, not a replacement for the
+      // file rows inside it: render its files (reported by a v5+ runner) as
+      // actionable child rows, collapsible via the folder row's chevron.
+      const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : undefined;
+      if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
+        for (const c of children) this.renderRow(list, group, { path: c, code: "?" }, 1);
+      }
+    }
+  }
+
+  private renderRow(
+    list: HTMLElement,
+    group: Group,
+    it: { path: string; code: string },
+    depth: 0 | 1
+  ): void {
+    {
+      const rowEl = list.createDiv({ cls: depth === 0 ? "ngb-sv-file" : "ngb-sv-file ngb-sv-file-child" });
+      const children = group === "untracked" && depth === 0 ? this.data?.untrackedChildren?.[it.path] : undefined;
+      if (children && children.length > 0) {
+        // Same collapse affordance as the group headers, scoped to this folder.
+        const chev = rowEl.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
+        setIcon(chev, this.collapsedDirs.has(it.path) ? "chevron-right" : "chevron-down");
+        chev.setAttribute("aria-label", this.collapsedDirs.has(it.path) ? "Expand folder" : "Collapse folder");
+        chev.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (this.collapsedDirs.has(it.path)) this.collapsedDirs.delete(it.path);
+          else this.collapsedDirs.add(it.path);
+          this.render();
+        });
+      }
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
       const kind = CHANGE_LABEL[it.code] ?? it.code;
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
@@ -454,7 +497,15 @@ export function summaryToViewData(
   s: GitStatusSummary,
   extra: Omit<
     StatusViewData,
-    "state" | "branch" | "ahead" | "behind" | "staged" | "unstaged" | "untracked" | "conflicted"
+    | "state"
+    | "branch"
+    | "ahead"
+    | "behind"
+    | "staged"
+    | "unstaged"
+    | "untracked"
+    | "untrackedChildren"
+    | "conflicted"
   >,
   state: string
 ): StatusViewData {
@@ -466,6 +517,7 @@ export function summaryToViewData(
     staged: s.staged,
     unstaged: s.unstaged,
     untracked: s.untracked,
+    untrackedChildren: s.untrackedChildren,
     conflicted: s.conflicted,
     ...extra,
   };

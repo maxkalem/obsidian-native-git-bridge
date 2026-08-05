@@ -7,6 +7,7 @@ import {
   __setPlatformAndroid,
 } from "./mocks/obsidian";
 import NativeGitBridgePlugin, { compareVersions } from "../src/main";
+import { RUNNER_MIN_VERSION } from "../src/constants";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
 
@@ -523,7 +524,7 @@ describe("version advice across the three parts", () => {
     // manifest version in the harness is 0.4.0; make the companion match and
     // the runner the expected one.
     h.plugin.onCompanionAck("run", "1", "0.4.0");
-    h.plugin.lastRunnerVersion = 4;
+    h.plugin.lastRunnerVersion = RUNNER_MIN_VERSION;
     expect(h.plugin.versionAdvice()).toEqual([]);
   });
 

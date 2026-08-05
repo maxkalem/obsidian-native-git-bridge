@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   countSkipWorktree,
+  groupUntrackedChildren,
   parseLastCommit,
   parseNameStatus,
   parseSparseState,
@@ -140,5 +141,36 @@ describe("sparseExclusionPaths", () => {
   });
   it("deduplicates and trims slash variants", () => {
     expect(sparseExclusionPaths(["!/A/B/", "!A/B", "! /A/B".trim()])).toEqual(["A/B"]);
+  });
+});
+
+describe("groupUntrackedChildren", () => {
+  // The runner's untrackedChildren field: newline-separated raw paths of files
+  // inside fully untracked directories (git status collapses those to "dir/").
+  it("groups files under their untracked directory entry", () => {
+    expect(
+      groupUntrackedChildren("Inbox/a.md\nInbox/deep/b.md\n", ["Inbox/", "loose.md"])
+    ).toEqual({ "Inbox/": ["Inbox/a.md", "Inbox/deep/b.md"] });
+  });
+  it("keeps disjoint directories separate", () => {
+    expect(
+      groupUntrackedChildren("A/x.md\nB/y.md", ["A/", "B/"])
+    ).toEqual({ "A/": ["A/x.md"], "B/": ["B/y.md"] });
+  });
+  it("drops children matching no reported directory instead of inventing rows", () => {
+    expect(groupUntrackedChildren("Elsewhere/z.md", ["Inbox/"])).toEqual({});
+  });
+  it("is segment-exact: 'Doc/' children never land under 'Docs/'", () => {
+    expect(groupUntrackedChildren("Docs/a.md", ["Doc/", "Docs/"])).toEqual({
+      "Docs/": ["Docs/a.md"],
+    });
+  });
+  it("ignores blank lines, CR endings and the directory entry itself", () => {
+    expect(groupUntrackedChildren("Inbox/a.md\r\n\nInbox/", ["Inbox/"])).toEqual({
+      "Inbox/": ["Inbox/a.md"],
+    });
+  });
+  it("returns empty when no untracked directories are reported", () => {
+    expect(groupUntrackedChildren("whatever.md", ["loose.md"])).toEqual({});
   });
 });

@@ -32,7 +32,7 @@ var import_obsidian12 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 4;
+var RUNNER_MIN_VERSION = 5;
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
 var REQUESTS_DIR = "requests";
@@ -64,6 +64,7 @@ var COMPANION_GET_TERMUX_URI = "nativegitbridge://get-termux";
 var RUNNER_OUTDATED_HINT = "The Termux runner script is outdated. Updating the plugin does not update it \u2014 re-run the install command in Termux (Settings -> Native Git Bridge -> Copy command, or the 'Set up Termux' button in the companion app).";
 
 // src/types.ts
+var RUNNER4_INTRODUCED = 4;
 var RUNNER4_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-exclude-add",
   "sparse-exclude-remove",
@@ -1271,6 +1272,20 @@ function parseStatusPorcelainV2(text) {
   }
   return s;
 }
+function groupUntrackedChildren(childrenText, untracked) {
+  const dirs = untracked.filter((u) => u.endsWith("/"));
+  const out = {};
+  if (dirs.length === 0) return out;
+  for (const rawLine of childrenText.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") continue;
+    const dir = dirs.find((d) => line.startsWith(d));
+    if (dir === void 0) continue;
+    if (line === dir) continue;
+    (out[dir] ??= []).push(line);
+  }
+  return out;
+}
 function pushEntry(s, e) {
   if (e.index !== ".") s.staged.push(e);
   if (e.worktree !== ".") s.unstaged.push(e);
@@ -1915,6 +1930,12 @@ var StatusView = class extends import_obsidian10.ItemView {
       unstaged: false,
       untracked: true
     };
+    /**
+     * Untracked folder rows the user collapsed. Folders start EXPANDED: the
+     * whole point of listing their children is that a freshly created folder
+     * must show the notes inside it as actionable rows.
+     */
+    this.collapsedDirs = /* @__PURE__ */ new Set();
   }
   getViewType() {
     return NGB_STATUS_VIEW;
@@ -2084,7 +2105,28 @@ var StatusView = class extends import_obsidian10.ItemView {
       return;
     }
     for (const it of items) {
-      const rowEl = list.createDiv({ cls: "ngb-sv-file" });
+      this.renderRow(list, group, it, 0);
+      const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : void 0;
+      if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
+        for (const c of children) this.renderRow(list, group, { path: c, code: "?" }, 1);
+      }
+    }
+  }
+  renderRow(list, group, it, depth) {
+    {
+      const rowEl = list.createDiv({ cls: depth === 0 ? "ngb-sv-file" : "ngb-sv-file ngb-sv-file-child" });
+      const children = group === "untracked" && depth === 0 ? this.data?.untrackedChildren?.[it.path] : void 0;
+      if (children && children.length > 0) {
+        const chev = rowEl.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
+        (0, import_obsidian10.setIcon)(chev, this.collapsedDirs.has(it.path) ? "chevron-right" : "chevron-down");
+        chev.setAttribute("aria-label", this.collapsedDirs.has(it.path) ? "Expand folder" : "Collapse folder");
+        chev.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (this.collapsedDirs.has(it.path)) this.collapsedDirs.delete(it.path);
+          else this.collapsedDirs.add(it.path);
+          this.render();
+        });
+      }
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
       const kind = CHANGE_LABEL[it.code] ?? it.code;
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
@@ -2201,6 +2243,7 @@ function summaryToViewData(s, extra, state) {
     staged: s.staged,
     unstaged: s.unstaged,
     untracked: s.untracked,
+    untrackedChildren: s.untrackedChildren,
     conflicted: s.conflicted,
     ...extra
   };
@@ -2828,12 +2871,12 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
       this.openSetupGuide("This device is not paired with a Termux runner yet.");
       return null;
     }
-    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER_MIN_VERSION && RUNNER4_ACTIONS.has(action)) {
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER4_INTRODUCED && RUNNER4_ACTIONS.has(action)) {
       new ResultModal(
         this.app,
         "Termux runner is too old for this action",
         [
-          `'${action}' needs runner v${RUNNER_MIN_VERSION}; this device answers with v${this.lastRunnerVersion}.`,
+          `'${action}' needs runner v${RUNNER4_INTRODUCED}; this device answers with v${this.lastRunnerVersion}.`,
           RUNNER_OUTDATED_HINT
         ],
         {
@@ -3121,6 +3164,8 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
     }
     const d = result.data ?? {};
     const status = parseStatusPorcelainV2(d.branchInfo ?? "");
+    if (d.untrackedChildren !== void 0)
+      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
     const sparse = parseSparseState({
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",
@@ -3324,6 +3369,8 @@ var NativeGitBridgePlugin = class extends import_obsidian12.Plugin {
   absorbStatusData(d) {
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);
+    if (d.untrackedChildren !== void 0)
+      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
     const sparse = parseSparseState({
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",

@@ -119,6 +119,33 @@ export function parseStatusPorcelainV2(text: string): GitStatusSummary {
   return s;
 }
 
+/**
+ * Group the runner's `untrackedChildren` listing (newline-separated file
+ * paths, raw/unquoted because the runner collects them with `-z`) under the
+ * untracked directory entries reported by git status. Directories reported by
+ * status are disjoint (git collapses at the topmost untracked level), so each
+ * child belongs to at most one of them; children matching no reported
+ * directory are dropped rather than invented into the UI.
+ */
+export function groupUntrackedChildren(
+  childrenText: string,
+  untracked: readonly string[]
+): Record<string, string[]> {
+  const dirs = untracked.filter((u) => u.endsWith("/"));
+  const out: Record<string, string[]> = {};
+  if (dirs.length === 0) return out;
+  for (const rawLine of childrenText.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") continue;
+    const dir = dirs.find((d) => line.startsWith(d));
+    if (dir === undefined) continue;
+    // The directory row itself is already in `untracked`; keep files only.
+    if (line === dir) continue;
+    (out[dir] ??= []).push(line);
+  }
+  return out;
+}
+
 function pushEntry(s: GitStatusSummary, e: GitFileEntry): void {
   if (e.index !== ".") s.staged.push(e);
   if (e.worktree !== ".") s.unstaged.push(e);

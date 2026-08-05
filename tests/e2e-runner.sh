@@ -89,6 +89,24 @@ check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "status reports spa
 check 'jq -er ".data.sparseList" "$RES" | grep -q "Hidden"' "status lists sparse patterns"
 check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 1 ]' "status reports skip-worktree count"
 
+echo "# test: status enumerates files inside untracked directories (untrackedChildren)"
+# git status collapses a fully untracked directory into one "dir/" entry; the
+# plugin needs the files inside as actionable rows, so the runner lists them.
+mkdir -p "New Folder/nested"
+echo "one" > "New Folder/idea one.md"
+echo "two" > "New Folder/nested/idea two.md"
+echo "loose" > loose.md
+req "r-20260803T100003Z-stat02" status "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260803T100003Z-stat02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "status ok with untracked directory present"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "^? \"\\?New Folder/"' "porcelain still collapses the directory to one entry"
+check 'jq -er ".data.untrackedChildren" "$RES" | grep -qx "New Folder/idea one.md"' "untrackedChildren lists a file inside the new folder"
+check 'jq -er ".data.untrackedChildren" "$RES" | grep -qx "New Folder/nested/idea two.md"' "untrackedChildren lists a nested file"
+check '! jq -er ".data.untrackedChildren" "$RES" | grep -qx "loose.md"' "loose untracked file is NOT duplicated into untrackedChildren"
+check '! jq -er ".data.untrackedChildren" "$RES" | grep -q "Private/Hidden"' "sparse-hidden protected files never appear as untracked children"
+rm -rf "New Folder" loose.md
+
 echo "# test: verify-sparse-safety - clean tree is SAFE (omissions are not deletions)"
 req "r-20260803T100004Z-safe01" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
 bash "$RUNNER"
@@ -365,7 +383,7 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "4" ]' "runnerVersion = 4 reported to the plugin"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "5" ]' "runnerVersion = 5 reported to the plugin"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"

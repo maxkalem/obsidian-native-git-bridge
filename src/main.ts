@@ -11,7 +11,7 @@ import type {
   OperationMarker,
   SparseStateSummary,
 } from "./types";
-import { MUTATING_ACTIONS, RUNNER4_ACTIONS } from "./types";
+import { MUTATING_ACTIONS, RUNNER4_ACTIONS, RUNNER4_INTRODUCED } from "./types";
 import {
   DeviceLocalSettingsStore,
   type DeviceLocalSettings,
@@ -23,6 +23,7 @@ import { RuntimePaths } from "./bridge/runtimePaths";
 import { createRequest } from "./bridge/protocol";
 import { CompanionIntentTransport, type TriggerTransport } from "./bridge/transport";
 import {
+  groupUntrackedChildren,
   parseLastCommit,
   parseSparseState,
   parseStatusPorcelainV2,
@@ -676,14 +677,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     // plugin bug. Name the real cause before spending a round trip.
     if (
       this.lastRunnerVersion > 0 &&
-      this.lastRunnerVersion < RUNNER_MIN_VERSION &&
+      this.lastRunnerVersion < RUNNER4_INTRODUCED &&
       RUNNER4_ACTIONS.has(action)
     ) {
       new ResultModal(
         this.app,
         "Termux runner is too old for this action",
         [
-          `'${action}' needs runner v${RUNNER_MIN_VERSION}; this device answers with v${this.lastRunnerVersion}.`,
+          `'${action}' needs runner v${RUNNER4_INTRODUCED}; this device answers with v${this.lastRunnerVersion}.`,
           RUNNER_OUTDATED_HINT,
         ],
         {
@@ -1028,6 +1029,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     const d = result.data ?? {};
     const status = parseStatusPorcelainV2(d.branchInfo ?? "");
+    if (d.untrackedChildren !== undefined)
+      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
     const sparse = parseSparseState({
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",
@@ -1258,6 +1261,10 @@ export default class NativeGitBridgePlugin extends Plugin {
   private absorbStatusData(d: Record<string, string>): void {
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);
+    // v5+ runners enumerate the files git status collapses into "dir/" lines;
+    // on older runners the field is simply absent and folders stay opaque.
+    if (d.untrackedChildren !== undefined)
+      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
     const sparse = parseSparseState({
       sparseEnabled: d.sparseEnabled ?? "",
       sparseCone: d.sparseCone ?? "",

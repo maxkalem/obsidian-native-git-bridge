@@ -27,6 +27,14 @@ export type BridgeAction =
   | "exclude-remove"
   | "exclude-list";
 
+/**
+ * The runner version that introduced RUNNER4_ACTIONS. The pre-flight gate must
+ * compare against THIS, not RUNNER_MIN_VERSION: the minimum moves with every
+ * runner change (v5 added untrackedChildren), but a v4 runner still executes
+ * these actions perfectly well.
+ */
+export const RUNNER4_INTRODUCED = 4;
+
 /** Actions that only exist from runner v4 on (config management). */
 export const RUNNER4_ACTIONS: ReadonlySet<BridgeAction> = new Set([
   "sparse-exclude-add",
@@ -130,6 +138,13 @@ export interface GitStatusSummary {
   unstaged: GitFileEntry[];
   untracked: string[];
   conflicted: GitFileEntry[];
+  /**
+   * Files inside fully untracked directories, keyed by the directory entry as
+   * it appears in `untracked` (with its trailing slash). git status collapses
+   * such a directory to one "dir/" line; a v5+ runner enumerates the files so
+   * the panel can show them. Absent on results from older runners.
+   */
+  untrackedChildren?: Record<string, string[]>;
 }
 
 export interface SparseStateSummary {
