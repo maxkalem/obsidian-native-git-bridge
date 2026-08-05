@@ -66,9 +66,15 @@
   color: var(--text-muted); margin-left: 2px;
 }
 .ngb-sv-file-actions { display: flex; gap: 0; flex: 0 0 auto; }
-/* File rows nested under an untracked folder row (the folder is a grouping
-   control, not a replacement for its files). Indent past the folder chevron. */
-.ngb-sv-file-child { padding-left: var(--size-4-6); }
+/* Nested rows (untracked children in list layout; folders/files in tree
+   layout). One class per depth level, capped at 6. */
+.ngb-ind-1 { padding-left: var(--size-4-6); }
+.ngb-ind-2 { padding-left: calc(var(--size-4-6) * 2); }
+.ngb-ind-3 { padding-left: calc(var(--size-4-6) * 3); }
+.ngb-ind-4 { padding-left: calc(var(--size-4-6) * 4); }
+.ngb-ind-5 { padding-left: calc(var(--size-4-6) * 5); }
+.ngb-ind-6 { padding-left: calc(var(--size-4-6) * 6); }
+.ngb-sv-folder-name { font-weight: var(--font-medium); color: var(--text-muted); }
 .ngb-sv-row-chevron { flex: 0 0 auto; display: inline-flex; align-items: center; padding-right: var(--size-2-2); cursor: pointer; }
 .ngb-sv-row-chevron svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
 .ngb-code-D { color: var(--text-error); }
@@ -182,7 +188,11 @@
   max-width: 100%;
 }
 /* Same guarantee for any monospace output rendered in modals */
+/* Long stdout/stderr lines must WRAP inside result windows: `pre` alone
+   clipped them off the right edge on phones (overflow-wrap needs wrappable
+   white-space to act on). */
 .ngb-mono, .ngb-output pre { overflow-wrap: anywhere; }
+.ngb-output pre { white-space: pre-wrap; word-break: break-word; }
 
 /* Footer key/value rows: one line each, value right-aligned (no odd wrapping
    in the narrow sidebar, where a fixed label column pushed values down). */
@@ -291,9 +301,18 @@
   box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; width: 2.5em;
 }
 .ngb-diff-view .line-num2 { float: right; }
-.ngb-diff-view .d2h-code-line { padding: 0 0.5em; white-space: pre; }
-.ngb-diff-view .d2h-code-line-ctn { white-space: pre; }
-.ngb-diff-view .d2h-code-line-prefix { user-select: none; white-space: pre; }
+/* diff2html's template HTML is pretty-printed (newlines + indentation BETWEEN
+   the prefix/content spans). The line container must therefore collapse
+   whitespace (nowrap); only the content span itself preserves the file's real
+   spaces (pre, inline-block). `pre` on the container rendered the template
+   indentation as a phantom indent and broke the +/- prefix onto its own line. */
+.ngb-diff-view .d2h-code-line { padding: 0 0.5em; white-space: nowrap; }
+.ngb-diff-view .d2h-code-line-ctn {
+  white-space: pre; display: inline-block; vertical-align: middle;
+}
+.ngb-diff-view .d2h-code-line-prefix {
+  user-select: none; white-space: pre; display: inline-block; vertical-align: middle;
+}
 .ngb-diff-view .d2h-code-line del {
   background-color: var(--ngb-diff-del-hl); color: var(--text-normal);
 }
@@ -323,11 +342,16 @@
   border-color: var(--background-modifier-border);
 }
 
-/* Optional line wrapping (settings toggle): no horizontal scrolling needed. */
-.ngb-diff-view.ngb-diff-wrap .d2h-code-line,
+/* Optional line wrapping (settings toggle): the CONTENT span wraps internally
+   (it is an inline-block), the container keeps collapsing template whitespace. */
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line-ctn {
-  white-space: pre-wrap; word-break: break-word;
+  white-space: pre-wrap; word-break: break-word; max-width: 100%;
 }
+
+/* Invisible characters (settings toggle): the glyphs are inserted by a DOM
+   pass over the rendered diff (spaces -> ·, tabs -> →, CR -> ␍), wrapped in
+   this class so they stay visually secondary. */
+.ngb-diff-view .ngb-ws-glyph { color: var(--text-faint); opacity: 0.7; }
 
 /* ------------------------------------------------- conflict resolution */
 
@@ -368,3 +392,18 @@
 .ngb-conf-ours-head { background: var(--ngb-conf-ours-bg); }
 .ngb-conf-theirs-head { background: var(--ngb-conf-theirs-bg); }
 .ngb-conf-keep { flex: 0 0 auto; font-size: var(--font-ui-small); padding: 0 var(--size-4-2); }
+
+/* ---------------------------------------- platform-aware modal action button */
+
+/* The single agree button of confirm/commit modals (no Cancel anywhere: the
+   modal X is the cancel). Mobile: top-left, mirroring the panel toolbar;
+   desktop: centered under the content. */
+.ngb-modal-action { display: inline-flex; align-items: center; gap: var(--size-2-2); }
+.ngb-modal-action-icon { display: inline-flex; align-items: center; }
+.ngb-modal-action-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
+.ngb-modal-action-top {
+  position: absolute; top: var(--size-4-2); left: var(--size-4-2); z-index: 2;
+}
+/* Keep the title clear of the top-left action on mobile. */
+.ngb-modal-has-top-action .modal-title { padding-left: var(--size-4-16, 4em); }
+.ngb-modal-action-bottom { justify-content: center; }

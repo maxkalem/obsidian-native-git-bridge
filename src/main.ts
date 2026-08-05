@@ -88,11 +88,17 @@ interface SharedUiPrefs {
   showRibbonIcon: boolean;
   /** Wrap long lines in the diff pane instead of scrolling horizontally. */
   wrapDiffLines: boolean;
+  /** Render whitespace glyphs (· → ␍) in the diff pane. */
+  showInvisibles: boolean;
+  /** Render file lists as a folder tree (status + history panels). */
+  treeView: boolean;
 }
 const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showStatusBar: true,
   showRibbonIcon: true,
   wrapDiffLines: false,
+  showInvisibles: false,
+  treeView: false,
 };
 
 const MARKER_KEY = "active-op";
@@ -154,6 +160,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           stageAll: () => void this.cmdStageAll(),
           unstageAll: () => void this.cmdUnstageAll(),
           openLog: () => new OperationLogModal(this.app, this.log).open(),
+          toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
+          folderAction: (group, folderPath, kind) => this.folderAction(group, folderPath, kind),
           openHistory: () => void this.openHistoryPanel(),
           cancel: () => void this.cmdCancel(),
           openFile: (p) => this.openVaultFile(p),
@@ -173,6 +181,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
           openDiffAtCommit: (file, entry) => void this.openCommitDiff(file, entry),
           openFile: (p) => this.openVaultFile(p),
+          treeView: () => this.sharedPrefs.treeView,
+          toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
         })
     );
 
@@ -182,6 +192,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         new DiffView(leaf, {
           loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
+          showInvisibles: () => this.sharedPrefs.showInvisibles,
         })
     );
 
@@ -327,7 +338,37 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   private lastAutoSyncMs = 0;
 
+  private statusPollId: number | null = null;
+
+  /**
+   * (Re)start the status auto-refresh timer (Settings → "Auto-refresh
+   * status"). Fires only while the status panel exists, Obsidian is visible
+   * and nothing is in flight — every refresh is a Termux round trip.
+   */
+  restartStatusPoll(): void {
+    if (this.statusPollId !== null) {
+      window.clearInterval(this.statusPollId);
+      this.statusPollId = null;
+    }
+    const secs = Math.floor(this.deviceSettings.statusRefreshSeconds);
+    if (!Number.isFinite(secs) || secs <= 0) return;
+    this.statusPollId = window.setInterval(() => {
+      void this.maybeAutoStatus();
+    }, secs * 1000);
+    this.registerInterval(this.statusPollId);
+  }
+
+  private async maybeAutoStatus(): Promise<void> {
+    const s = this.deviceSettings;
+    if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled || !s.authToken) return;
+    if (document.visibilityState === "hidden") return;
+    if (this.lock.active || this.runningAction !== null) return;
+    if (this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW).length === 0) return;
+    await this.cmdStatus(true);
+  }
+
   private registerAutomaticActions(): void {
+    this.restartStatusPoll();
     const s = this.deviceSettings;
     if (s.periodicSyncMinutes > 0) {
       this.registerInterval(
@@ -541,7 +582,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           "Native Git Bridge will never disable another plugin automatically.",
         ],
         confirmLabel: "Don't warn again on this device",
-        cancelLabel: "Close",
+        icon: "bell-off",
       },
       async (dontWarnAgain) => {
         if (dontWarnAgain) await this.updateDeviceSettings({ suppressObsidianGitWarning: true });
@@ -1334,10 +1375,17 @@ export default class NativeGitBridgePlugin extends Plugin {
   async setSharedPref(patch: Partial<SharedUiPrefs>): Promise<void> {
     this.sharedPrefs = { ...this.sharedPrefs, ...patch };
     await this.saveData(this.sharedPrefs);
-    // Re-render any open diff panes so a wrap toggle applies immediately.
+    // Re-render open diff panes (from their cached diff — no Termux round
+    // trip) so wrap/invisibles toggles apply immediately; refresh the panels
+    // so a tree/list toggle applies too.
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
       const view = leaf.view;
-      if (view instanceof DiffView) view.applyWrapPref();
+      if (view instanceof DiffView) view.refreshDisplay();
+    }
+    this.pushStatusToView();
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof HistoryView) view.rerender();
     }
   }
 
@@ -1406,6 +1454,10 @@ export default class NativeGitBridgePlugin extends Plugin {
   private renderMutationError(title: string, result: BridgeResult): void {
     const err = result.error;
     const d = result.data ?? {};
+    // A FAILED operation still changed what the user should see (a rejected
+    // pull leaves dirty files, a conflict leaves markers): v6 runners attach
+    // fresh status fields to error results, absorb them before rendering.
+    if (d.branchInfo) this.absorbStatusData(d);
     if (err?.code === "SAFETY_BLOCKED") {
       const report = evaluateSparseSafety(
         d.statusProtected ?? err.stdout ?? "",
@@ -1713,14 +1765,18 @@ export default class NativeGitBridgePlugin extends Plugin {
     });
   }
 
-  /** Tap on a changed file in the status panel: its current diff, in a pane. */
+  /**
+   * Tap on a changed file in the status panel. A STAGED row shows what would
+   * be committed (HEAD → index); an unstaged row shows what is NOT staged yet
+   * (index → worktree) — so a file staged and then edited again shows two
+   * genuinely different diffs.
+   */
   private async openStatusDiff(path: string, group: Group): Promise<void> {
-    await this.openDiffPane({
-      path,
-      from: "HEAD",
-      to: "WORKTREE",
-      label: group === "staged" ? "HEAD → working tree (includes staged)" : "HEAD → working tree",
-    });
+    if (group === "staged") {
+      await this.openDiffPane({ path, from: "HEAD", to: "INDEX", label: "HEAD → staged" });
+      return;
+    }
+    await this.openDiffPane({ path, from: "INDEX", to: "WORKTREE", label: "staged → working tree" });
   }
 
   private async openDiffPane(state: DiffViewState): Promise<void> {
@@ -1849,6 +1905,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       progress: this.progressText ?? undefined,
       runningAction: this.runningAction ?? undefined,
       runningPath: this.runningPath ?? undefined,
+      treeView: this.sharedPrefs.treeView,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled",
@@ -2099,14 +2156,75 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.notify("Unstaged all changes.");
   }
 
-  async cmdStageFile(path: string): Promise<void> {
+  async cmdStageFile(path: string, mode: "all" | "update" = "all"): Promise<void> {
     const result = await this.runOperation("stage-file", {
       path,
+      mode,
       protectedPaths: this.effectiveProtectedPaths(),
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
     this.absorbStatusData(result.data ?? {});
+  }
+
+  /**
+   * Tree-layout folder actions, scoped to the GROUP the folder row lives in:
+   * stage in "Changes" stages tracked changes only (`git add -u`), stage in
+   * "Untracked" stages the new files (`git add`), unstage touches only what
+   * was staged (`git restore --staged`), discard in "Untracked" moves the new
+   * files to Obsidian's trash (reversible), elsewhere it is the confirmed
+   * git discard. One request per folder — never one per file.
+   */
+  folderAction(group: Group, folderPath: string, kind: "stage" | "unstage" | "discard"): void {
+    if (kind === "stage") {
+      void this.cmdStageFile(folderPath, group === "unstaged" ? "update" : "all");
+      return;
+    }
+    if (kind === "unstage") {
+      void this.cmdUnstageFile(folderPath);
+      return;
+    }
+    if (group === "untracked") {
+      this.confirmTrashUntrackedFolder(folderPath);
+      return;
+    }
+    this.cmdDiscardFile(folderPath);
+  }
+
+  /** Move every untracked entry under a folder to Obsidian's trash, confirmed. */
+  private confirmTrashUntrackedFolder(folderPath: string): void {
+    const st = this.lastStatus?.status;
+    if (!st) return;
+    const prefix = `${folderPath}/`;
+    // Untracked entries under the folder as git reported them: whole
+    // untracked directories move as one, plus individual files.
+    const targets = st.untracked.filter((u) => u.startsWith(prefix) || u === prefix);
+    if (targets.length === 0) return;
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Move new files to trash?",
+        body: [
+          `Folder: ${folderPath}`,
+          `${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} will move to Obsidian's trash (.trash in the vault) — this is reversible from there.`,
+        ],
+        confirmLabel: "Move to trash",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        for (const t of targets) {
+          const p = t.endsWith("/") ? t.slice(0, -1) : t;
+          try {
+            await this.app.vault.adapter.trashLocal(p);
+          } catch (e) {
+            this.log.add("error", "discard-file", `Trash failed for ${p}: ${String(e)}`);
+          }
+        }
+        this.notify(`Moved ${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} to the trash.`);
+        await this.cmdStatus(true);
+      }
+    ).open();
   }
 
   async cmdUnstageFile(path: string): Promise<void> {

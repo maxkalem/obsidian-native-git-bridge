@@ -674,10 +674,20 @@ action_diff_file() {
   from=$(jq -r '.args.from // empty' "$req_file")
   to=$(jq -r '.args.to // "WORKTREE"' "$req_file")
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
-  valid_commitish "$from" || { ERROR=$(err_json BAD_REQUEST "Invalid 'from' commit." "" ""); return 1; }
-  if [ "$to" = "WORKTREE" ]; then
+  # INDEX pseudo-refs: a STAGED row diffs HEAD → index (git diff --cached), an
+  # UNSTAGED row diffs index → worktree (plain git diff). Both sides showing
+  # HEAD → worktree made a stage-then-edit file look identical in both rows.
+  if [ "$from" = "INDEX" ]; then
+    [ "$to" = "WORKTREE" ] || { ERROR=$(err_json BAD_REQUEST "'from: INDEX' only diffs against WORKTREE." "" ""); return 1; }
+    run_git diff --find-renames -- "$path" || true
+  elif [ "$to" = "INDEX" ]; then
+    valid_commitish "$from" || { ERROR=$(err_json BAD_REQUEST "Invalid 'from' commit." "" ""); return 1; }
+    run_git diff --cached --find-renames "$from" -- "$path" || true
+  elif [ "$to" = "WORKTREE" ]; then
+    valid_commitish "$from" || { ERROR=$(err_json BAD_REQUEST "Invalid 'from' commit." "" ""); return 1; }
     run_git diff --find-renames "$from" -- "$path" || true
   else
+    valid_commitish "$from" || { ERROR=$(err_json BAD_REQUEST "Invalid 'from' commit." "" ""); return 1; }
     valid_commitish "$to" || { ERROR=$(err_json BAD_REQUEST "Invalid 'to' commit." "" ""); return 1; }
     run_git diff --find-renames "$from" "$to" -- "$path" || true
   fi
@@ -732,14 +742,27 @@ refuse_if_protected() { # $1 path
 }
 
 action_stage_file() {
-  local req_file="$1" path
+  local req_file="$1" path mode
   path=$(jq -r '.args.path // empty' "$req_file")
+  mode=$(jq -r '.args.mode // "all"' "$req_file")
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
   read_protected_paths "$req_file" || return 1
   refuse_if_protected "$path" || return 1
-  if ! run_git add -- "$path"; then
-    ERROR=$(err_json GIT_FAILED "git add failed." "$GIT_OUT" "$GIT_ERR"); return 1
-  fi
+  case "$mode" in
+    all)
+      # Files and folders alike; on a folder this also picks up untracked files.
+      if ! run_git add -- "$path"; then
+        ERROR=$(err_json GIT_FAILED "git add failed." "$GIT_OUT" "$GIT_ERR"); return 1
+      fi ;;
+    update)
+      # Tracked changes only (folder rows in the "Changes" group): untracked
+      # files under the folder must NOT be swept in by a tracked-group action.
+      if ! run_git add -u -- "$path"; then
+        ERROR=$(err_json GIT_FAILED "git add -u failed." "$GIT_OUT" "$GIT_ERR"); return 1
+      fi ;;
+    *)
+      ERROR=$(err_json BAD_REQUEST "Invalid stage mode (must be 'all' or 'update')." "" ""); return 1 ;;
+  esac
   collect_status_fields
 }
 
@@ -1004,6 +1027,20 @@ process_request() {
   esac
   [ "$ERROR" != "null" ] && ok=false
 
+  # FAILED mutating actions still carry fresh status fields: a rejected pull
+  # or a blocked commit changes what the user should see (conflict markers,
+  # dirty files), and the plugin must not keep rendering the stale state. The
+  # error payload (e.g. data.conflicts) is preserved by merging.
+  if [ "$ok" = false ]; then
+    case "$action" in
+      pull|commit|push|sync|sparse-reapply|restore-file|abort-merge|stage-file|unstage-file|discard-file|stage-all|unstage-all|resolve-conflict)
+        error_data="$DATA"
+        collect_status_fields
+        [ "$error_data" != "null" ] && [ -n "$error_data" ] && DATA=$(merge_data "$error_data" "$DATA")
+        ;;
+    esac
+  fi
+
   write_result "$id" "$action" "$ok" "$ec" "$DATA" "$ERROR" "$started"
   log "DONE $id action=$action ok=$ok"
   json_cleanup
@@ -1045,6 +1082,13 @@ acquire_lock() {
 }
 
 acquire_lock
+
+# One line on stdout for the companion app's probe: Termux returns stdout in
+# the RUN_COMMAND result bundle, so the setup screen can learn the CURRENT
+# runner version right after an update instead of waiting for Obsidian to
+# reopen it. Plugin-triggered runs have no result receiver — stdout is simply
+# discarded there.
+echo "NGB_RUNNER_VERSION=$RUNNER_VERSION"
 
 # Requests interrupted mid-flight (device killed Termux) are retried ONCE.
 # A `.retried` marker enforces the cap: a request that reliably kills the

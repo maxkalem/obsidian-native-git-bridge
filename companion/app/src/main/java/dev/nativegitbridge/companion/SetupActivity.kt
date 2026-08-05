@@ -76,6 +76,16 @@ class SetupActivity : Activity() {
                 .putBoolean(KEY_PROBE_OK, ok)
                 .putString(KEY_PROBE_MSG, if (ok) "" else "errmsg=$errmsg err=$err exit=$exitCode")
                 .apply()
+            // The runner prints its version on stdout precisely for this
+            // probe: learn the CURRENT number here, so an outdated-runner
+            // warning clears right after the user re-ran the installer,
+            // without waiting for Obsidian to reopen this screen.
+            val stdout = bundle?.getString("stdout") ?: ""
+            val version = Regex("NGB_RUNNER_VERSION=(\\d+)").find(stdout)?.groupValues?.get(1)
+            if (version != null) {
+                prefs().edit().putString(KEY_RUNNER_VERSION, version).apply()
+                renderVersions()
+            }
             if (probeIsManual) {
                 probeIsManual = false
                 Toast.makeText(

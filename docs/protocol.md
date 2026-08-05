@@ -40,7 +40,14 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
   `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses
   non-conflicted paths and protected paths, then `git checkout --<side>` +
   `git add` to mark the file resolved — only ever on an explicit user choice;
-  the bridge never picks a side by itself). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
+  the bridge never picks a side by itself). Also v6: `diff-file` accepts the
+  `INDEX` pseudo-ref (`HEAD→INDEX` = `git diff --cached`, `INDEX→WORKTREE` =
+  plain `git diff`; INDEX pairs with nothing else), `stage-file` accepts
+  `args.mode` = `all` (default) | `update` (`git add -u`, for folder rows in
+  the tracked-changes group), FAILED mutating actions still attach fresh
+  status fields to `data` (merged with any error payload such as
+  `data.conflicts`), and the runner prints `NGB_RUNNER_VERSION=<n>` on stdout
+  so the companion app's probe can learn the current runner version. `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
   (validated on both sides) and enforce the sparse safety gate; `commit`/`sync`
   require `args.message` (`sync` falls back to a default). Conflicts are returned
   as `error.code = "CONFLICT"` with `data.conflicts`; safety violations as

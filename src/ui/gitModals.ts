@@ -1,4 +1,5 @@
 import { App, Modal } from "obsidian";
+import { placeModalAction } from "./modals";
 
 /** Commit message input with explicit, labeled buttons. Resolves null on cancel. */
 export class CommitMessageModal extends Modal {
@@ -21,14 +22,6 @@ export class CommitMessageModal extends Modal {
     ta.placeholder = this.opts.placeholder;
     ta.value = this.opts.initial ?? "";
     const note = c.createDiv({ cls: "ngb-invalid" });
-    const btns = c.createDiv({ cls: "ngb-buttons" });
-    const cancel = btns.createEl("button", { text: "Cancel" });
-    cancel.addEventListener("click", () => {
-      this.resolved = true;
-      this.close();
-      this.onDone(null);
-    });
-    const submit = btns.createEl("button", { text: this.opts.submitLabel, cls: "mod-cta" });
     const doSubmit = () => {
       const msg = ta.value.trim();
       if (msg.length === 0) {
@@ -43,7 +36,10 @@ export class CommitMessageModal extends Modal {
       this.close();
       this.onDone(msg);
     };
-    submit.addEventListener("click", doSubmit);
+    // No Cancel button — the X closes and resolves null. The action button
+    // carries the same check icon as the panel's commit button; top-left on
+    // mobile, bottom-center on desktop.
+    placeModalAction(this, { label: this.opts.submitLabel, icon: "check", onClick: doSubmit });
     ta.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") doSubmit();
     });

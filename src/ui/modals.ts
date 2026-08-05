@@ -1,7 +1,35 @@
-import { App, Modal } from "obsidian";
+import { App, Modal, Platform, setIcon } from "obsidian";
 import { addCopyButton } from "./copyable";
 import { DISPLAY_OUTPUT_LIMIT } from "../constants";
 import type { GitStatusSummary, SparseSafetyReport, SparseStateSummary } from "../types";
+
+/**
+ * The ONE action button of an agree/decline modal. There is no Cancel button
+ * anywhere: the modal's close (X) IS the cancel. Placement is platform-aware —
+ * mobile puts the button (icon + label) in the TOP-LEFT corner, mirroring the
+ * panel toolbar; desktop centers it under the content.
+ */
+export function placeModalAction(
+  modal: Modal,
+  opts: { label: string; icon: string; danger?: boolean; onClick: () => void }
+): HTMLButtonElement {
+  const b = document.createElement("button");
+  b.className = `ngb-modal-action ${opts.danger ? "mod-warning" : "mod-cta"}`;
+  const ic = b.createSpan({ cls: "ngb-modal-action-icon" });
+  setIcon(ic, opts.icon);
+  b.createSpan({ text: opts.label });
+  b.setAttribute("aria-label", opts.label);
+  b.addEventListener("click", opts.onClick);
+  if (Platform.isMobile) {
+    modal.modalEl.addClass("ngb-modal-has-top-action");
+    b.addClass("ngb-modal-action-top");
+    modal.modalEl.insertBefore(b, modal.modalEl.firstChild);
+  } else {
+    const wrap = modal.contentEl.createDiv({ cls: "ngb-buttons ngb-modal-action-bottom" });
+    wrap.appendChild(b);
+  }
+  return b;
+}
 
 function outputSection(el: HTMLElement, label: string, text: string | undefined): void {
   if (!text || text.trim() === "") return;
@@ -109,7 +137,8 @@ export class ConfirmModal extends Modal {
       title: string;
       body: string[];
       confirmLabel: string;
-      cancelLabel?: string;
+      /** Icon for the single action button (default: check). */
+      icon?: string;
       danger?: boolean;
     },
     private onDecision: (confirmed: boolean) => void
@@ -122,21 +151,16 @@ export class ConfirmModal extends Modal {
     this.titleEl.setText(this.opts.title);
     const c = this.contentEl;
     for (const line of this.opts.body) linkifyInto(c.createEl("p"), line);
-    const btns = c.createDiv({ cls: "ngb-buttons" });
-    const cancel = btns.createEl("button", { text: this.opts.cancelLabel ?? "Cancel" });
-    cancel.addEventListener("click", () => {
-      this.decided = true;
-      this.close();
-      this.onDecision(false);
-    });
-    const confirm = btns.createEl("button", {
-      text: this.opts.confirmLabel,
-      cls: this.opts.danger ? "mod-warning" : "mod-cta",
-    });
-    confirm.addEventListener("click", () => {
-      this.decided = true;
-      this.close();
-      this.onDecision(true);
+    // No Cancel button: closing the modal (X / backdrop / Esc) declines.
+    placeModalAction(this, {
+      label: this.opts.confirmLabel,
+      icon: this.opts.icon ?? "check",
+      danger: this.opts.danger,
+      onClick: () => {
+        this.decided = true;
+        this.close();
+        this.onDecision(true);
+      },
     });
   }
 

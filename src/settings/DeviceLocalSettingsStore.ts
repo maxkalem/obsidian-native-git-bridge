@@ -36,6 +36,12 @@ export interface DeviceLocalSettings {
   menuSparse: boolean;
   /** File context menu: show the .git/info/exclude add/remove entries. */
   menuExclude: boolean;
+  /**
+   * Auto-refresh status this often (seconds) while the status panel is open.
+   * 0 = off. Device-local: every refresh wakes Termux, so this is a per-device
+   * battery decision, never synced.
+   */
+  statusRefreshSeconds: number;
 }
 
 export const CURRENT_SCHEMA_VERSION = 1;
@@ -63,6 +69,7 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   menuGitignore: true,
   menuSparse: true,
   menuExclude: true,
+  statusRefreshSeconds: 0,
 };
 
 /** Minimal localStorage-compatible backend, injectable for tests. */

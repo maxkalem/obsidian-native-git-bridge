@@ -1,5 +1,6 @@
 import { ItemView, Menu, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
+import { buildPathTree, type PathTreeNode } from "./pathTree";
 import {
   NGB_ICON_PULL,
   NGB_ICON_PUSH,
@@ -42,6 +43,8 @@ export interface StatusViewData {
   lastSyncAt?: string;
   fetchedAt?: string;
   bridge: string;
+  /** Shared preference: render the file groups as a folder tree. */
+  treeView?: boolean;
 }
 
 export interface StatusViewActions {
@@ -53,9 +56,19 @@ export interface StatusViewActions {
   commit: () => void;
   stageAll: () => void;
   unstageAll: () => void;
+  /** Operation log (pane menu + settings; no strip button since the tree toggle took its slot). */
   openLog: () => void;
+  /** Flip the shared tree/list preference (re-render arrives via setData). */
+  toggleTree: () => void;
   /** Open the repository-wide history panel. */
   openHistory: () => void;
+  /**
+   * Group-scoped folder action: applies to every file under `folderPath`
+   * that is IN this group's state (stage in Changes stages tracked changes
+   * only; unstage on Staged unstages only what was staged; discard in
+   * Untracked moves the new files to Obsidian's trash).
+   */
+  folderAction: (group: Group, folderPath: string, kind: "stage" | "unstage" | "discard") => void;
   cancel: () => void;
   openFile: (path: string) => void;
   /** Open the diff for a changed file in an Obsidian pane (HEAD → worktree). */
@@ -234,12 +247,14 @@ export class StatusView extends ItemView {
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
     this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null);
     const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
-    const logBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
-    logBtn.setAttribute("aria-label", "Operation log");
-    setIcon(logBtn, "file-clock");
-    logBtn.addEventListener("click", this.actions.openLog);
-    // Repository history lives right of the log button and uses the SAME icon
-    // as the history panel itself, so the two are visually one feature.
+    // Tree/list layout toggle (took the operation-log slot; the log moved to
+    // settings). The icon shows the CURRENT layout; a tap switches to the other.
+    const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    const treeOn = d?.treeView === true;
+    treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
+    setIcon(treeBtn, treeOn ? "folder-tree" : "list");
+    treeBtn.addEventListener("click", this.actions.toggleTree);
+    // Repository history uses the SAME icon as the history panel itself.
     const histBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     histBtn.setAttribute("aria-label", "Repository history");
     setIcon(histBtn, "history");
@@ -336,6 +351,10 @@ export class StatusView extends ItemView {
       list.createDiv({ cls: "ngb-sv-empty", text: "Nothing staged yet." });
       return;
     }
+    if (this.data?.treeView) {
+      this.renderTreeItems(list, group, items);
+      return;
+    }
     for (const it of items) {
       this.renderRow(list, group, it, 0);
       // An untracked FOLDER is a grouping control, not a replacement for the
@@ -348,14 +367,102 @@ export class StatusView extends ItemView {
     }
   }
 
+  /** Tree layout: group items nested under collapsible folder rows. */
+  private renderTreeItems(
+    list: HTMLElement,
+    group: Group,
+    items: { path: string; code: string }[]
+  ): void {
+    // Untracked "dir/" entries expand into their enumerated files so the tree
+    // shows real rows; the entry stays a leaf when nothing enumerated it.
+    let expanded = items;
+    if (group === "untracked") {
+      expanded = [];
+      for (const it of items) {
+        const children = this.data?.untrackedChildren?.[it.path];
+        if (it.path.endsWith("/") && children && children.length > 0) {
+          for (const c of children) expanded.push({ path: c, code: "?" });
+        } else {
+          expanded.push(it);
+        }
+      }
+    }
+    const tree = buildPathTree(expanded, (i) => i.path);
+    for (const it of tree.rootItems) this.renderRow(list, group, it, 0);
+    for (const f of tree.folders) this.renderFolderNode(list, group, f, 0);
+  }
+
+  private renderFolderNode(
+    list: HTMLElement,
+    group: Group,
+    node: PathTreeNode<{ path: string; code: string }>,
+    depth: number
+  ): void {
+    const rowEl = list.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
+    const key = `${group}:${node.path}`;
+    const collapsed = this.collapsedDirs.has(key);
+    const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
+    const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
+    setIcon(chev, collapsed ? "chevron-right" : "chevron-down");
+    main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
+    // A collapsed folder still tells how many files in THIS state it holds.
+    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
+    main.addEventListener("click", () => {
+      if (collapsed) this.collapsedDirs.delete(key);
+      else this.collapsedDirs.add(key);
+      this.render();
+    });
+    const busy = this.data?.runningAction;
+    const hit = isRowAffected(this.data?.runningPath, `${node.path}/`);
+    if (hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file")) {
+      rowEl.addClass("ngb-sv-file-busy");
+    }
+    // Folder actions apply to every file under the folder IN THIS GROUP's
+    // state — main.ts scopes the git invocation accordingly.
+    const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
+    const act = (icon: string, tooltip: string, cb: () => void, warn = false) => {
+      const b = acts.createEl("button", {
+        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`,
+      });
+      b.setAttribute("aria-label", tooltip);
+      setIcon(b, icon);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        cb();
+      });
+    };
+    if (group === "staged") {
+      act("minus", "Unstage everything staged in this folder", () =>
+        this.actions.folderAction(group, node.path, "unstage")
+      );
+    } else if (group === "unstaged") {
+      act("plus", "Stage the changed (tracked) files in this folder", () =>
+        this.actions.folderAction(group, node.path, "stage")
+      );
+      act("undo-2", "Discard the changes in this folder", () =>
+        this.actions.folderAction(group, node.path, "discard"), true);
+    } else if (group === "untracked") {
+      act("plus", "Stage the new files in this folder", () =>
+        this.actions.folderAction(group, node.path, "stage")
+      );
+      act("trash", "Move the new files in this folder to Obsidian's trash", () =>
+        this.actions.folderAction(group, node.path, "discard"), true);
+    }
+    if (collapsed) return;
+    for (const it of node.items) this.renderRow(list, group, it, depth + 1);
+    for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);
+  }
+
   private renderRow(
     list: HTMLElement,
     group: Group,
     it: { path: string; code: string },
-    depth: 0 | 1
+    depth: number
   ): void {
     {
-      const rowEl = list.createDiv({ cls: depth === 0 ? "ngb-sv-file" : "ngb-sv-file ngb-sv-file-child" });
+      const rowEl = list.createDiv({
+        cls: depth === 0 ? "ngb-sv-file" : `ngb-sv-file ngb-ind-${Math.min(depth, 6)}`,
+      });
       const children = group === "untracked" && depth === 0 ? this.data?.untrackedChildren?.[it.path] : undefined;
       if (children && children.length > 0) {
         // Same collapse affordance as the group headers, scoped to this folder.

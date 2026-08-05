@@ -1,5 +1,6 @@
 import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
 import type { RepoLogEntry, RepoLogFile } from "../git/historyParsers";
+import { buildPathTree, type PathTreeNode } from "./pathTree";
 
 export const NGB_HISTORY_VIEW = "native-git-bridge-history";
 /** One icon for the panel AND the strip button that opens it. */
@@ -12,6 +13,10 @@ export interface HistoryViewActions {
   openDiffAtCommit(file: RepoLogFile, entry: RepoLogEntry): void;
   /** Open the file itself (current working-tree version). */
   openFile(path: string): void;
+  /** Shared preference: render each commit's files as a folder tree. */
+  treeView(): boolean;
+  /** Flip the shared tree/list preference. */
+  toggleTree(): void;
 }
 
 /**
@@ -27,6 +32,8 @@ export class HistoryView extends ItemView {
   private exhausted = false;
   private loading = false;
   private expanded = new Set<string>();
+  /** Collapsed folder nodes in tree layout, keyed "<hash>:<folderPath>". */
+  private collapsedDirs = new Set<string>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
 
@@ -58,6 +65,13 @@ export class HistoryView extends ItemView {
     await this.loadMore();
   }
 
+  /** Redraw from the already-loaded commits (layout toggles; no round trip). */
+  rerender(): void {
+    this.renderShell();
+    for (const e of this.entries) this.renderCommit(e);
+    if (this.moreBtn && this.entries.length > 0 && !this.exhausted) this.moreBtn.show();
+  }
+
   private renderShell(): void {
     const c = this.contentEl;
     c.empty();
@@ -68,6 +82,12 @@ export class HistoryView extends ItemView {
     setIcon(refreshBtn, "refresh-cw");
     if (this.loading) refreshBtn.addClass("ngb-anim-spin", "ngb-sv-icon-active");
     refreshBtn.addEventListener("click", () => void this.refresh());
+    // Same tree/list toggle as the status panel: icon = CURRENT layout.
+    const treeBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    const treeOn = this.actions.treeView();
+    treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
+    setIcon(treeBtn, treeOn ? "folder-tree" : "list");
+    treeBtn.addEventListener("click", () => this.actions.toggleTree());
     this.listEl = c.createDiv({ cls: "ngb-hist-list" });
     const btns = c.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
@@ -125,7 +145,13 @@ export class HistoryView extends ItemView {
     const renderBody = () => {
       body.empty();
       if (!this.expanded.has(e.hash)) return;
-      for (const f of e.files) this.renderFile(body, f, e);
+      if (this.actions.treeView()) {
+        const tree = buildPathTree(e.files, (f) => f.path);
+        for (const f of tree.rootItems) this.renderFile(body, f, e, 0);
+        for (const n of tree.folders) this.renderFolderNode(body, n, e, 0, renderBody);
+        return;
+      }
+      for (const f of e.files) this.renderFile(body, f, e, 0);
     };
     header.addEventListener("click", () => {
       if (this.expanded.has(e.hash)) this.expanded.delete(e.hash);
@@ -136,8 +162,36 @@ export class HistoryView extends ItemView {
     renderBody();
   }
 
-  private renderFile(body: HTMLElement, f: RepoLogFile, e: RepoLogEntry): void {
-    const row = body.createDiv({ cls: "ngb-sv-file" });
+  /** Collapsible folder row inside a commit's file tree. */
+  private renderFolderNode(
+    body: HTMLElement,
+    node: PathTreeNode<RepoLogFile>,
+    e: RepoLogEntry,
+    depth: number,
+    rerenderBody: () => void
+  ): void {
+    const row = body.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
+    const key = `${e.hash}:${node.path}`;
+    const collapsed = this.collapsedDirs.has(key);
+    const main = row.createDiv({ cls: "ngb-sv-file-main" });
+    const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
+    setIcon(chev, collapsed ? "chevron-right" : "chevron-down");
+    main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
+    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
+    main.addEventListener("click", () => {
+      if (collapsed) this.collapsedDirs.delete(key);
+      else this.collapsedDirs.add(key);
+      rerenderBody();
+    });
+    if (collapsed) return;
+    for (const f of node.items) this.renderFile(body, f, e, depth + 1);
+    for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);
+  }
+
+  private renderFile(body: HTMLElement, f: RepoLogFile, e: RepoLogEntry, depth: number): void {
+    const row = body.createDiv({
+      cls: depth === 0 ? "ngb-sv-file" : `ngb-sv-file ngb-ind-${Math.min(depth, 6)}`,
+    });
     const main = row.createDiv({ cls: "ngb-sv-file-main" });
     const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(f.path) });
     name.setAttribute("aria-label", `${f.path} @ ${e.hash.slice(0, 8)}`);

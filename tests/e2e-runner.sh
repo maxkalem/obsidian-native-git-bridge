@@ -323,6 +323,48 @@ req "r-20260804T100003Z-diff03" diff-file "$TOKEN" '{"path":"Notes/note.md","fro
 bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T100003Z-diff03.json" >/dev/null' "double ^ is still rejected"
 
+echo "# phase 4: INDEX pseudo-ref diffs (staged vs unstaged rows)"
+printf 'v1\nv2\nstaged line\n' > "Notes/hist renamed.md"
+git add "Notes/hist renamed.md"
+printf 'v1\nv2\nstaged line\nworktree line\n' > "Notes/hist renamed.md"
+req "r-20260804T100003Z-idx001" diff-file "$TOKEN" '{"path":"Notes/hist renamed.md","from":"HEAD","to":"INDEX"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-idx001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "HEAD->INDEX diff ok"
+check 'jq -r ".data.diff" "$RES" | grep -q "^+staged line"' "staged diff shows the staged addition"
+check '! jq -r ".data.diff" "$RES" | grep -q "^+worktree line"' "staged diff does NOT show the unstaged edit"
+req "r-20260804T100003Z-idx002" diff-file "$TOKEN" '{"path":"Notes/hist renamed.md","from":"INDEX","to":"WORKTREE"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-idx002.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "INDEX->WORKTREE diff ok"
+check 'jq -r ".data.diff" "$RES" | grep -q "^+worktree line"' "unstaged diff shows only the new edit"
+check '! jq -r ".data.diff" "$RES" | grep -q "^+staged line"' "unstaged diff does NOT repeat the staged part"
+req "r-20260804T100003Z-idx003" diff-file "$TOKEN" '{"path":"Notes/hist renamed.md","from":"INDEX","to":"HEAD"}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T100003Z-idx003.json" >/dev/null' "INDEX only pairs with WORKTREE"
+git restore --staged "Notes/hist renamed.md" && git checkout -- "Notes/hist renamed.md"
+
+echo "# phase 4: stage-file mode=update stages tracked changes only (folder rows)"
+printf 'v1\nv2\nedit\n' > "Notes/hist renamed.md"
+echo "brand new" > "Notes/brand-new.md"
+req "r-20260804T100003Z-upd001" stage-file "$TOKEN" '{"path":"Notes","mode":"update","protectedPaths":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-upd001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "stage mode=update ok"
+check 'git diff --cached --name-only | grep -q "hist renamed.md"' "tracked change staged"
+check '! git diff --cached --name-only | grep -q "brand-new.md"' "untracked file NOT swept in by mode=update"
+req "r-20260804T100003Z-upd002" stage-file "$TOKEN" '{"path":"Notes","mode":"sideways","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T100003Z-upd002.json" >/dev/null' "unknown stage mode -> BAD_REQUEST"
+git restore --staged Notes && git checkout -- "Notes/hist renamed.md" && rm -f "Notes/brand-new.md"
+
+echo "# phase 4: FAILED mutating actions still carry fresh status fields"
+req "r-20260804T100003Z-err001" restore-file "$TOKEN" "{\"path\":\"Notes/never-existed.md\",\"commit\":\"$OLD_HASH\",\"protectedPaths\":[]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-err001.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "restore of absent file fails as before"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "error result includes fresh branchInfo"
+
 echo "# phase 4: root commit diff against the canonical empty tree"
 ROOT_HASH="$(git rev-list --max-parents=0 HEAD | head -1)"
 req "r-20260804T100003Z-diff04" diff-file "$TOKEN" "{\"path\":\"Notes/note.md\",\"from\":\"4b825dc642cb6eb9a060e54bf8d69288fbee4904\",\"to\":\"$ROOT_HASH\"}"
@@ -437,6 +479,7 @@ check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
 check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "6" ]' "runnerVersion = 6 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=6"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"

@@ -3,6 +3,7 @@ import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
 import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
+import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
 import { Notice } from "obsidian";
 
@@ -268,6 +269,38 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })(); })
       );
 
+    new Setting(containerEl)
+      .setName("Show invisible characters in diffs")
+      .setDesc(
+        "Render whitespace as glyphs in the diff pane: · space, → tab, ␍ CR. " +
+          "Makes leading/trailing whitespace visible. Note: copying from the " +
+          "diff then copies the glyphs, not the original whitespace."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.showInvisibles).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ showInvisibles: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Auto-refresh status (seconds)")
+      .setDesc(
+        "While the status panel is open, run a status this often to pick up " +
+          "outside changes. 0 disables it. Each refresh wakes Termux — " +
+          "consider battery before choosing a small interval. Device-local."
+      )
+      .addText((t) => {
+        t.inputEl.inputMode = "numeric";
+        t.setPlaceholder("0")
+          .setValue(String(s.statusRefreshSeconds))
+          .onChange((v) => { void (async () => {
+            const n = parseInt(v, 10);
+            if (!Number.isFinite(n) || n < 0) return;
+            await this.plugin.updateDeviceSettings({ statusRefreshSeconds: n });
+            this.plugin.restartStatusPoll();
+          })(); });
+      });
+
     new Setting(containerEl).setName("Automatic actions").setHeading();
 
     new Setting(containerEl)
@@ -323,6 +356,17 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl).setName("Advanced").setHeading();
+
+    new Setting(containerEl)
+      .setName("Operation log")
+      .setDesc(
+        "Recent bridge operations (URLs redacted). Lives here since the " +
+          "panel strip slot went to the tree/list toggle; also available as " +
+          "the 'Open operation log' command."
+      )
+      .addButton((b) =>
+        b.setButtonText("Open").onClick(() => new OperationLogModal(this.app, this.plugin.log).open())
+      );
 
     new Setting(containerEl)
       .setName("Operation timeout (seconds)")
