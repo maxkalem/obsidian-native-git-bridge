@@ -346,10 +346,19 @@
   border-color: var(--background-modifier-border);
 }
 
-/* Optional line wrapping (settings toggle): the CONTENT span wraps internally
-   (it is an inline-block), the container keeps collapsing template whitespace. */
+/* Optional line wrapping (settings toggle). `table-layout: fixed` is the
+   load-bearing part: with the default auto layout the table sizes itself to
+   its longest line, so wrapped text still pushed the pane into horizontal
+   scrolling. Fixed layout makes every cell follow the pane's real width, and
+   the gutter needs an explicit width for the remainder to be distributed. */
+.ngb-diff-view.ngb-diff-wrap .d2h-code-wrapper { overflow-x: hidden; }
+.ngb-diff-view.ngb-diff-wrap .d2h-diff-table {
+  table-layout: fixed; width: 100%; min-width: 0;
+}
+.ngb-diff-view.ngb-diff-wrap .d2h-code-linenumber { width: 5em; }
+.ngb-diff-view.ngb-diff-wrap .d2h-code-line { white-space: normal; }
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line-ctn {
-  white-space: pre-wrap; word-break: break-word; max-width: 100%;
+  display: block; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%;
 }
 
 /* Invisible characters (settings toggle): the glyphs are inserted by a DOM
@@ -368,7 +377,10 @@
    number per physical file line; chrome rows (side label + button) are
    visually distinct from file content and, when un-numbered, carry a pointer
    glyph in the gutter so they can never be misread as wrapped continuations. */
-.ngb-conflict-view { padding: var(--size-4-2); overflow: auto; }
+/* Vertical scrolling only: nothing here may push the pane sideways, whatever
+   width it is opened at. */
+.ngb-conflict-view { padding: var(--size-4-2); overflow-y: auto; overflow-x: hidden; }
+.ngb-conf-list, .ngb-conf-row { max-width: 100%; }
 .ngb-conflict-view {
   --ngb-conf-ours-bg: rgba(8, 185, 78, 0.12);
   --ngb-conf-theirs-bg: rgba(8, 109, 221, 0.12);
@@ -420,8 +432,9 @@
 .ngb-conf-theirs-head { border-left: 3px solid var(--color-blue, #086ddd); }
 .ngb-conf-theirs-head .ngb-conf-side-chip { background: var(--ngb-conf-theirs-bg); }
 .ngb-conf-keep {
-  flex: 0 0 auto; margin-left: auto;
+  flex: 0 1 auto; margin-left: auto;
   font-size: var(--font-ui-smaller); padding: 0 var(--size-4-2);
+  max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 /* ---------------------------------------- platform-aware modal action button */

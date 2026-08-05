@@ -418,36 +418,61 @@ export class StatusView extends ItemView {
       rowEl.addClass("ngb-sv-file-busy");
     }
     // Folder actions apply to every file under the folder IN THIS GROUP's
-    // state — main.ts scopes the git invocation accordingly.
+    // state; main.ts scopes the git invocation accordingly. The action area
+    // mirrors the FILE row slot for slot ([open] [stage/unstage] [discard]
+    // plus the change-letter column), with invisible placeholders where a
+    // folder has no equivalent action, so every button sits in the same
+    // column as the ones above and below it.
     const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-    const act = (icon: string, tooltip: string, cb: () => void, warn = false) => {
+    const slot = (
+      icon: string | null,
+      tooltip?: string,
+      cb?: () => void,
+      warn = false
+    ) => {
       const b = acts.createEl("button", {
-        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`,
+        cls:
+          `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}` +
+          `${icon === null ? " ngb-slot-inactive" : ""}`,
       });
-      b.setAttribute("aria-label", tooltip);
+      if (icon === null) {
+        // Keeps the column width; never focusable or clickable.
+        setIcon(b, "circle");
+        b.setAttribute("aria-hidden", "true");
+        b.tabIndex = -1;
+        return;
+      }
+      b.setAttribute("aria-label", tooltip ?? "");
       setIcon(b, icon);
       b.addEventListener("click", (e) => {
         e.stopPropagation();
-        cb();
+        cb?.();
       });
     };
+    slot(null); // aligns with the file rows' "open file" button
     if (group === "staged") {
-      act("minus", "Unstage everything staged in this folder", () =>
+      slot("minus", "Unstage everything staged in this folder", () =>
         this.actions.folderAction(group, node.path, "unstage")
       );
+      slot(null); // files offer discard here; a staged folder does not
     } else if (group === "unstaged") {
-      act("plus", "Stage the changed (tracked) files in this folder", () =>
+      slot("plus", "Stage the changed (tracked) files in this folder", () =>
         this.actions.folderAction(group, node.path, "stage")
       );
-      act("undo-2", "Discard the changes in this folder", () =>
+      slot("undo-2", "Discard the changes in this folder", () =>
         this.actions.folderAction(group, node.path, "discard"), true);
     } else if (group === "untracked") {
-      act("plus", "Stage the new files in this folder", () =>
+      slot("plus", "Stage the new files in this folder", () =>
         this.actions.folderAction(group, node.path, "stage")
       );
-      act("trash", "Move the new files in this folder to Obsidian's trash", () =>
+      slot("trash", "Move the new files in this folder to Obsidian's trash", () =>
         this.actions.folderAction(group, node.path, "discard"), true);
+    } else {
+      slot(null);
+      slot(null);
     }
+    // Placeholder for the change-letter column of file rows.
+    rowEl.createSpan({ cls: "ngb-sv-file-code" });
     if (collapsed) return;
     for (const it of node.items) this.renderRow(list, group, it, depth + 1);
     for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);

@@ -39,6 +39,9 @@ export interface DiffViewActions {
  */
 export function markInvisibles(root: HTMLElement): void {
   for (const ctn of Array.from(root.querySelectorAll(".d2h-code-line-ctn"))) {
+    // Idempotent: a container that already carries glyphs is left alone, so
+    // the pass can safely run again after a resize or a re-attach.
+    if (ctn.querySelector(".ngb-ws-glyph")) continue;
     const walker = ctn.ownerDocument.createTreeWalker(ctn, NodeFilter.SHOW_TEXT);
     const textNodes: Text[] = [];
     for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) textNodes.push(n as Text);
@@ -154,26 +157,55 @@ export class DiffView extends ItemView {
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
     }
-    if (this.actions.showInvisibles()) markInvisibles(box);
     if (res.truncated) {
       box.createDiv({
         cls: "ngb-warning",
         text: "Diff truncated (too large). The full diff is available via git in Termux.",
       });
     }
+    this.applyDisplayPrefs();
+  }
+
+  /**
+   * Apply the display preferences to whatever is currently rendered. Kept
+   * separate from rendering and idempotent, because the pane is REUSED for
+   * every diff: a single "apply once, right after building the DOM" step
+   * silently lost the glyphs whenever a later render, a re-attach or a
+   * layout change replaced or re-measured that DOM.
+   */
+  private applyDisplayPrefs(): void {
+    this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+    const box = this.contentEl.querySelector<HTMLElement>(".ngb-diff-pane-body");
+    if (!box) return;
+    const wanted = this.actions.showInvisibles();
+    const present = box.querySelector(".ngb-ws-glyph") !== null;
+    if (wanted && !present) markInvisibles(box);
+    else if (!wanted && present) this.renderBody(box, this.lastResult); // rebuild without glyphs
   }
 
   /** Re-render from the cached diff when a display preference changed. */
   refreshDisplay(): void {
     const box = this.contentEl.querySelector<HTMLElement>(".ngb-diff-pane-body");
     if (box) this.renderBody(box, this.lastResult);
-    else this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+    else this.applyDisplayPrefs();
+  }
+
+  /**
+   * Obsidian calls this whenever the pane's size changes, including the first
+   * time a reused pane becomes visible at its real width. Re-applying here is
+   * what keeps wrapped lines inside the pane instead of measuring against the
+   * width some earlier diff happened to be rendered at.
+   */
+  override onResize(): void {
+    this.applyDisplayPrefs();
   }
 
   async onOpen(): Promise<void> {
     // setState drives rendering; nothing to draw for a bare pane.
     if (!this.state) {
       this.contentEl.createEl("p", { cls: "ngb-settings-note", text: "No diff selected." });
+      return;
     }
+    this.applyDisplayPrefs();
   }
 }

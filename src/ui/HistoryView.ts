@@ -183,6 +183,14 @@ export class HistoryView extends ItemView {
       else this.collapsedDirs.add(key);
       rerenderBody();
     });
+    // Same slot layout as the file rows below, so the go-to-file button and
+    // the change-letter column line up across folders and files.
+    const acts = row.createDiv({ cls: "ngb-sv-file-actions" });
+    const spacer = acts.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-slot-inactive" });
+    setIcon(spacer, "circle");
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.tabIndex = -1;
+    row.createSpan({ cls: "ngb-sv-file-code" });
     if (collapsed) return;
     for (const f of node.items) this.renderFile(body, f, e, depth + 1);
     for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);

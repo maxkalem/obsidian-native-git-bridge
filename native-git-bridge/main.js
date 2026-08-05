@@ -2946,38 +2946,50 @@ var StatusView = class extends import_obsidian11.ItemView {
       rowEl.addClass("ngb-sv-file-busy");
     }
     const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-    const act = (icon, tooltip, cb, warn = false) => {
+    const slot = (icon, tooltip, cb, warn = false) => {
       const b = acts.createEl("button", {
-        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`
+        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${icon === null ? " ngb-slot-inactive" : ""}`
       });
-      b.setAttribute("aria-label", tooltip);
+      if (icon === null) {
+        (0, import_obsidian11.setIcon)(b, "circle");
+        b.setAttribute("aria-hidden", "true");
+        b.tabIndex = -1;
+        return;
+      }
+      b.setAttribute("aria-label", tooltip ?? "");
       (0, import_obsidian11.setIcon)(b, icon);
       b.addEventListener("click", (e) => {
         e.stopPropagation();
-        cb();
+        cb?.();
       });
     };
+    slot(null);
     if (group === "staged") {
-      act(
+      slot(
         "minus",
         "Unstage everything staged in this folder",
         () => this.actions.folderAction(group, node.path, "unstage")
       );
+      slot(null);
     } else if (group === "unstaged") {
-      act(
+      slot(
         "plus",
         "Stage the changed (tracked) files in this folder",
         () => this.actions.folderAction(group, node.path, "stage")
       );
-      act("undo-2", "Discard the changes in this folder", () => this.actions.folderAction(group, node.path, "discard"), true);
+      slot("undo-2", "Discard the changes in this folder", () => this.actions.folderAction(group, node.path, "discard"), true);
     } else if (group === "untracked") {
-      act(
+      slot(
         "plus",
         "Stage the new files in this folder",
         () => this.actions.folderAction(group, node.path, "stage")
       );
-      act("trash", "Move the new files in this folder to Obsidian's trash", () => this.actions.folderAction(group, node.path, "discard"), true);
+      slot("trash", "Move the new files in this folder to Obsidian's trash", () => this.actions.folderAction(group, node.path, "discard"), true);
+    } else {
+      slot(null);
+      slot(null);
     }
+    rowEl.createSpan({ cls: "ngb-sv-file-code" });
     if (collapsed) return;
     for (const it of node.items) this.renderRow(list, group, it, depth + 1);
     for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);
@@ -3286,6 +3298,12 @@ var HistoryView = class extends import_obsidian12.ItemView {
       else this.collapsedDirs.add(key2);
       rerenderBody();
     });
+    const acts = row.createDiv({ cls: "ngb-sv-file-actions" });
+    const spacer = acts.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-slot-inactive" });
+    (0, import_obsidian12.setIcon)(spacer, "circle");
+    spacer.setAttribute("aria-hidden", "true");
+    spacer.tabIndex = -1;
+    row.createSpan({ cls: "ngb-sv-file-code" });
     if (collapsed) return;
     for (const f of node.items) this.renderFile(body, f, e, depth + 1);
     for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);
@@ -5277,6 +5295,7 @@ function html(diffInput, configuration = {}) {
 var NGB_DIFF_VIEW = "native-git-bridge-diff";
 function markInvisibles(root) {
   for (const ctn of Array.from(root.querySelectorAll(".d2h-code-line-ctn"))) {
+    if (ctn.querySelector(".ngb-ws-glyph")) continue;
     const walker = ctn.ownerDocument.createTreeWalker(ctn, NodeFilter.SHOW_TEXT);
     const textNodes = [];
     for (let n = walker.nextNode(); n !== null; n = walker.nextNode()) textNodes.push(n);
@@ -5374,24 +5393,51 @@ var DiffView = class extends import_obsidian13.ItemView {
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
     }
-    if (this.actions.showInvisibles()) markInvisibles(box);
     if (res.truncated) {
       box.createDiv({
         cls: "ngb-warning",
         text: "Diff truncated (too large). The full diff is available via git in Termux."
       });
     }
+    this.applyDisplayPrefs();
+  }
+  /**
+   * Apply the display preferences to whatever is currently rendered. Kept
+   * separate from rendering and idempotent, because the pane is REUSED for
+   * every diff: a single "apply once, right after building the DOM" step
+   * silently lost the glyphs whenever a later render, a re-attach or a
+   * layout change replaced or re-measured that DOM.
+   */
+  applyDisplayPrefs() {
+    this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+    const box = this.contentEl.querySelector(".ngb-diff-pane-body");
+    if (!box) return;
+    const wanted = this.actions.showInvisibles();
+    const present = box.querySelector(".ngb-ws-glyph") !== null;
+    if (wanted && !present) markInvisibles(box);
+    else if (!wanted && present) this.renderBody(box, this.lastResult);
   }
   /** Re-render from the cached diff when a display preference changed. */
   refreshDisplay() {
     const box = this.contentEl.querySelector(".ngb-diff-pane-body");
     if (box) this.renderBody(box, this.lastResult);
-    else this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+    else this.applyDisplayPrefs();
+  }
+  /**
+   * Obsidian calls this whenever the pane's size changes, including the first
+   * time a reused pane becomes visible at its real width. Re-applying here is
+   * what keeps wrapped lines inside the pane instead of measuring against the
+   * width some earlier diff happened to be rendered at.
+   */
+  onResize() {
+    this.applyDisplayPrefs();
   }
   async onOpen() {
     if (!this.state) {
       this.contentEl.createEl("p", { cls: "ngb-settings-note", text: "No diff selected." });
+      return;
     }
+    this.applyDisplayPrefs();
   }
 };
 
