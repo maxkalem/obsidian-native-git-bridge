@@ -24,6 +24,8 @@ export interface DiffViewActions {
    * operation failed (the error has already been surfaced to the user).
    */
   loadDiff(path: string, from: string, to: string): Promise<{ diff: string; truncated: boolean } | null>;
+  /** Shared preference: wrap long lines instead of scrolling horizontally. */
+  wrapLines(): boolean;
 }
 
 /**
@@ -81,6 +83,7 @@ export class DiffView extends ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-diff-view");
+    this.applyWrapPref();
     c.createDiv({ cls: "ngb-settings-note ngb-mono", text: `${st.path} · ${st.label}` });
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
     box.createEl("p", { cls: "ngb-settings-note", text: "Loading diff…" });
@@ -107,6 +110,11 @@ export class DiffView extends ItemView {
         text: "Diff truncated (too large). The full diff is available via git in Termux.",
       });
     }
+  }
+
+  /** Apply the current wrap preference (CSS-only; safe to call any time). */
+  applyWrapPref(): void {
+    this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
   }
 
   async onOpen(): Promise<void> {

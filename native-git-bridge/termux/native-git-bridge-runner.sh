@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=5
+RUNNER_VERSION=6
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -555,6 +555,40 @@ action_sync() {
   DATA=$(merge_data "$DATA" "$(obj_from_fields steps "$steps" committed "$committed" pushed "$pushed")")
 }
 
+# Whole-file conflict resolution (v6): the USER chose a side (per project rule
+# the bridge never auto-picks ours/theirs). `git checkout --ours|--theirs`
+# updates the worktree from the chosen index stage, then `git add` marks the
+# path resolved — the standard completion of that choice.
+action_resolve_conflict() {
+  local req_file="$1"
+  local path side p
+  path=$(jq -r '.args.path // empty' "$req_file")
+  side=$(jq -r '.args.side // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  case "$side" in
+    ours|theirs) ;;
+    *) ERROR=$(err_json BAD_REQUEST "Invalid side (must be 'ours' or 'theirs')." "" ""); return 1 ;;
+  esac
+  read_protected_paths "$req_file" || return 1
+  for p in "${PPATHS[@]}"; do
+    case "$path" in
+      "$p"|"$p"/*)
+        ERROR=$(err_json SAFETY_BLOCKED "Refusing to resolve inside a protected sparse path ($p)." "" "")
+        return 1 ;;
+    esac
+  done
+  if [ -z "$(git ls-files -u -- "$path" 2>/dev/null)" ]; then
+    ERROR=$(err_json BAD_REQUEST "The file is not in a conflicted (unmerged) state." "" ""); return 1
+  fi
+  if ! run_git checkout "--$side" -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git checkout --$side failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  if ! run_git add -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git add (mark resolved) failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
 action_abort_merge() {
   if ! merge_in_progress; then
     ERROR=$(err_json "BAD_REQUEST" "No merge in progress; nothing to abort." "" ""); return 1
@@ -949,6 +983,7 @@ process_request() {
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
     file-log)              action_file_log "$req_file" || { ok=false; ec=1; } ;;
     repo-log)              action_repo_log "$req_file" || { ok=false; ec=1; } ;;
+    resolve-conflict)      action_resolve_conflict "$req_file" || { ok=false; ec=1; } ;;
     show-file-at-commit)   action_show_file_at_commit "$req_file" || { ok=false; ec=1; } ;;
     diff-file)             action_diff_file "$req_file" || { ok=false; ec=1; } ;;
     restore-file)          action_restore_file "$req_file" || { ok=false; ec=1; } ;;

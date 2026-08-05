@@ -30,6 +30,12 @@
    not monkey-patch another plugin's internals. One known nuance of our diff
    pane: a pure rename can display as an addition, because the runner limits
    the diff pathspec to the file's new path.
+   The conflict-resolution pane writes REMAINING (unresolved) blocks back in
+   an Obsidian-safe marker form (`-<<<<<<<` / `-=======` / `->>>>>>>`): the
+   standard markers render a note as headings and nested blockquotes in
+   Obsidian's editor. Both forms are parsed; git is unaffected (the unmerged
+   state lives in the index) — but a desktop editor will show the dashed
+   markers on a file half-resolved on the phone.
 6. **Foreground-session commands on Android ≥ 10** may require Termux's
    "Draw over other apps" permission; the runner therefore always runs as a
    **background task** (`.shortcuts/tasks/`), which is unaffected.

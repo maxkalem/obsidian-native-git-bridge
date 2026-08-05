@@ -60,6 +60,12 @@ export interface StatusViewActions {
   openFile: (path: string) => void;
   /** Open the diff for a changed file in an Obsidian pane (HEAD → worktree). */
   openDiff: (path: string, group: Group) => void;
+  /**
+   * Open conflict resolution for a conflicted file: a resolution pane for
+   * text files, or the Git context menu (keep ours/theirs, open in default
+   * app) anchored at `pos` for files the pane cannot display.
+   */
+  openConflict: (path: string, pos: { x: number; y: number }) => void;
   stage: (path: string) => void;
   unstage: (path: string) => void;
   discard: (path: string) => void;
@@ -365,13 +371,26 @@ export class StatusView extends ItemView {
       }
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
       const kind = CHANGE_LABEL[it.code] ?? it.code;
+      // Conflicted rows carry an explicit warning glyph in addition to the
+      // red "U" code letter at the row's end.
+      if (group === "conflicted") {
+        const warn = main.createSpan({ cls: "ngb-conf-row-icon" });
+        setIcon(warn, "alert-triangle");
+        warn.setAttribute("aria-label", "Merge conflict");
+      }
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
-      // Tap on a TRACKED change opens its diff in an Obsidian pane (obsidian-git
-      // convention); untracked files and folders have no diff, so they open
-      // directly. The dedicated go-to-file button always opens the file.
+      // Tap behaviour per group: conflicts open resolution (pane for text
+      // files, context menu for the rest); tracked changes open their diff in
+      // a pane (obsidian-git convention); untracked files and folders have no
+      // diff, so they open directly. Go-to-file always opens the file.
       const isDir = it.path.endsWith("/");
-      if (group === "untracked" || isDir) {
+      if (group === "conflicted") {
+        main.addEventListener("click", (ev) => {
+          const r = rowEl.getBoundingClientRect();
+          this.actions.openConflict(it.path, { x: ev.clientX || r.left, y: ev.clientY || r.bottom });
+        });
+      } else if (group === "untracked" || isDir) {
         main.addEventListener("click", () => this.actions.openFile(it.path));
       } else {
         main.addEventListener("click", () => this.actions.openDiff(it.path, group));

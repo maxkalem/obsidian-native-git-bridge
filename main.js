@@ -640,12 +640,12 @@ __export(main_exports, {
   default: () => NativeGitBridgePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian14 = require("obsidian");
+var import_obsidian15 = require("obsidian");
 
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 5;
+var RUNNER_MIN_VERSION = 6;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -684,7 +684,8 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["exclude-add", 4],
   ["exclude-remove", 4],
   ["exclude-list", 4],
-  ["repo-log", 5]
+  ["repo-log", 5],
+  ["resolve-conflict", 6]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -698,7 +699,8 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "unstage-file",
   "discard-file",
   "stage-all",
-  "unstage-all"
+  "unstage-all",
+  "resolve-conflict"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -1297,6 +1299,15 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
           await this.plugin.updateDeviceSettings({
             notificationMode: v
           });
+        })();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Wrap long lines in diffs").setDesc(
+      "Wrap lines in the diff pane instead of scrolling horizontally. Cosmetic and shared across devices (stored in data.json)."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.sharedPrefs.wrapDiffLines).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({ wrapDiffLines: v });
         })();
       })
     );
@@ -2782,10 +2793,20 @@ var StatusView = class extends import_obsidian10.ItemView {
       }
       const main = rowEl.createDiv({ cls: "ngb-sv-file-main" });
       const kind = CHANGE_LABEL[it.code] ?? it.code;
+      if (group === "conflicted") {
+        const warn = main.createSpan({ cls: "ngb-conf-row-icon" });
+        (0, import_obsidian10.setIcon)(warn, "alert-triangle");
+        warn.setAttribute("aria-label", "Merge conflict");
+      }
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
       const isDir = it.path.endsWith("/");
-      if (group === "untracked" || isDir) {
+      if (group === "conflicted") {
+        main.addEventListener("click", (ev) => {
+          const r = rowEl.getBoundingClientRect();
+          this.actions.openConflict(it.path, { x: ev.clientX || r.left, y: ev.clientY || r.bottom });
+        });
+      } else if (group === "untracked" || isDir) {
         main.addEventListener("click", () => this.actions.openFile(it.path));
       } else {
         main.addEventListener("click", () => this.actions.openDiff(it.path, group));
@@ -5049,6 +5070,7 @@ var DiffView = class extends import_obsidian12.ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-diff-view");
+    this.applyWrapPref();
     c.createDiv({ cls: "ngb-settings-note ngb-mono", text: `${st.path} \xB7 ${st.label}` });
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
     box.createEl("p", { cls: "ngb-settings-note", text: "Loading diff\u2026" });
@@ -5076,12 +5098,256 @@ var DiffView = class extends import_obsidian12.ItemView {
       });
     }
   }
+  /** Apply the current wrap preference (CSS-only; safe to call any time). */
+  applyWrapPref() {
+    this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+  }
   async onOpen() {
     if (!this.state) {
       this.contentEl.createEl("p", { cls: "ngb-settings-note", text: "No diff selected." });
     }
   }
 };
+
+// src/ui/ConflictView.ts
+var import_obsidian13 = require("obsidian");
+
+// src/git/conflictParser.ts
+function markerLabel(line, marker) {
+  if (line.startsWith(marker)) return line.slice(marker.length).trim();
+  if (line.startsWith("-" + marker)) return line.slice(marker.length + 1).trim();
+  return null;
+}
+var isDivider = (l) => l === "=======" || l === "-=======";
+function parseConflictFile(content) {
+  const lines = content.split("\n");
+  const segments = [];
+  let plain = [];
+  let conflictCount = 0;
+  let i = 0;
+  const flushPlain = () => {
+    if (plain.length > 0) {
+      segments.push({ kind: "text", lines: plain });
+      plain = [];
+    }
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    const oursLabel = markerLabel(line, "<<<<<<<");
+    if (oursLabel !== null) {
+      const block = tryParseBlock(lines, i);
+      if (block !== null) {
+        flushPlain();
+        segments.push({
+          kind: "conflict",
+          index: segments.length,
+          oursLabel,
+          theirsLabel: block.theirsLabel,
+          ours: block.ours,
+          theirs: block.theirs,
+          base: block.base
+        });
+        conflictCount++;
+        i = block.end + 1;
+        continue;
+      }
+    }
+    plain.push(line);
+    i++;
+  }
+  flushPlain();
+  return { segments, conflictCount };
+}
+function tryParseBlock(lines, start) {
+  const ours = [];
+  const base = [];
+  const theirs = [];
+  let mode = "ours";
+  let sawBase = false;
+  for (let j = start + 1; j < lines.length; j++) {
+    const l = lines[j];
+    const closeLabel = markerLabel(l, ">>>>>>>");
+    if (mode === "ours" && markerLabel(l, "|||||||") !== null) {
+      mode = "base";
+      sawBase = true;
+    } else if ((mode === "ours" || mode === "base") && isDivider(l)) {
+      mode = "theirs";
+    } else if (mode === "theirs" && closeLabel !== null) {
+      return { ours, theirs, base: sawBase ? base : void 0, theirsLabel: closeLabel, end: j };
+    } else if (markerLabel(l, "<<<<<<<") !== null) {
+      return null;
+    } else {
+      (mode === "ours" ? ours : mode === "base" ? base : theirs).push(l);
+    }
+  }
+  return null;
+}
+function resolveBlock(parsed, blockIndex, side) {
+  const out = [];
+  for (const seg of parsed.segments) {
+    if (seg.kind === "text") {
+      out.push(...seg.lines);
+    } else if (seg.index === blockIndex) {
+      out.push(...side === "ours" ? seg.ours : seg.theirs);
+    } else {
+      out.push(`-<<<<<<< ${seg.oursLabel}`);
+      out.push(...seg.ours);
+      if (seg.base !== void 0) {
+        out.push("-||||||| (base)");
+        out.push(...seg.base);
+      }
+      out.push("-=======");
+      out.push(...seg.theirs);
+      out.push(`->>>>>>> ${seg.theirsLabel}`);
+    }
+  }
+  return out.join("\n");
+}
+
+// src/ui/ConflictView.ts
+var NGB_CONFLICT_VIEW = "native-git-bridge-conflict";
+var ConflictView = class extends import_obsidian13.ItemView {
+  constructor(leaf, actions) {
+    super(leaf);
+    this.actions = actions;
+    this.path = null;
+    /** Content as last read; guards against clobbering outside edits. */
+    this.originalText = null;
+    this.parsed = null;
+    this.loadSeq = 0;
+    this.navigation = true;
+  }
+  getViewType() {
+    return NGB_CONFLICT_VIEW;
+  }
+  getDisplayText() {
+    const base = this.path?.split("/").pop();
+    return base ? `Conflict: ${base}` : "Conflict";
+  }
+  getIcon() {
+    return "alert-triangle";
+  }
+  getState() {
+    return { path: this.path };
+  }
+  async setState(state, result) {
+    const s = state;
+    if (s && typeof s.path === "string") {
+      this.path = s.path;
+      await this.reload();
+    }
+    return super.setState(state, result);
+  }
+  async reload() {
+    const path = this.path;
+    if (path === null) return;
+    const seq = ++this.loadSeq;
+    const text = await this.actions.readFile(path);
+    if (seq !== this.loadSeq) return;
+    this.originalText = text;
+    this.parsed = text === null ? null : parseConflictFile(text);
+    this.render();
+  }
+  render() {
+    const c = this.contentEl;
+    c.empty();
+    c.addClass("ngb-conflict-view");
+    const path = this.path;
+    if (path === null) {
+      c.createEl("p", { cls: "ngb-settings-note", text: "No file selected." });
+      return;
+    }
+    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: path });
+    if (this.originalText === null || this.parsed === null) {
+      c.createEl("p", {
+        cls: "ngb-warning",
+        text: "This file cannot be shown here (binary or unreadable). Use the file's context menu: keep ours / keep theirs / open in the default app."
+      });
+      return;
+    }
+    if (this.parsed.conflictCount === 0) {
+      c.createEl("p", { cls: "ngb-ok", text: "No conflict markers left in this file." });
+      const btns = c.createDiv({ cls: "ngb-buttons" });
+      const stage = btns.createEl("button", { text: "Mark resolved (stage this file)", cls: "mod-cta" });
+      stage.addEventListener("click", () => {
+        void (async () => {
+          await this.actions.stageFile(path);
+          new import_obsidian13.Notice("Marked resolved.");
+        })();
+      });
+      return;
+    }
+    c.createEl("p", {
+      cls: "ngb-settings-note",
+      text: `${this.parsed.conflictCount} conflict${this.parsed.conflictCount === 1 ? "" : "s"} \u2014 pick a side per block. Other lines stay untouched.`
+    });
+    const list = c.createDiv({ cls: "ngb-conf-list" });
+    let lineNo = 1;
+    const row = (num, text, cls, gutterCls = "") => {
+      const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
+      r.createSpan({ cls: `ngb-conf-num ${gutterCls}`, text: num === null ? "" : String(num) });
+      r.createSpan({ cls: "ngb-conf-text", text: text === "" ? " " : text });
+      return r;
+    };
+    const markerRow = (num, label2, cls, btnLabel, onKeep) => {
+      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${cls}` });
+      r.createSpan({ cls: "ngb-conf-num", text: String(num) });
+      const body = r.createDiv({ cls: "ngb-conf-marker-body" });
+      body.createSpan({ cls: "ngb-conf-marker-label", text: label2 });
+      if (btnLabel !== null && onKeep !== null) {
+        const b = body.createEl("button", { text: btnLabel, cls: "ngb-conf-keep" });
+        b.addEventListener("click", onKeep);
+      }
+    };
+    for (const seg of this.parsed.segments) {
+      if (seg.kind === "text") {
+        for (const l of seg.lines) row(lineNo++, l, "");
+        continue;
+      }
+      const idx = seg.index;
+      const remote = shortRefLabel(seg.theirsLabel);
+      markerRow(
+        lineNo++,
+        `Local \u2014 yours (${seg.oursLabel || "HEAD"})`,
+        "ngb-conf-ours-head",
+        "Keep local (yours)",
+        () => void this.applyResolution(idx, "ours")
+      );
+      for (const l of seg.ours) row(lineNo++, l, "ngb-conf-ours");
+      if (seg.base !== void 0) {
+        row(lineNo++, "\u2026\u2026\u2026 common ancestor:", "ngb-conf-base ngb-conf-base-head");
+        for (const l of seg.base) row(lineNo++, l, "ngb-conf-base");
+      }
+      row(lineNo++, "\u2014\u2014\u2014", "ngb-conf-divider");
+      for (const l of seg.theirs) row(lineNo++, l, "ngb-conf-theirs");
+      markerRow(
+        lineNo++,
+        `Remote \u2014 theirs${remote ? ` (${remote})` : ""}`,
+        "ngb-conf-theirs-head",
+        remote ? `Keep remote (${remote})` : "Keep remote",
+        () => void this.applyResolution(idx, "theirs")
+      );
+    }
+  }
+  async applyResolution(blockIndex, side) {
+    const path = this.path;
+    if (path === null || this.parsed === null || this.originalText === null) return;
+    const current = await this.actions.readFile(path);
+    if (current !== this.originalText) {
+      new import_obsidian13.Notice("The file changed on disk \u2014 reloading instead of overwriting.");
+      await this.reload();
+      return;
+    }
+    const next = resolveBlock(this.parsed, blockIndex, side);
+    await this.actions.writeFile(path, next);
+    await this.reload();
+  }
+};
+function shortRefLabel(label2) {
+  const l = label2.trim();
+  if (/^[0-9a-f]{12,40}$/i.test(l)) return l.slice(0, 8);
+  return l.length > 24 ? `${l.slice(0, 24)}\u2026` : l;
+}
 
 // src/bridge/selfCheck.ts
 var LOG_TAIL_BYTES = 4e3;
@@ -5144,11 +5410,11 @@ function baseName(p) {
 }
 
 // src/main.ts
-var import_obsidian15 = require("obsidian");
+var import_obsidian16 = require("obsidian");
 
 // src/ui/OperationLogModal.ts
-var import_obsidian13 = require("obsidian");
-var OperationLogModal = class extends import_obsidian13.Modal {
+var import_obsidian14 = require("obsidian");
+var OperationLogModal = class extends import_obsidian14.Modal {
   constructor(app, log) {
     super(app);
     this.log = log;
@@ -5192,10 +5458,14 @@ var OperationLogModal = class extends import_obsidian13.Modal {
 };
 
 // src/main.ts
-var DEFAULT_SHARED_PREFS = { showStatusBar: true, showRibbonIcon: true };
+var DEFAULT_SHARED_PREFS = {
+  showStatusBar: true,
+  showRibbonIcon: true,
+  wrapDiffLines: false
+};
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
-var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
+var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   constructor() {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
@@ -5268,6 +5538,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
         cancel: () => void this.cmdCancel(),
         openFile: (p) => this.openVaultFile(p),
         openDiff: (p, group) => void this.openStatusDiff(p, group),
+        openConflict: (p, pos) => void this.openConflict(p, pos),
         stage: (p) => void this.cmdStageFile(p),
         unstage: (p) => void this.cmdUnstageFile(p),
         discard: (p) => this.cmdDiscardFile(p),
@@ -5285,7 +5556,18 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     this.registerView(
       NGB_DIFF_VIEW,
       (leaf) => new DiffView(leaf, {
-        loadDiff: (path, from, to) => this.loadDiffText(path, from, to)
+        loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
+        wrapLines: () => this.sharedPrefs.wrapDiffLines
+      })
+    );
+    this.registerView(
+      NGB_CONFLICT_VIEW,
+      (leaf) => new ConflictView(leaf, {
+        readFile: (p) => this.readVaultTextFile(p),
+        writeFile: async (p, content) => {
+          await this.app.vault.adapter.write(p, content);
+        },
+        stageFile: (p) => this.cmdStageFile(p)
       })
     );
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
@@ -5316,7 +5598,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
    */
   buildGitMenu(menu, path) {
     {
-      if (!import_obsidian14.Platform.isAndroidApp) return;
+      if (!import_obsidian15.Platform.isAndroidApp) return;
       if (!this.deviceSettings.enabledOnThisDevice) return;
       const v = validateRepoRelativePath(path);
       if (!v.ok) return;
@@ -5324,6 +5606,18 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
       const st = this.lastStatus?.status;
       const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
       const unstaged = (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) || (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
+      const conflicted = st?.conflicted.some((e) => e.path === p) ?? false;
+      if (conflicted) {
+        menu.addItem(
+          (i) => i.setTitle("Git: Resolve \u2014 keep local version (yours)").setIcon("check").onClick(() => this.cmdResolveConflict(p, "ours"))
+        );
+        menu.addItem(
+          (i) => i.setTitle("Git: Resolve \u2014 keep remote version").setIcon("check-check").onClick(() => this.cmdResolveConflict(p, "theirs"))
+        );
+        menu.addItem(
+          (i) => i.setTitle("Open in default app").setIcon("external-link").onClick(() => this.openWithDefaultApp(p))
+        );
+      }
       if (unstaged || !st) {
         menu.addItem(
           (i) => i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
@@ -5430,7 +5724,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   notify(message) {
     const mode = this.deviceSettings.notificationMode;
     this.log.add("info", "notify", message);
-    if (mode === "notice") new import_obsidian14.Notice(message);
+    if (mode === "notice") new import_obsidian15.Notice(message);
     else if (mode === "status-only") {
       this.progressText = message;
       this.updateProgressInView(message);
@@ -5484,7 +5778,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
     await this.loadGitignore();
-    if (import_obsidian14.Platform.isAndroidApp && !this.deviceSettings.authToken && !this.store.getValue("setup-guide-shown")) {
+    if (import_obsidian15.Platform.isAndroidApp && !this.deviceSettings.authToken && !this.store.getValue("setup-guide-shown")) {
       this.store.setValue("setup-guide-shown", "1");
       this.openSetupGuide("First run: this device is not set up yet.");
     }
@@ -5532,7 +5826,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     return disabled !== "true";
   }
   warnIfObsidianGitEnabledOnAndroid() {
-    if (!import_obsidian14.Platform.isAndroidApp) return;
+    if (!import_obsidian15.Platform.isAndroidApp) return;
     if (this.deviceSettings.suppressObsidianGitWarning) return;
     if (!this.isObsidianGitActiveOnDevice()) return;
     this.log.add("warn", "compat", "obsidian-git ACTIVE on this Android device alongside Native Git Bridge.");
@@ -5651,7 +5945,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     this.store.reset();
     this.deviceSettings = this.store.read();
     this.refreshStatusBarIdle();
-    new import_obsidian14.Notice("Native Git Bridge: device-local settings reset.");
+    new import_obsidian15.Notice("Native Git Bridge: device-local settings reset.");
   }
   refreshStatusBarIdle() {
     if (!this.statusBar) return;
@@ -5704,8 +5998,8 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   /** Guard + queue + trigger + await one bridge operation. */
   async runOperation(action, args = {}) {
     const s = this.deviceSettings;
-    if (!import_obsidian14.Platform.isAndroidApp) {
-      new import_obsidian14.Notice(
+    if (!import_obsidian15.Platform.isAndroidApp) {
+      new import_obsidian15.Notice(
         "Native Git Bridge works on Android only (it delegates git to Termux). On desktop, use git directly or the obsidian-git plugin."
       );
       return null;
@@ -5748,11 +6042,11 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
-      new import_obsidian14.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
+      new import_obsidian15.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
       return null;
     }
     if (!mutating && this.lock.active && MUTATING_ACTIONS.has(this.lock.active.action)) {
-      new import_obsidian14.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
+      new import_obsidian15.Notice(`A ${this.lock.active.action} operation is running; try again when it finishes.`);
       return null;
     }
     const cancel = new CancelToken();
@@ -5799,7 +6093,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
       if (waited.kind === "cancelled") {
         await this.client.requestCancel(req.id);
         this.log.add("warn", action, `Request ${req.id} cancelled by user.`);
-        new import_obsidian14.Notice(`Native Git: ${action} cancelled.`);
+        new import_obsidian15.Notice(`Native Git: ${action} cancelled.`);
         return null;
       }
       const result = waited.result;
@@ -5961,8 +6255,8 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
    * user the APK download link.
    */
   async openCompanionSetup() {
-    if (!import_obsidian14.Platform.isAndroidApp) {
-      new import_obsidian14.Notice("The companion app exists only on Android.");
+    if (!import_obsidian15.Platform.isAndroidApp) {
+      new import_obsidian15.Notice("The companion app exists only on Android.");
       return;
     }
     this.log.add("info", "companion", "Opening companion setup checklist.");
@@ -5988,7 +6282,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
             keepOpen: true,
             onClick: () => {
               void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
-              new import_obsidian14.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
+              new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
             }
           },
           {
@@ -6054,7 +6348,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   async cmdVerifySparseSafety() {
     const protectedPaths = this.effectiveProtectedPaths();
     if (protectedPaths.length === 0) {
-      new import_obsidian14.Notice("No protected sparse paths configured (see settings).");
+      new import_obsidian15.Notice("No protected sparse paths configured (see settings).");
       return;
     }
     const result = await this.runOperation("verify-sparse-safety", { protectedPaths });
@@ -6087,7 +6381,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
         return;
       }
       this.absorbStatusData(result.data ?? {});
-      new import_obsidian14.Notice(exclude ? `Hidden via sparse checkout: ${path}` : `Materialized again: ${path}`);
+      new import_obsidian15.Notice(exclude ? `Hidden via sparse checkout: ${path}` : `Materialized again: ${path}`);
     };
     if (exclude) {
       new ConfirmModal(
@@ -6121,7 +6415,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
       return;
     }
     this.absorbExcludeList(result.data?.excludeList);
-    new import_obsidian14.Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
+    new import_obsidian15.Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
   }
   async refreshExcludeList() {
     const result = await this.runOperation("exclude-list");
@@ -6152,7 +6446,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   }
   async gitignoreAdd(entry2) {
     if (entry2.trim() === "" || hasControlChars(entry2)) {
-      new import_obsidian14.Notice("Invalid .gitignore entry.");
+      new import_obsidian15.Notice("Invalid .gitignore entry.");
       return;
     }
     await this.loadGitignore();
@@ -6162,7 +6456,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     }
     this.gitignoreLines.push(entry2.trim());
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
-    new import_obsidian14.Notice(`Added to .gitignore: ${entry2.trim()}`);
+    new import_obsidian15.Notice(`Added to .gitignore: ${entry2.trim()}`);
   }
   async gitignoreRemove(entry2) {
     await this.loadGitignore();
@@ -6170,7 +6464,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry2.trim());
     if (this.gitignoreLines.length === before) return;
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
-    new import_obsidian14.Notice(`Removed from .gitignore: ${entry2.trim()}`);
+    new import_obsidian15.Notice(`Removed from .gitignore: ${entry2.trim()}`);
   }
   isSparseExcluded(path) {
     return this.deviceSettings.derivedProtectedPaths.includes(path);
@@ -6217,6 +6511,15 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     ).open();
   }
   // ---------------------------------------------------- phase 3 git commands
+  /** Merge and persist shareable UI preferences (data.json; cosmetic only). */
+  async setSharedPref(patch) {
+    this.sharedPrefs = { ...this.sharedPrefs, ...patch };
+    await this.saveData(this.sharedPrefs);
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof DiffView) view.applyWrapPref();
+    }
+  }
   /** Parse the status fields every mutating action returns and refresh UI. */
   absorbStatusData(d) {
     if (!d.branchInfo) return;
@@ -6305,8 +6608,8 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   }
   openVaultFile(path) {
     const f = this.app.vault.getAbstractFileByPath(path);
-    if (f instanceof import_obsidian15.TFile) void this.app.workspace.getLeaf(false).openFile(f);
-    else new import_obsidian14.Notice(`Cannot open ${path} (not found in vault).`);
+    if (f instanceof import_obsidian16.TFile) void this.app.workspace.getLeaf(false).openFile(f);
+    else new import_obsidian15.Notice(`Cannot open ${path} (not found in vault).`);
   }
   async cmdFetch() {
     const result = await this.runOperation("fetch");
@@ -6403,7 +6706,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   activeFilePath() {
     const f = this.app.workspace.getActiveFile();
     if (!f) {
-      new import_obsidian14.Notice("No active file.");
+      new import_obsidian15.Notice("No active file.");
       return null;
     }
     return f.path;
@@ -6575,6 +6878,72 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     });
     this.app.workspace.revealLeaf(leaf);
   }
+  // ------------------------------------------------- conflict resolution
+  /** Vault file as text, or null when it looks binary (NUL byte probe). */
+  async readVaultTextFile(path) {
+    try {
+      const buf = await this.app.vault.adapter.readBinary(path);
+      return bytesToTextIfNotBinary(new Uint8Array(buf));
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Tap on a conflicted file: text files get the per-block resolution pane;
+   * anything else gets the Git context menu (keep ours / keep theirs / open
+   * in the default app) anchored where the user tapped.
+   */
+  async openConflict(path, pos) {
+    const text = await this.readVaultTextFile(path);
+    if (text !== null) {
+      const existing = this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW);
+      const leaf = existing.length > 0 ? existing[0] : this.app.workspace.getLeaf("tab");
+      await leaf.setViewState({ type: NGB_CONFLICT_VIEW, active: true, state: { path } });
+      this.app.workspace.revealLeaf(leaf);
+      return;
+    }
+    const menu = new import_obsidian15.Menu();
+    this.buildGitMenu(menu, path);
+    menu.showAtPosition(pos);
+  }
+  /** Whole-file resolution via the runner, after explicit confirmation. */
+  cmdResolveConflict(path, side) {
+    new ConfirmModal(
+      this.app,
+      {
+        title: side === "ours" ? "Keep the LOCAL version (yours)?" : "Keep the REMOTE version?",
+        body: [
+          `File: ${path}`,
+          side === "ours" ? "The incoming remote changes to this file are discarded; your local version is kept and the file is marked resolved." : "Your local changes to this file are discarded; the incoming remote version is kept and the file is marked resolved.",
+          "This cannot be undone for the losing side's uncommitted content."
+        ],
+        confirmLabel: side === "ours" ? "Keep local" : "Keep remote",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("resolve-conflict", {
+          path,
+          side,
+          protectedPaths: this.effectiveProtectedPaths()
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: resolve failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify(`Resolved ${path} (kept the ${side === "ours" ? "local" : "remote"} version).`);
+      }
+    ).open();
+  }
+  /**
+   * Open a file with the system's default app. `openWithDefaultApp` is not in
+   * the public typings on mobile, so this degrades to a notice when absent
+   * (documented in docs/submission.md alongside the other private-API uses).
+   */
+  openWithDefaultApp(path) {
+    const anyApp = this.app;
+    if (typeof anyApp.openWithDefaultApp === "function") anyApp.openWithDefaultApp(path);
+    else new import_obsidian15.Notice("Opening with the default app is not available in this Obsidian version.");
+  }
   /**
    * Unified diff text for the diff pane. A root commit has no parent: when
    * "<hash>^" fails, the diff is retried against git's canonical empty tree,
@@ -6641,8 +7010,8 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
    */
   openSetupGuide(reason) {
     const s = this.deviceSettings;
-    if (!import_obsidian14.Platform.isAndroidApp) {
-      new import_obsidian14.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+    if (!import_obsidian15.Platform.isAndroidApp) {
+      new import_obsidian15.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
       return;
     }
     const lines = [
@@ -6674,7 +7043,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
         keepOpen: true,
         onClick: () => {
           void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
-          new import_obsidian14.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
+          new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
         }
       },
       {
@@ -6695,7 +7064,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
         keepOpen: true,
         onClick: () => {
           void this.updateDeviceSettings({ enabledOnThisDevice: true, termuxIntegrationEnabled: true }).then(
-            () => new import_obsidian14.Notice("Enabled. Now do steps 1-3 if you have not yet.")
+            () => new import_obsidian15.Notice("Enabled. Now do steps 1-3 if you have not yet.")
           );
         }
       });
@@ -6745,7 +7114,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   /** Copy the install command, then bring Termux to the front (via the companion). */
   copyCommandAndOpenTermux() {
     void navigator.clipboard.writeText(this.installCommand());
-    new import_obsidian14.Notice("Install command copied - long-press in Termux to paste, then Enter.");
+    new import_obsidian15.Notice("Install command copied - long-press in Termux to paste, then Enter.");
     this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
   }
   async cmdSelfCheck(timedOut = false) {
@@ -6767,7 +7136,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     for (const a of this.versionAdvice()) lines.push("", a.text);
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
     const actions = [];
-    if (import_obsidian14.Platform.isAndroidApp) {
+    if (import_obsidian15.Platform.isAndroidApp) {
       actions.push({
         label: "Copy command & open Termux",
         cta: true,
@@ -6798,7 +7167,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
           keepOpen: true,
           onClick: () => {
             void navigator.clipboard.writeText(COMPANION_RELEASES_URL);
-            new import_obsidian14.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
+            new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
           }
         });
       } else {
@@ -6882,7 +7251,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     const report = { pluginSide: {}, problems: [] };
     const s = this.deviceSettings;
     report.pluginSide["Plugin version"] = this.manifest.version;
-    report.pluginSide["Platform"] = import_obsidian14.Platform.isAndroidApp ? "Android app" : import_obsidian14.Platform.isMobile ? "mobile" : "desktop";
+    report.pluginSide["Platform"] = import_obsidian15.Platform.isAndroidApp ? "Android app" : import_obsidian15.Platform.isMobile ? "mobile" : "desktop";
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
@@ -6892,7 +7261,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
     report.pluginSide["Device-local storage"] = this.store.isVolatile ? "VOLATILE (in-memory fallback)" : "persistent";
     report.pluginSide["Pending requests"] = String(await this.client.pendingRequestCount());
     report.pluginSide["Active operation"] = this.lock.active ? `${this.lock.active.action} (${this.lock.active.id})` : "none";
-    if (!import_obsidian14.Platform.isAndroidApp)
+    if (!import_obsidian15.Platform.isAndroidApp)
       report.problems.push(
         "Not an Android device: the bridge (companion app + Termux) exists only on Android, so all operations are disabled here."
       );
@@ -6902,7 +7271,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
       report.problems.push(
         "No protected sparse paths (neither manual nor derived from sparse exclusions). Fine for full checkouts; risky if this repo uses sparse checkout."
       );
-    if (import_obsidian14.Platform.isAndroidApp) {
+    if (import_obsidian15.Platform.isAndroidApp) {
       if (this.isObsidianGitActiveOnDevice()) {
         report.problems.push(
           "obsidian-git is ACTIVE on this device (not device-disabled): incompatible with a native sparse-checkout index. Use its 'Disable on this device' toggle."
@@ -6931,7 +7300,7 @@ var NativeGitBridgePlugin = class extends import_obsidian14.Plugin {
   }
   async cmdCancel() {
     if (!this.activeCancel) {
-      new import_obsidian14.Notice("No operation is currently awaiting a result.");
+      new import_obsidian15.Notice("No operation is currently awaiting a result.");
       return;
     }
     this.activeCancel.cancel();

@@ -45,12 +45,19 @@ class SetupActivity : Activity() {
     private lateinit var detail: TextView
     /** Raw Termux error, kept small and secondary (for bug reports only). */
     private lateinit var technical: TextView
-    /** "Plugin x.y.z · Runner vN" line under the title. */
-    private lateinit var versions: TextView
+    /**
+     * Stacked version lines under the title: companion first, plugin and
+     * runner beneath it. The lagging part is highlighted in the danger color.
+     */
+    private lateinit var companionLine: TextView
+    private lateinit var pluginLine: TextView
+    private lateinit var runnerLine: TextView
     /** Which of the three parts needs updating (empty when they agree). */
     private lateinit var mismatch: TextView
     /** Shown only when THIS app is the outdated part. */
     private lateinit var updateButton: TextView
+    /** Shown only when the RUNNER is the outdated part: copy command + open Termux. */
+    private lateinit var updateRunnerButton: TextView
 
     private var probeInFlight = false
     /** True when the current probe was started by the Test button: its outcome is toasted. */
@@ -110,35 +117,32 @@ class SetupActivity : Activity() {
             setPadding(pad, pad, pad, pad)
         }
 
-        // Title row: name on the left, THIS app's version top-right; the
-        // plugin/runner versions go underneath. The companion cannot read the
-        // vault, so those two arrive as URI parameters when Obsidian opens
-        // this screen (display only) — otherwise they read "unknown".
-        val titleRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        titleRow.addView(TextView(this).apply {
+        // Title, then the three versions stacked underneath: companion first,
+        // plugin and runner below it; the lagging part is highlighted. The
+        // companion cannot read the vault, so plugin/runner numbers arrive as
+        // URI parameters when Obsidian opens this screen (display only) —
+        // otherwise they read "unknown".
+        root.addView(TextView(this).apply {
             text = getString(R.string.app_name)
             textSize = 22f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(c(R.color.text_normal))
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         })
-        titleRow.addView(TextView(this).apply {
-            text = "v" + appVersion()
-            textSize = 13f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(c(R.color.text_muted))
-        })
-        root.addView(titleRow)
 
-        versions = TextView(this).apply {
-            textSize = 12f
-            setTextColor(c(R.color.text_muted))
-            setPadding(0, dp(2f), 0, 0)
+        val versionLine = { top: Float ->
+            TextView(this).apply {
+                textSize = 12f
+                typeface = Typeface.MONOSPACE
+                setTextColor(c(R.color.text_muted))
+                setPadding(0, dp(top), 0, 0)
+            }
         }
-        root.addView(versions)
+        companionLine = versionLine(6f)
+        pluginLine = versionLine(2f)
+        runnerLine = versionLine(2f)
+        root.addView(companionLine)
+        root.addView(pluginLine)
+        root.addView(runnerLine)
 
         mismatch = TextView(this).apply {
             textSize = 13f
@@ -153,21 +157,7 @@ class SetupActivity : Activity() {
         step2 = makeStepRow("2") {
             requestPermissions(arrayOf(TermuxForwarder.PERMISSION), REQ_PERMISSION)
         }
-        step3 = makeStepRow("3") {
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            // Pinned to this app's version == the release version, so the
-            // runner installed here matches the release the plugin came from.
-            clipboard.setPrimaryClip(
-                ClipData.newPlainText(
-                    "git-bridge-setup",
-                    getString(R.string.setup_command, appVersion())
-                )
-            )
-            Toast.makeText(this, R.string.setup_command_copied, Toast.LENGTH_LONG).show()
-            val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
-            if (launch != null) startActivity(launch)
-            else Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
-        }
+        step3 = makeStepRow("3") { copyCommandAndOpenTermux() }
         root.addView(step1.container)
         root.addView(step2.container)
         root.addView(step3.container)
@@ -195,6 +185,13 @@ class SetupActivity : Activity() {
         }
         updateButton.visibility = android.view.View.GONE
         root.addView(updateButton)
+        // Only shown when the RUNNER is the outdated part: one tap copies the
+        // release-pinned install command and opens Termux to paste it into.
+        updateRunnerButton = actionButton(R.string.btn_update_runner, primary = true) {
+            copyCommandAndOpenTermux()
+        }
+        updateRunnerButton.visibility = android.view.View.GONE
+        root.addView(updateRunnerButton)
         root.addView(actionButton(R.string.btn_test, primary = true) { startProbe(manual = true) })
         root.addView(actionButton(R.string.btn_app_settings, primary = false) {
             startActivity(
@@ -319,12 +316,39 @@ class SetupActivity : Activity() {
         style(step3, probeOk, R.string.btn_setup_termux, R.string.btn_setup_termux_done, probeInFlight)
 
         detail.text = when {
+            // An outdated runner is NOT "ready": the probe answers, but the
+            // plugin will refuse newer actions. Show the fix, not a green light.
+            probeOk && runnerLags() -> getString(R.string.runner_outdated_detail)
             probeOk -> getString(R.string.setup_ready)
             probeInFlight -> getString(R.string.probe_running)
             probeMsg.isNotEmpty() -> explainProbeFailure(probeMsg)
             else -> getString(R.string.setup_help)
         }
         technical.text = if (!probeOk && probeMsg.isNotEmpty()) probeMsg else ""
+    }
+
+    /** Copy the release-pinned install command and switch to Termux (step 3 and "Update runner"). */
+    private fun copyCommandAndOpenTermux() {
+        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+        // Pinned to this app's version == the release version, so the
+        // runner installed here matches the release the plugin came from.
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText(
+                "git-bridge-setup",
+                getString(R.string.setup_command, appVersion())
+            )
+        )
+        Toast.makeText(this, R.string.setup_command_copied, Toast.LENGTH_LONG).show()
+        val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
+        if (launch != null) startActivity(launch)
+        else Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
+    }
+
+    /** True when Obsidian reported a runner older than what the plugin needs. */
+    private fun runnerLags(): Boolean {
+        val rv = prefs().getString(KEY_RUNNER_VERSION, "")?.toIntOrNull() ?: 0
+        val rmin = prefs().getString(KEY_RUNNER_MIN, "")?.toIntOrNull() ?: 0
+        return rv != 0 && rmin != 0 && rv < rmin
     }
 
     /**
@@ -462,22 +486,35 @@ class SetupActivity : Activity() {
             runnerMin != 0 && runnerNum != runnerMin -> getString(R.string.ver_runner_stale, rv, rmin)
             else -> "v$rv"
         }
-        versions.text = getString(R.string.ver_line, pluginText, runnerText)
 
         // The same three-way check the plugin does, repeated here because the
         // user may open this screen directly from the launcher and expects the
         // verdict where the numbers are shown.
         val cmp = if (pv.isEmpty()) 0 else compareVersions(pv, appVersion())
+        val companionLags = cmp > 0
+        // A runner NEWER than the plugin expects also means the PLUGIN lags.
+        val pluginLags = cmp < 0 || (runnerNum != 0 && runnerMin != 0 && runnerNum > runnerMin)
+        val runnerIsLagging = runnerNum != 0 && runnerMin != 0 && runnerNum < runnerMin
+
+        companionLine.text = getString(R.string.ver_companion_line, appVersion())
+        pluginLine.text = getString(R.string.ver_plugin_line, pluginText)
+        runnerLine.text = getString(R.string.ver_runner_line, runnerText)
+        companionLine.setTextColor(c(if (companionLags) R.color.danger else R.color.text_muted))
+        pluginLine.setTextColor(c(if (pluginLags) R.color.danger else R.color.text_muted))
+        runnerLine.setTextColor(c(if (runnerIsLagging) R.color.danger else R.color.text_muted))
+
         // This app is the outdated part: offer the download right here. It can
         // open the real default browser, which Obsidian's in-app tab cannot do
         // reliably (its downloads are discarded when the tab closes).
         updateButton.visibility =
-            if (cmp > 0) android.view.View.VISIBLE else android.view.View.GONE
+            if (companionLags) android.view.View.VISIBLE else android.view.View.GONE
+        // The runner is the outdated part: the fix is one tap away.
+        updateRunnerButton.visibility =
+            if (runnerIsLagging) android.view.View.VISIBLE else android.view.View.GONE
         mismatch.text = when {
             cmp < 0 -> getString(R.string.ver_update_plugin, pv, appVersion())
-            cmp > 0 -> getString(R.string.ver_update_companion, appVersion(), pv)
-            runnerNum != 0 && runnerMin != 0 && runnerNum < runnerMin ->
-                getString(R.string.ver_update_runner, rv, rmin)
+            companionLags -> getString(R.string.ver_update_companion, appVersion(), pv)
+            runnerIsLagging -> getString(R.string.ver_update_runner, rv, rmin)
             runnerNum != 0 && runnerMin != 0 && runnerNum > runnerMin ->
                 getString(R.string.ver_update_plugin_for_runner, rv, rmin)
             else -> ""

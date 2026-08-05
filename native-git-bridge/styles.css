@@ -246,7 +246,14 @@
    (https://github.com/rtfpessoa/diff2html/blob/master/LICENSE.md,
    Copyright 2014-2016 Rodrigo Fernandes) with the Obsidian-variable
    adaptations pioneered by obsidian-version-history-diff (MIT,
-   @kometenstaub and contributors). Scoped under .ngb-diff-view. */
+   @kometenstaub and contributors). Scoped under .ngb-diff-view.
+
+   Layout note: upstream pins line numbers with position:absolute, which broke
+   vertical scrolling here (the pane scrolls, absolutely-positioned cells were
+   anchored to workspace chrome and stayed put). Instead the numbers are real
+   table cells made position:sticky INSIDE the horizontal scroller
+   (.d2h-code-wrapper): they follow vertical scrolling with their rows and
+   stick to the left edge only while scrolling horizontally. */
 
 .ngb-diff-view {
   --ngb-diff-del-bg: rgba(255, 71, 80, 0.25);
@@ -255,28 +262,38 @@
   --ngb-diff-ins-hl: rgba(35, 192, 35, 0.31);
 }
 .ngb-diff-view .d2h-d-none { display: none; }
-.ngb-diff-view .d2h-wrapper { text-align: left; border-radius: 0.25em; overflow: auto; }
+.ngb-diff-view .d2h-wrapper { text-align: left; }
 .ngb-diff-view .d2h-file-header { display: none; }
 .ngb-diff-view .d2h-file-wrapper {
   border: 1px solid var(--background-modifier-border);
-  border-radius: 3px; margin-bottom: 1em; max-height: 100%;
+  border-radius: 3px; margin-bottom: 1em;
 }
+/* Horizontal-only scroller; vertical scrolling belongs to the pane. */
+.ngb-diff-view .d2h-code-wrapper { overflow-x: auto; }
 .ngb-diff-view .d2h-diff-table {
-  border-collapse: collapse;
+  border-collapse: separate; border-spacing: 0;
   font-family: var(--font-monospace);
   font-size: var(--font-smaller);
-  width: 100%;
+  min-width: 100%;
 }
-.ngb-diff-view .d2h-files-diff { width: 100%; }
-.ngb-diff-view .d2h-file-diff { border-radius: 5px; }
-.ngb-diff-view .d2h-code-line { padding-left: 6em; padding-right: 1.5em; }
-.ngb-diff-view .d2h-code-line {
-  display: inline-block; user-select: none; white-space: nowrap; width: 100%;
+.ngb-diff-view .d2h-code-linenumber {
+  position: sticky; left: 0; z-index: 1;
+  width: 5.5em; min-width: 5.5em; box-sizing: border-box;
+  padding: 0 0.3em;
+  color: var(--text-faint); text-align: right; direction: rtl;
+  user-select: none;
+  /* Must be opaque: translucent numbers would let scrolled code bleed through. */
+  background-color: var(--background-primary);
+  border-right: 1px solid var(--background-modifier-border);
 }
-.ngb-diff-view .d2h-code-line-ctn {
-  word-wrap: normal; background: none; display: inline-block; padding: 0;
-  user-select: text; vertical-align: middle; width: 100%; white-space: pre-wrap;
+.ngb-diff-view .line-num1 { float: left; }
+.ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
+  box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; width: 2.5em;
 }
+.ngb-diff-view .line-num2 { float: right; }
+.ngb-diff-view .d2h-code-line { padding: 0 0.5em; white-space: pre; }
+.ngb-diff-view .d2h-code-line-ctn { white-space: pre; }
+.ngb-diff-view .d2h-code-line-prefix { user-select: none; white-space: pre; }
 .ngb-diff-view .d2h-code-line del {
   background-color: var(--ngb-diff-del-hl); color: var(--text-normal);
 }
@@ -288,32 +305,66 @@
 .ngb-diff-view .d2h-code-line ins {
   background-color: var(--ngb-diff-ins-hl); text-align: left;
 }
-.ngb-diff-view .d2h-code-line-prefix {
-  word-wrap: normal; background: none; display: inline; padding: 0; white-space: pre;
-}
-.ngb-diff-view .line-num1 { float: left; }
-.ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
-  box-sizing: border-box; overflow: hidden; text-overflow: ellipsis;
-  width: 2.5em; padding-left: 0;
-}
-.ngb-diff-view .line-num2 { float: right; }
-.ngb-diff-view .d2h-code-linenumber {
+/* Row tints: translucent over the pane for code cells… */
+.ngb-diff-view .d2h-del { background-color: var(--ngb-diff-del-bg); }
+.ngb-diff-view .d2h-ins { background-color: var(--ngb-diff-ins-bg); }
+.ngb-diff-view .d2h-info { background-color: var(--background-primary); color: var(--text-faint); }
+/* …but layered over an opaque base for the sticky number cells. */
+.ngb-diff-view .d2h-code-linenumber.d2h-del {
   background-color: var(--background-primary);
-  border: solid var(--background-modifier-border); border-width: 0 1px;
-  box-sizing: border-box; color: var(--text-faint); display: inline-block;
-  position: absolute; text-align: right; width: 5.5em; direction: rtl;
-  user-select: none;
+  background-image: linear-gradient(var(--ngb-diff-del-bg), var(--ngb-diff-del-bg));
 }
-.ngb-diff-view .d2h-code-linenumber:after { content: "\200b"; }
+.ngb-diff-view .d2h-code-linenumber.d2h-ins {
+  background-color: var(--background-primary);
+  background-image: linear-gradient(var(--ngb-diff-ins-bg), var(--ngb-diff-ins-bg));
+}
 .ngb-diff-view .d2h-emptyplaceholder {
   background-color: var(--background-primary);
   border-color: var(--background-modifier-border);
 }
-.ngb-diff-view .d2h-code-line-prefix, .ngb-diff-view .d2h-emptyplaceholder { user-select: none; }
-.ngb-diff-view .d2h-del { background-color: var(--ngb-diff-del-bg); border-color: var(--ngb-diff-del-hl); }
-.ngb-diff-view .d2h-ins { background-color: var(--ngb-diff-ins-bg); border-color: var(--ngb-diff-ins-hl); }
-.ngb-diff-view .d2h-info {
-  background-color: var(--background-primary);
-  border-color: var(--background-modifier-border);
-  color: var(--text-faint);
+
+/* Optional line wrapping (settings toggle): no horizontal scrolling needed. */
+.ngb-diff-view.ngb-diff-wrap .d2h-code-line,
+.ngb-diff-view.ngb-diff-wrap .d2h-code-line-ctn {
+  white-space: pre-wrap; word-break: break-word;
 }
+
+/* ------------------------------------------------- conflict resolution */
+
+/* Warning glyph on conflicted rows in the status panel. */
+.ngb-conf-row-icon { display: inline-flex; align-items: center; color: var(--text-error); flex: 0 0 auto; }
+.ngb-conf-row-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
+
+/* Per-block resolution pane. Lines WRAP by design: with no horizontal
+   scrolling the Keep buttons (on the marker rows, next to the line numbers)
+   can never scroll out of reach. */
+.ngb-conflict-view { padding: var(--size-4-2); overflow: auto; }
+.ngb-conflict-view {
+  --ngb-conf-ours-bg: rgba(8, 185, 78, 0.12);
+  --ngb-conf-theirs-bg: rgba(8, 109, 221, 0.12);
+}
+.ngb-conf-list {
+  font-family: var(--font-monospace); font-size: var(--font-smaller);
+  border: 1px solid var(--background-modifier-border); border-radius: 3px;
+  margin-top: var(--size-4-2);
+}
+.ngb-conf-row { display: flex; align-items: baseline; }
+.ngb-conf-num {
+  flex: 0 0 3em; text-align: right; padding-right: 0.5em;
+  color: var(--text-faint); user-select: none;
+  border-right: 1px solid var(--background-modifier-border);
+}
+.ngb-conf-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; padding-left: 0.5em; min-width: 0; }
+.ngb-conf-ours { background: var(--ngb-conf-ours-bg); }
+.ngb-conf-theirs { background: var(--ngb-conf-theirs-bg); }
+.ngb-conf-base .ngb-conf-text { color: var(--text-faint); }
+.ngb-conf-divider .ngb-conf-text { color: var(--text-faint); user-select: none; }
+.ngb-conf-marker { align-items: center; }
+.ngb-conf-marker-body {
+  flex: 1 1 auto; display: flex; align-items: center; gap: var(--size-4-2);
+  padding: 2px 0 2px 0.5em; min-width: 0;
+}
+.ngb-conf-marker-label { font-weight: var(--font-medium); overflow: hidden; text-overflow: ellipsis; }
+.ngb-conf-ours-head { background: var(--ngb-conf-ours-bg); }
+.ngb-conf-theirs-head { background: var(--ngb-conf-theirs-bg); }
+.ngb-conf-keep { flex: 0 0 auto; font-size: var(--font-ui-small); padding: 0 var(--size-4-2); }

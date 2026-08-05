@@ -1,12 +1,16 @@
 <resources>
     <string name="app_name">Git Bridge Companion</string>
     <string name="setup_title">Setup</string>
-    <string name="ver_line">Plugin %1$s · Runner %2$s</string>
     <string name="ver_unknown">unknown</string>
     <string name="ver_runner_stale">v%1$s (needs v%2$s)</string>
+    <string name="ver_companion_line">Companion  v%1$s</string>
+    <string name="ver_plugin_line">Plugin  %1$s</string>
+    <string name="ver_runner_line">Runner  %1$s</string>
+    <string name="btn_update_runner">Update runner (copy command &amp; open Termux)</string>
+    <string name="runner_outdated_detail">The Termux runner is OUTDATED. Tap "Update runner" below: the install command is copied to the clipboard — paste it into Termux and press Enter. Updating the plugin never updates the runner.</string>
     <string name="ver_update_plugin">⚠ The Obsidian plugin (%1$s) is older than this app (%2$s). Update the plugin from the latest GitHub release (main.js, manifest.json, styles.css), then reload it in Obsidian.</string>
     <string name="ver_update_companion">⚠ This app (%1$s) is older than the Obsidian plugin (%2$s). Install the newest APK from the latest GitHub release — it updates over this one.</string>
-    <string name="ver_update_runner">⚠ The Termux runner (v%1$s) is older than the plugin needs (v%2$s). Tap step 3 above and run the install command in Termux — updating the plugin never updates the runner.</string>
+    <string name="ver_update_runner">⚠ The Termux runner (v%1$s) is older than the plugin needs (v%2$s). Tap "Update runner" below and run the copied command in Termux — updating the plugin never updates the runner.</string>
     <string name="ver_update_plugin_for_runner">⚠ The Termux runner (v%1$s) is newer than the plugin expects (v%2$s). Update the Obsidian plugin from the latest GitHub release.</string>
     <string name="section_actions">Actions</string>
     <string name="check_termux">Termux is installed</string>

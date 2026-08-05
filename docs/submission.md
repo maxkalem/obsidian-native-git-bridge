@@ -103,16 +103,17 @@ The Vault API cannot see the two file groups this plugin must touch:
 All other file work goes through the adapter for the same reason. No user note
 is ever written by this plugin.
 
-### Three private-API reads
+### Four private-API uses
 
 Each is optional, defensively typed (`as unknown as {...}` with `?.`), and
 degrades silently if the API changes:
 
-| Read | Why it is needed | If it disappears |
+| Use | Why it is needed | If it disappears |
 |------|------------------|------------------|
 | `app.appId` | Scopes device-local settings per installation, so a plugin folder synced through Git cannot leak one device's token/paths to another. A persisted random id is used as a fallback. | Falls back to the generated id |
 | `app.plugins.enabledPlugins` | Detects an **active** obsidian-git on the same Android device and warns once — this is the data-loss scenario described above, not a rivalry. The plugin never disables another plugin. | No warning is shown |
 | `app.loadLocalStorage` | Reads obsidian-git's own device-local "disabled on this device" flag, so the warning is not shown when the user already took the recommended action. | Falls back to `window.localStorage`, then to showing the warning |
+| `app.openWithDefaultApp` | "Open in default app" on a conflicted file the resolution pane cannot display (binary), so the user can inspect it before choosing a side. Not in the mobile typings. | A notice explains the action is unavailable |
 
 ### The settings tab still implements `display()`
 

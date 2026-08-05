@@ -256,6 +256,18 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           })(); })
       );
 
+    new Setting(containerEl)
+      .setName("Wrap long lines in diffs")
+      .setDesc(
+        "Wrap lines in the diff pane instead of scrolling horizontally. " +
+          "Cosmetic and shared across devices (stored in data.json)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.wrapDiffLines).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ wrapDiffLines: v });
+        })(); })
+      );
+
     new Setting(containerEl).setName("Automatic actions").setHeading();
 
     new Setting(containerEl)

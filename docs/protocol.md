@@ -36,7 +36,11 @@ Directory (repo-relative, excluded via `.git/info/exclude`):
   parent), `restore-file` (worktree-only `git restore --source`, blocked for
   protected paths). Runner v5: `repo-log` (repository-wide paginated log for
   the history panel, same `\x1e`/`\x1f` record format as `file-log` with a
-  `--name-status` block per commit, no `--follow`). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
+  `--name-status` block per commit, no `--follow`). Runner v6:
+  `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses
+  non-conflicted paths and protected paths, then `git checkout --<side>` +
+  `git add` to mark the file resolved — only ever on an explicit user choice;
+  the bridge never picks a side by itself). `pull`/`commit`/`push`/`sync` require `args.protectedPaths`
   (validated on both sides) and enforce the sparse safety gate; `commit`/`sync`
   require `args.message` (`sync` falls back to a default). Conflicts are returned
   as `error.code = "CONFLICT"` with `data.conflicts`; safety violations as

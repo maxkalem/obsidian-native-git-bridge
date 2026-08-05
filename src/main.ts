@@ -63,6 +63,7 @@ import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
 import { DiffView, NGB_DIFF_VIEW, type DiffViewState } from "./ui/DiffView";
+import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
 import {
@@ -85,8 +86,14 @@ import { OperationLogModal } from "./ui/OperationLogModal";
 interface SharedUiPrefs {
   showStatusBar: boolean;
   showRibbonIcon: boolean;
+  /** Wrap long lines in the diff pane instead of scrolling horizontally. */
+  wrapDiffLines: boolean;
 }
-const DEFAULT_SHARED_PREFS: SharedUiPrefs = { showStatusBar: true, showRibbonIcon: true };
+const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
+  showStatusBar: true,
+  showRibbonIcon: true,
+  wrapDiffLines: false,
+};
 
 const MARKER_KEY = "active-op";
 const LAST_SYNC_KEY = "last-sync";
@@ -151,6 +158,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           cancel: () => void this.cmdCancel(),
           openFile: (p) => this.openVaultFile(p),
           openDiff: (p, group) => void this.openStatusDiff(p, group),
+          openConflict: (p, pos) => void this.openConflict(p, pos),
           stage: (p) => void this.cmdStageFile(p),
           unstage: (p) => void this.cmdUnstageFile(p),
           discard: (p) => this.cmdDiscardFile(p),
@@ -173,6 +181,19 @@ export default class NativeGitBridgePlugin extends Plugin {
       (leaf: WorkspaceLeaf) =>
         new DiffView(leaf, {
           loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
+          wrapLines: () => this.sharedPrefs.wrapDiffLines,
+        })
+    );
+
+    this.registerView(
+      NGB_CONFLICT_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new ConflictView(leaf, {
+          readFile: (p) => this.readVaultTextFile(p),
+          writeFile: async (p, content) => {
+            await this.app.vault.adapter.write(p, content);
+          },
+          stageFile: (p) => this.cmdStageFile(p),
         })
     );
 
@@ -218,6 +239,30 @@ export default class NativeGitBridgePlugin extends Plugin {
         const unstaged =
           (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) ||
           (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
+        const conflicted = st?.conflicted.some((e) => e.path === p) ?? false;
+
+        // Conflict entries first: they are the only sensible actions while a
+        // file is unmerged, and the tap-on-binary-conflict path lands here.
+        if (conflicted) {
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Resolve — keep local version (yours)")
+              .setIcon("check")
+              .onClick(() => this.cmdResolveConflict(p, "ours"))
+          );
+          menu.addItem((i) =>
+            i
+              .setTitle("Git: Resolve — keep remote version")
+              .setIcon("check-check")
+              .onClick(() => this.cmdResolveConflict(p, "theirs"))
+          );
+          menu.addItem((i) =>
+            i
+              .setTitle("Open in default app")
+              .setIcon("external-link")
+              .onClick(() => this.openWithDefaultApp(p))
+          );
+        }
 
         if (unstaged || !st) {
           menu.addItem((i) =>
@@ -1285,6 +1330,17 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   // ---------------------------------------------------- phase 3 git commands
 
+  /** Merge and persist shareable UI preferences (data.json; cosmetic only). */
+  async setSharedPref(patch: Partial<SharedUiPrefs>): Promise<void> {
+    this.sharedPrefs = { ...this.sharedPrefs, ...patch };
+    await this.saveData(this.sharedPrefs);
+    // Re-render any open diff panes so a wrap toggle applies immediately.
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof DiffView) view.applyWrapPref();
+    }
+  }
+
   /** Parse the status fields every mutating action returns and refresh UI. */
   private absorbStatusData(d: Record<string, string>): void {
     if (!d.branchInfo) return;
@@ -1677,6 +1733,79 @@ export default class NativeGitBridgePlugin extends Plugin {
       state: state as unknown as Record<string, unknown>,
     });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  // ------------------------------------------------- conflict resolution
+
+  /** Vault file as text, or null when it looks binary (NUL byte probe). */
+  private async readVaultTextFile(path: string): Promise<string | null> {
+    try {
+      const buf = await this.app.vault.adapter.readBinary(path);
+      return bytesToTextIfNotBinary(new Uint8Array(buf));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Tap on a conflicted file: text files get the per-block resolution pane;
+   * anything else gets the Git context menu (keep ours / keep theirs / open
+   * in the default app) anchored where the user tapped.
+   */
+  async openConflict(path: string, pos: { x: number; y: number }): Promise<void> {
+    const text = await this.readVaultTextFile(path);
+    if (text !== null) {
+      const existing = this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW);
+      const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
+      await leaf.setViewState({ type: NGB_CONFLICT_VIEW, active: true, state: { path } });
+      this.app.workspace.revealLeaf(leaf);
+      return;
+    }
+    const menu = new Menu();
+    this.buildGitMenu(menu, path);
+    menu.showAtPosition(pos);
+  }
+
+  /** Whole-file resolution via the runner, after explicit confirmation. */
+  cmdResolveConflict(path: string, side: "ours" | "theirs"): void {
+    new ConfirmModal(
+      this.app,
+      {
+        title: side === "ours" ? "Keep the LOCAL version (yours)?" : "Keep the REMOTE version?",
+        body: [
+          `File: ${path}`,
+          side === "ours"
+            ? "The incoming remote changes to this file are discarded; your local version is kept and the file is marked resolved."
+            : "Your local changes to this file are discarded; the incoming remote version is kept and the file is marked resolved.",
+          "This cannot be undone for the losing side's uncommitted content.",
+        ],
+        confirmLabel: side === "ours" ? "Keep local" : "Keep remote",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("resolve-conflict", {
+          path,
+          side,
+          protectedPaths: this.effectiveProtectedPaths(),
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: resolve failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify(`Resolved ${path} (kept the ${side === "ours" ? "local" : "remote"} version).`);
+      }
+    ).open();
+  }
+
+  /**
+   * Open a file with the system's default app. `openWithDefaultApp` is not in
+   * the public typings on mobile, so this degrades to a notice when absent
+   * (documented in docs/submission.md alongside the other private-API uses).
+   */
+  private openWithDefaultApp(path: string): void {
+    const anyApp = this.app as unknown as { openWithDefaultApp?: (p: string) => void };
+    if (typeof anyApp.openWithDefaultApp === "function") anyApp.openWithDefaultApp(path);
+    else new Notice("Opening with the default app is not available in this Obsidian version.");
   }
 
   /**

@@ -242,6 +242,28 @@ check 'jq -e ".ok == true" "$RUNTIME/results/r-20260803T100016Z-abrt01.json" >/d
 check '! git diff --name-only --diff-filter=U | grep -q .' "no conflicted files remain"
 check '[ ! -e "$(git rev-parse --git-path MERGE_HEAD)" ]' "MERGE_HEAD removed"
 
+echo "# phase 3: resolve-conflict keeps the chosen side and marks the file resolved"
+git pull -q --no-rebase 2>/dev/null || true   # recreate the same conflict
+check 'git ls-files -u | grep -q "Notes/note.md"' "conflict reproduced for resolve tests"
+req "r-20260803T100017Z-res001" resolve-conflict "$TOKEN" '{"path":"Notes/note.md","side":"both","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100017Z-res001.json" >/dev/null' "invalid side -> BAD_REQUEST"
+req "r-20260803T100017Z-res002" resolve-conflict "$TOKEN" '{"path":"Notes/unicode nøte.md","side":"ours","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260803T100017Z-res002.json" >/dev/null' "non-conflicted file -> BAD_REQUEST"
+req "r-20260803T100017Z-res003" resolve-conflict "$TOKEN" '{"path":"Private/Hidden/mem.md","side":"ours","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260803T100017Z-res003.json" >/dev/null' "protected path -> SAFETY_BLOCKED"
+req "r-20260803T100017Z-res004" resolve-conflict "$TOKEN" '{"path":"Notes/note.md","side":"ours","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260803T100017Z-res004.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "resolve-conflict (ours) ok"
+check 'grep -q "local edit" Notes/note.md' "worktree keeps OUR content"
+check '! grep -q "remote edit" Notes/note.md' "their content is gone"
+check '! git ls-files -u | grep -q "Notes/note.md"' "file no longer unmerged (marked resolved)"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "fresh status rides along"
+git commit -qm "e2e: merge resolved (ours)" && git push -q 2>/dev/null || true
+
 echo "# phase 4: file history with rename tracking"
 printf 'v1\n' > "Notes/hist note.md"
 git add -A && git commit -qm "hist: create"
@@ -414,7 +436,7 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "5" ]' "runnerVersion = 5 reported to the plugin"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "6" ]' "runnerVersion = 6 reported to the plugin"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
