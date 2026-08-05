@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=6
+RUNNER_VERSION=7
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -206,6 +206,14 @@ collect_untracked_children() {
 collect_status_fields() {
   run_git status --porcelain=v2 --branch || true; local branch_info="$GIT_OUT"
   local sparse_enabled sparse_cone sparse_list skip_count last_commit remote_url
+  # During a merge, expose git's own prepared MERGE_MSG ("Merge branch … \n\n
+  # # Conflicts: …") so the plugin can prefill the commit modal after a manual
+  # resolution and auto-use it for sync.
+  local merge_active=false merge_msg=""
+  if [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+    merge_active=true
+    merge_msg="$(cat "$(git rev-parse --git-path MERGE_MSG)" 2>/dev/null || true)"
+  fi
   sparse_enabled="$(git config --get core.sparseCheckout 2>/dev/null || true)"
   sparse_cone="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
   sparse_list="$(git sparse-checkout list 2>/dev/null || true)"
@@ -222,7 +230,9 @@ collect_status_fields() {
     skipWorktreeCount "$skip_count" \
     lastCommit "$last_commit" \
     remoteUrl "$remote_url" \
-    untrackedChildren "$UNTRACKED_CHILDREN")
+    untrackedChildren "$UNTRACKED_CHILDREN" \
+    mergeInProgress "$merge_active" \
+    mergeMsg "$merge_msg")
 }
 
 action_status() { collect_status_fields; }

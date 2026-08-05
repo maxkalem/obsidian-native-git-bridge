@@ -1,6 +1,6 @@
 {
   "name": "native-git-bridge",
-  "version": "0.5.7",
+  "version": "0.5.8",
   "description": "Native Git frontend for Obsidian on Android, delegating Git operations to the real Git binary in Termux. Sparse-checkout aware, no background services.",
   "main": "main.js",
   "type": "module",

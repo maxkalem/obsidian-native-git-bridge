@@ -146,6 +146,14 @@ export class DiffView extends ItemView {
       outputFormat: "line-by-line",
     });
     box.appendChild(sanitizeHTMLToDom(rendered));
+    // The +/- prefix belongs to the STICKY number gutter, not to the code: in
+    // the code cell it scrolled away horizontally and, when wrapping, read
+    // like content. One number per line, prefix beside it, everything compact.
+    for (const tr of Array.from(box.querySelectorAll("tr"))) {
+      const gutter = tr.querySelector(".d2h-code-linenumber");
+      const prefix = tr.querySelector(".d2h-code-line-prefix");
+      if (gutter && prefix) gutter.appendChild(prefix);
+    }
     if (this.actions.showInvisibles()) markInvisibles(box);
     if (res.truncated) {
       box.createDiv({

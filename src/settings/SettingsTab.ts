@@ -283,6 +283,19 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Show raw conflict markers")
+      .setDesc(
+        "In the conflict pane: show the file's <<<<<<< / ======= / >>>>>>> " +
+          "lines as they really are, with the side labels and Keep buttons on " +
+          "separate rows. Off: the markers stay hidden under those rows."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.showConflictMarkers).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ showConflictMarkers: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
       .setName("Auto-refresh status (seconds)")
       .setDesc(
         "While the status panel is open, run a status this often to pick up " +

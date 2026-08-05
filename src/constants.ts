@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 6;
+export const RUNNER_MIN_VERSION = 7;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).

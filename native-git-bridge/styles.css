@@ -286,21 +286,27 @@
   font-size: var(--font-smaller);
   min-width: 100%;
 }
+/* Compact sticky gutter: old + new number side by side (unchanged rows show
+   equal numbers on one line), and the +/- prefix relocated HERE by DiffView,
+   so it never scrolls or wraps with the text. One number per line — a wrapped
+   continuation has no gutter of its own because the whole table row wraps. */
 .ngb-diff-view .d2h-code-linenumber {
   position: sticky; left: 0; z-index: 1;
-  width: 5.5em; min-width: 5.5em; box-sizing: border-box;
-  padding: 0 0.3em;
-  color: var(--text-faint); text-align: right; direction: rtl;
-  user-select: none;
+  box-sizing: border-box; white-space: nowrap;
+  padding: 0 0.25em;
+  color: var(--text-faint); text-align: right;
+  user-select: none; vertical-align: top;
   /* Must be opaque: translucent numbers would let scrolled code bleed through. */
   background-color: var(--background-primary);
   border-right: 1px solid var(--background-modifier-border);
 }
-.ngb-diff-view .line-num1 { float: left; }
 .ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
-  box-sizing: border-box; overflow: hidden; text-overflow: ellipsis; width: 2.5em;
+  display: inline-block; box-sizing: border-box; overflow: hidden;
+  min-width: 1.6em; text-align: right;
 }
-.ngb-diff-view .line-num2 { float: right; }
+.ngb-diff-view .d2h-code-linenumber .d2h-code-line-prefix {
+  display: inline-block; width: 1em; text-align: center; color: var(--text-muted);
+}
 /* diff2html's template HTML is pretty-printed (newlines + indentation BETWEEN
    the prefix/content spans). The line container must therefore collapse
    whitespace (nowrap); only the content span itself preserves the file's real
@@ -310,9 +316,7 @@
 .ngb-diff-view .d2h-code-line-ctn {
   white-space: pre; display: inline-block; vertical-align: middle;
 }
-.ngb-diff-view .d2h-code-line-prefix {
-  user-select: none; white-space: pre; display: inline-block; vertical-align: middle;
-}
+.ngb-diff-view .d2h-code-line-prefix { user-select: none; white-space: pre; }
 .ngb-diff-view .d2h-code-line del {
   background-color: var(--ngb-diff-del-hl); color: var(--text-normal);
 }
@@ -360,8 +364,10 @@
 .ngb-conf-row-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
 
 /* Per-block resolution pane. Lines WRAP by design: with no horizontal
-   scrolling the Keep buttons (on the marker rows, next to the line numbers)
-   can never scroll out of reach. */
+   scrolling the Keep buttons can never scroll out of reach. Exactly one
+   number per physical file line; chrome rows (side label + button) are
+   visually distinct from file content and, when un-numbered, carry a pointer
+   glyph in the gutter so they can never be misread as wrapped continuations. */
 .ngb-conflict-view { padding: var(--size-4-2); overflow: auto; }
 .ngb-conflict-view {
   --ngb-conf-ours-bg: rgba(8, 185, 78, 0.12);
@@ -372,7 +378,7 @@
   border: 1px solid var(--background-modifier-border); border-radius: 3px;
   margin-top: var(--size-4-2);
 }
-.ngb-conf-row { display: flex; align-items: baseline; }
+.ngb-conf-row { display: flex; align-items: flex-start; }
 .ngb-conf-num {
   flex: 0 0 3em; text-align: right; padding-right: 0.5em;
   color: var(--text-faint); user-select: none;
@@ -383,15 +389,40 @@
 .ngb-conf-theirs { background: var(--ngb-conf-theirs-bg); }
 .ngb-conf-base .ngb-conf-text { color: var(--text-faint); }
 .ngb-conf-divider .ngb-conf-text { color: var(--text-faint); user-select: none; }
-.ngb-conf-marker { align-items: center; }
-.ngb-conf-marker-body {
-  flex: 1 1 auto; display: flex; align-items: center; gap: var(--size-4-2);
-  padding: 2px 0 2px 0.5em; min-width: 0;
+/* Raw marker lines (visible-markers mode) read as DIMMED file content. */
+.ngb-conf-raw .ngb-conf-text { color: var(--text-faint); font-style: italic; }
+
+/* Chrome rows are NOT file text: own background, side border, interface font
+   chip, and the button pinned to the right edge on a single non-wrapping
+   line — the label truncates, the button never covers anything. */
+.ngb-conf-marker {
+  align-items: center;
+  background: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
 }
-.ngb-conf-marker-label { font-weight: var(--font-medium); overflow: hidden; text-overflow: ellipsis; }
-.ngb-conf-ours-head { background: var(--ngb-conf-ours-bg); }
-.ngb-conf-theirs-head { background: var(--ngb-conf-theirs-bg); }
-.ngb-conf-keep { flex: 0 0 auto; font-size: var(--font-ui-small); padding: 0 var(--size-4-2); }
+.ngb-conf-marker .ngb-conf-num {
+  align-self: stretch; display: flex; align-items: center; justify-content: flex-end;
+}
+.ngb-conf-num-chrome { color: var(--text-accent); }
+.ngb-conf-marker-body {
+  flex: 1 1 auto; display: flex; align-items: center; flex-wrap: nowrap;
+  gap: var(--size-4-2); padding: 2px var(--size-4-2) 2px 0.5em; min-width: 0;
+}
+.ngb-conf-side-chip {
+  font-family: var(--font-interface); font-size: var(--font-ui-smaller);
+  font-weight: var(--font-semibold); letter-spacing: 0.03em;
+  padding: 0 var(--size-2-3); border-radius: var(--radius-s);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.ngb-conf-ours-head { border-left: 3px solid var(--color-green, #08b94e); }
+.ngb-conf-ours-head .ngb-conf-side-chip { background: var(--ngb-conf-ours-bg); }
+.ngb-conf-theirs-head { border-left: 3px solid var(--color-blue, #086ddd); }
+.ngb-conf-theirs-head .ngb-conf-side-chip { background: var(--ngb-conf-theirs-bg); }
+.ngb-conf-keep {
+  flex: 0 0 auto; margin-left: auto;
+  font-size: var(--font-ui-smaller); padding: 0 var(--size-4-2);
+}
 
 /* ---------------------------------------- platform-aware modal action button */
 

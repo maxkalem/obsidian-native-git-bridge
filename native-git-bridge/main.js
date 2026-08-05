@@ -645,7 +645,7 @@ var import_obsidian15 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 6;
+var RUNNER_MIN_VERSION = 7;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -1375,6 +1375,15 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       (t) => t.setValue(this.plugin.sharedPrefs.showInvisibles).onChange((v) => {
         void (async () => {
           await this.plugin.setSharedPref({ showInvisibles: v });
+        })();
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Show raw conflict markers").setDesc(
+      "In the conflict pane: show the file's <<<<<<< / ======= / >>>>>>> lines as they really are, with the side labels and Keep buttons on separate rows. Off: the markers stay hidden under those rows."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.sharedPrefs.showConflictMarkers).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({ showConflictMarkers: v });
         })();
       })
     );
@@ -5360,6 +5369,11 @@ var DiffView = class extends import_obsidian13.ItemView {
       outputFormat: "line-by-line"
     });
     box.appendChild((0, import_obsidian13.sanitizeHTMLToDom)(rendered));
+    for (const tr of Array.from(box.querySelectorAll("tr"))) {
+      const gutter = tr.querySelector(".d2h-code-linenumber");
+      const prefix = tr.querySelector(".d2h-code-line-prefix");
+      if (gutter && prefix) gutter.appendChild(prefix);
+    }
     if (this.actions.showInvisibles()) markInvisibles(box);
     if (res.truncated) {
       box.createDiv({
@@ -5489,6 +5503,10 @@ var ConflictView = class extends import_obsidian14.ItemView {
     this.loadSeq = 0;
     this.navigation = true;
   }
+  /** Path this pane is resolving (whole-file resolution closes matching panes). */
+  get filePath() {
+    return this.path;
+  }
   getViewType() {
     return NGB_CONFLICT_VIEW;
   }
@@ -5545,6 +5563,7 @@ var ConflictView = class extends import_obsidian14.ItemView {
         void (async () => {
           await this.actions.stageFile(path);
           new import_obsidian14.Notice("Marked resolved.");
+          this.leaf.detach();
         })();
       });
       return;
@@ -5554,22 +5573,24 @@ var ConflictView = class extends import_obsidian14.ItemView {
       text: `${this.parsed.conflictCount} conflict${this.parsed.conflictCount === 1 ? "" : "s"} \u2014 pick a side per block. Other lines stay untouched.`
     });
     const list = c.createDiv({ cls: "ngb-conf-list" });
+    const rawMarkers = this.actions.markersVisible();
     let lineNo = 1;
-    const row = (num, text, cls, gutterCls = "") => {
+    const row = (num, text, cls) => {
       const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
-      r.createSpan({ cls: `ngb-conf-num ${gutterCls}`, text: num === null ? "" : String(num) });
+      r.createSpan({ cls: "ngb-conf-num", text: num === null ? "" : String(num) });
       r.createSpan({ cls: "ngb-conf-text", text: text === "" ? " " : text });
       return r;
     };
-    const markerRow = (num, label2, cls, btnLabel, onKeep) => {
-      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${cls}` });
-      r.createSpan({ cls: "ngb-conf-num", text: String(num) });
+    const chromeRow = (num, chip, sideCls, btnLabel, onKeep) => {
+      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${sideCls}` });
+      r.createSpan({
+        cls: `ngb-conf-num${num === null ? " ngb-conf-num-chrome" : ""}`,
+        text: num === null ? "\u25B8" : String(num)
+      });
       const body = r.createDiv({ cls: "ngb-conf-marker-body" });
-      body.createSpan({ cls: "ngb-conf-marker-label", text: label2 });
-      if (btnLabel !== null && onKeep !== null) {
-        const b = body.createEl("button", { text: btnLabel, cls: "ngb-conf-keep" });
-        b.addEventListener("click", onKeep);
-      }
+      body.createSpan({ cls: "ngb-conf-side-chip", text: chip });
+      const b = body.createEl("button", { text: btnLabel, cls: "ngb-conf-keep" });
+      b.addEventListener("click", onKeep);
     };
     for (const seg of this.parsed.segments) {
       if (seg.kind === "text") {
@@ -5578,27 +5599,31 @@ var ConflictView = class extends import_obsidian14.ItemView {
       }
       const idx = seg.index;
       const remote = shortRefLabel(seg.theirsLabel);
-      markerRow(
-        lineNo++,
-        `Local \u2014 yours (${seg.oursLabel || "HEAD"})`,
-        "ngb-conf-ours-head",
-        "Keep local (yours)",
-        () => void this.applyResolution(idx, "ours")
-      );
+      const oursChip = `LOCAL \u2014 yours (${seg.oursLabel || "HEAD"})`;
+      const theirsChip = `REMOTE \u2014 theirs${remote ? ` (${remote})` : ""}`;
+      const keepOursLabel = "Keep local";
+      const keepTheirsLabel = remote ? `Keep remote (${remote})` : "Keep remote";
+      const keepOurs = () => void this.applyResolution(idx, "ours");
+      const keepTheirs = () => void this.applyResolution(idx, "theirs");
+      if (rawMarkers) {
+        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours");
+        chromeRow(null, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+      } else {
+        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+      }
       for (const l of seg.ours) row(lineNo++, l, "ngb-conf-ours");
       if (seg.base !== void 0) {
-        row(lineNo++, "\u2026\u2026\u2026 common ancestor:", "ngb-conf-base ngb-conf-base-head");
+        row(lineNo++, rawMarkers ? "|||||||" : "\u2026\u2026\u2026 common ancestor:", "ngb-conf-base ngb-conf-raw");
         for (const l of seg.base) row(lineNo++, l, "ngb-conf-base");
       }
-      row(lineNo++, "\u2014\u2014\u2014", "ngb-conf-divider");
+      row(lineNo++, rawMarkers ? "=======" : "\u2014\u2014\u2014", "ngb-conf-divider ngb-conf-raw");
       for (const l of seg.theirs) row(lineNo++, l, "ngb-conf-theirs");
-      markerRow(
-        lineNo++,
-        `Remote \u2014 theirs${remote ? ` (${remote})` : ""}`,
-        "ngb-conf-theirs-head",
-        remote ? `Keep remote (${remote})` : "Keep remote",
-        () => void this.applyResolution(idx, "theirs")
-      );
+      if (rawMarkers) {
+        row(lineNo++, `>>>>>>> ${seg.theirsLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-theirs");
+        chromeRow(null, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
+      } else {
+        chromeRow(lineNo++, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
+      }
     }
   }
   async applyResolution(blockIndex, side) {
@@ -5688,6 +5713,7 @@ var DEFAULT_SHARED_PREFS = {
   showRibbonIcon: true,
   wrapDiffLines: false,
   showInvisibles: false,
+  showConflictMarkers: false,
   treeView: false
 };
 var MARKER_KEY = "active-op";
@@ -5800,7 +5826,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         writeFile: async (p, content) => {
           await this.app.vault.adapter.write(p, content);
         },
-        stageFile: (p) => this.cmdStageFile(p)
+        stageFile: (p) => this.cmdStageFile(p),
+        markersVisible: () => this.sharedPrefs.showConflictMarkers
       })
     );
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
@@ -6783,6 +6810,10 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       const view = leaf.view;
       if (view instanceof HistoryView) view.rerender();
     }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof ConflictView) void view.reload();
+    }
   }
   /** Parse the status fields every mutating action returns and refresh UI. */
   absorbStatusData(d) {
@@ -6802,7 +6833,9 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       status,
       sparse,
       lastCommit: parseLastCommit(d.lastCommit ?? ""),
-      fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString()
+      fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString(),
+      mergeInProgress: d.mergeInProgress === "true",
+      mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : void 0
     };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -6896,9 +6929,15 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     }
   }
   async cmdCommit() {
+    const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : void 0;
     new CommitMessageModal(
       this.app,
-      { title: "Commit changes", placeholder: "Commit message\u2026", submitLabel: "Commit" },
+      {
+        title: mergeMsg ? "Commit merge" : "Commit changes",
+        placeholder: "Commit message\u2026",
+        submitLabel: "Commit",
+        initial: mergeMsg
+      },
       async (message) => {
         if (message === null) return;
         const result = await this.runOperation("commit", {
@@ -6929,9 +6968,10 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     this.reportSuccess("Native Git: push", ["Push completed."], result.data?.pushOutput);
   }
   async cmdSync(message, silent = false) {
+    const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : void 0;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
-      message: message ?? ""
+      message: message ?? mergeMsg ?? ""
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: sync failed", result);
@@ -7199,6 +7239,10 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: resolve failed", result);
         this.absorbStatusData(result.data ?? {});
+        for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+          const view = leaf.view;
+          if (view instanceof ConflictView && view.filePath === path) leaf.detach();
+        }
         this.notify(`Resolved ${path} (kept the ${side === "ours" ? "local" : "remote"} version).`);
       }
     ).open();

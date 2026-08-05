@@ -90,6 +90,8 @@ interface SharedUiPrefs {
   wrapDiffLines: boolean;
   /** Render whitespace glyphs (· → ␍) in the diff pane. */
   showInvisibles: boolean;
+  /** Conflict pane: show raw <<<<<<< markers with separate action rows. */
+  showConflictMarkers: boolean;
   /** Render file lists as a folder tree (status + history panels). */
   treeView: boolean;
 }
@@ -98,6 +100,7 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showRibbonIcon: true,
   wrapDiffLines: false,
   showInvisibles: false,
+  showConflictMarkers: false,
   treeView: false,
 };
 
@@ -118,7 +121,15 @@ export default class NativeGitBridgePlugin extends Plugin {
   private runningAction: string | null = null;
   /** Target path of the running action, when it is per-path (stage/unstage/discard file). */
   private runningPath: string | null = null;
-  private lastStatus: { status: GitStatusSummary; sparse: SparseStateSummary; lastCommit?: { hash: string; date: string; subject: string }; fetchedAt: string } | null = null;
+  private lastStatus: {
+    status: GitStatusSummary;
+    sparse: SparseStateSummary;
+    lastCommit?: { hash: string; date: string; subject: string };
+    fetchedAt: string;
+    /** git's prepared MERGE_MSG while a merge is being resolved. */
+    mergeMsg?: string;
+    mergeInProgress?: boolean;
+  } | null = null;
 
   async onload(): Promise<void> {
     // ---- device-local settings (never synced through the vault) ----
@@ -205,6 +216,7 @@ export default class NativeGitBridgePlugin extends Plugin {
             await this.app.vault.adapter.write(p, content);
           },
           stageFile: (p) => this.cmdStageFile(p),
+          markersVisible: () => this.sharedPrefs.showConflictMarkers,
         })
     );
 
@@ -1387,6 +1399,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       const view = leaf.view;
       if (view instanceof HistoryView) view.rerender();
     }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof ConflictView) void view.reload();
+    }
   }
 
   /** Parse the status fields every mutating action returns and refresh UI. */
@@ -1410,6 +1426,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparse,
       lastCommit: parseLastCommit(d.lastCommit ?? ""),
       fetchedAt: new Date().toLocaleString(),
+      mergeInProgress: d.mergeInProgress === "true",
+      mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : undefined,
     };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -1513,9 +1531,17 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdCommit(): Promise<void> {
+    // Committing a resolved merge: prefill git's own prepared message
+    // ("Merge branch … # Conflicts: …") so the history reads like any merge.
+    const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
     new CommitMessageModal(
       this.app,
-      { title: "Commit changes", placeholder: "Commit message…", submitLabel: "Commit" },
+      {
+        title: mergeMsg ? "Commit merge" : "Commit changes",
+        placeholder: "Commit message…",
+        submitLabel: "Commit",
+        initial: mergeMsg,
+      },
       async (message) => {
         if (message === null) return;
         const result = await this.runOperation("commit", {
@@ -1550,9 +1576,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdSync(message?: string, silent = false): Promise<void> {
+    // A sync that completes a manual merge resolution commits with git's own
+    // prepared merge message automatically — no modal, as requested.
+    const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
-      message: message ?? "",
+      message: message ?? mergeMsg ?? "",
     });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: sync failed", result);
@@ -1848,6 +1877,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: resolve failed", result);
         this.absorbStatusData(result.data ?? {});
+        // A resolution pane still open for this file is now stale — close it.
+        for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+          const view = leaf.view;
+          if (view instanceof ConflictView && view.filePath === path) leaf.detach();
+        }
         this.notify(`Resolved ${path} (kept the ${side === "ours" ? "local" : "remote"} version).`);
       }
     ).open();

@@ -233,6 +233,8 @@ bash "$RUNNER"
 RES="$RUNTIME/results/r-20260803T100015Z-sync03.json"
 check 'jq -e ".error.code == \"CONFLICT\"" "$RES" >/dev/null' "sync reports CONFLICT"
 check 'jq -er ".data.conflicts" "$RES" | grep -q "Notes/note.md"' "conflicted file listed"
+check '[ "$(jq -r ".data.mergeInProgress" "$RES")" = "true" ]' "conflict result reports the merge in progress"
+check 'jq -er ".data.mergeMsg" "$RES" | grep -q "^Merge"' "git's prepared merge message rides along for the commit modal"
 check '[ "$(git -C "$ROOT/remote.git" rev-parse HEAD)" = "$REMOTE_BEFORE" ]' "nothing pushed on conflict"
 
 echo "# phase 3: abort-merge restores pre-merge state"
@@ -478,8 +480,8 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "6" ]' "runnerVersion = 6 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=6"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "7" ]' "runnerVersion = 7 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=7"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"

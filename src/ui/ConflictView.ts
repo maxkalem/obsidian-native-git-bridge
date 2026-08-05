@@ -9,6 +9,13 @@ export interface ConflictViewActions {
   writeFile(path: string, content: string): Promise<void>;
   /** Stage the file — for a conflicted path this marks it resolved. */
   stageFile(path: string): Promise<void>;
+  /**
+   * Shared preference: show the RAW marker lines (<<<<<<< / ======= /
+   * >>>>>>>) as file content, with the side labels and Keep buttons rendered
+   * as separate chrome rows. Off (default) hides the markers underneath the
+   * chrome rows.
+   */
+  markersVisible(): boolean;
 }
 
 /**
@@ -29,6 +36,11 @@ export class ConflictView extends ItemView {
   constructor(leaf: WorkspaceLeaf, private actions: ConflictViewActions) {
     super(leaf);
     this.navigation = true;
+  }
+
+  /** Path this pane is resolving (whole-file resolution closes matching panes). */
+  get filePath(): string | null {
+    return this.path;
   }
 
   getViewType(): string {
@@ -91,6 +103,9 @@ export class ConflictView extends ItemView {
         void (async () => {
           await this.actions.stageFile(path);
           new Notice("Marked resolved.");
+          // The job here is done — leaving a stale resolution pane open
+          // only confused people.
+          this.leaf.detach();
         })();
       });
       return;
@@ -100,28 +115,38 @@ export class ConflictView extends ItemView {
       text: `${this.parsed.conflictCount} conflict${this.parsed.conflictCount === 1 ? "" : "s"} — pick a side per block. Other lines stay untouched.`,
     });
     const list = c.createDiv({ cls: "ngb-conf-list" });
+    const rawMarkers = this.actions.markersVisible();
     let lineNo = 1;
-    const row = (num: number | null, text: string, cls: string, gutterCls = "") => {
+    /** A physical file line: exactly ONE number per line (wraps continue with an empty gutter). */
+    const row = (num: number | null, text: string, cls: string) => {
       const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
-      r.createSpan({ cls: `ngb-conf-num ${gutterCls}`, text: num === null ? "" : String(num) });
+      r.createSpan({ cls: "ngb-conf-num", text: num === null ? "" : String(num) });
       r.createSpan({ cls: "ngb-conf-text", text: text === "" ? " " : text });
       return r;
     };
-    const markerRow = (
-      num: number,
-      label: string,
-      cls: string,
-      btnLabel: string | null,
-      onKeep: (() => void) | null
+    /**
+     * Chrome row (side label + Keep button): visually unmistakable for file
+     * content — own background, chip-styled label, button pinned right, no
+     * overlap. With markers hidden it carries the marker line's NUMBER; with
+     * raw markers shown it carries ▸ instead, so an un-numbered chrome row
+     * can never be misread as a wrapped continuation of a file line.
+     */
+    const chromeRow = (
+      num: number | null,
+      chip: string,
+      sideCls: string,
+      btnLabel: string,
+      onKeep: () => void
     ) => {
-      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${cls}` });
-      r.createSpan({ cls: "ngb-conf-num", text: String(num) });
+      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${sideCls}` });
+      r.createSpan({
+        cls: `ngb-conf-num${num === null ? " ngb-conf-num-chrome" : ""}`,
+        text: num === null ? "▸" : String(num),
+      });
       const body = r.createDiv({ cls: "ngb-conf-marker-body" });
-      body.createSpan({ cls: "ngb-conf-marker-label", text: label });
-      if (btnLabel !== null && onKeep !== null) {
-        const b = body.createEl("button", { text: btnLabel, cls: "ngb-conf-keep" });
-        b.addEventListener("click", onKeep);
-      }
+      body.createSpan({ cls: "ngb-conf-side-chip", text: chip });
+      const b = body.createEl("button", { text: btnLabel, cls: "ngb-conf-keep" });
+      b.addEventListener("click", onKeep);
     };
     for (const seg of this.parsed.segments) {
       if (seg.kind === "text") {
@@ -133,27 +158,32 @@ export class ConflictView extends ItemView {
       // incoming side's marker label — a branch name, or the first characters
       // of the merged commit's hash.
       const remote = shortRefLabel(seg.theirsLabel);
-      markerRow(
-        lineNo++,
-        `Local — yours (${seg.oursLabel || "HEAD"})`,
-        "ngb-conf-ours-head",
-        "Keep local (yours)",
-        () => void this.applyResolution(idx, "ours")
-      );
+      const oursChip = `LOCAL — yours (${seg.oursLabel || "HEAD"})`;
+      const theirsChip = `REMOTE — theirs${remote ? ` (${remote})` : ""}`;
+      const keepOursLabel = "Keep local";
+      const keepTheirsLabel = remote ? `Keep remote (${remote})` : "Keep remote";
+      const keepOurs = () => void this.applyResolution(idx, "ours");
+      const keepTheirs = () => void this.applyResolution(idx, "theirs");
+
+      if (rawMarkers) {
+        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours");
+        chromeRow(null, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+      } else {
+        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+      }
       for (const l of seg.ours) row(lineNo++, l, "ngb-conf-ours");
       if (seg.base !== undefined) {
-        row(lineNo++, "……… common ancestor:", "ngb-conf-base ngb-conf-base-head");
+        row(lineNo++, rawMarkers ? "|||||||" : "……… common ancestor:", "ngb-conf-base ngb-conf-raw");
         for (const l of seg.base) row(lineNo++, l, "ngb-conf-base");
       }
-      row(lineNo++, "———", "ngb-conf-divider");
+      row(lineNo++, rawMarkers ? "=======" : "———", "ngb-conf-divider ngb-conf-raw");
       for (const l of seg.theirs) row(lineNo++, l, "ngb-conf-theirs");
-      markerRow(
-        lineNo++,
-        `Remote — theirs${remote ? ` (${remote})` : ""}`,
-        "ngb-conf-theirs-head",
-        remote ? `Keep remote (${remote})` : "Keep remote",
-        () => void this.applyResolution(idx, "theirs")
-      );
+      if (rawMarkers) {
+        row(lineNo++, `>>>>>>> ${seg.theirsLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-theirs");
+        chromeRow(null, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
+      } else {
+        chromeRow(lineNo++, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
+      }
     }
   }
 
