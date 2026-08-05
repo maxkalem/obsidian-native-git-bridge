@@ -20,8 +20,12 @@
 ## kometenstaub/obsidian-version-history-diff
 - MIT license (attribution required if code reused; we reuse none in Phase 2).
 - Integrates with obsidian-git through that plugin's own (private) API; no
-  provider-registration surface for third parties → Phase 4 plan: own views first,
-  optional upstream adapter PR second.
+  provider-registration surface for third parties → own views first (SHIPPED:
+  history panel + diff pane), optional upstream adapter PR second.
+- Its rendering approach was adopted for our diff pane: git's unified diff →
+  diff2html (`diffStyle: "char"`, line-by-line) → `sanitizeHTMLToDom`. No code
+  was copied; the diff2html CSS in styles.css carries the MIT attribution and
+  follows their Obsidian-variable adaptation.
 
 ## Termux
 - RUN_COMMAND intent: requires sender-manifest permission + allow-external-apps;

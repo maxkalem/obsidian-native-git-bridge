@@ -13,10 +13,13 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Termux** — with first-class **sparse checkout** support. No isomorphic-git, no
 HTTP server, no open ports, nothing running in the background.
 
-> Status: implemented — status, sparse safety, pull/commit/push/, sync/fetch with 
-> conflict handling, per-file history (rename-aware), view at commit, diffs, 
-> confirmed restore, plus hardening (parser fuzzing, recovery paths, request 
-> expiry, security re-audit) and release workflows. 
+> Status: implemented — status panel (untracked folders expand into their
+> files), sparse safety, pull/commit/push, sync/fetch with conflict handling,
+> **repository-wide history panel** (commits expand into changed files, a tap
+> opens the diff that commit introduced), per-file history (rename-aware),
+> view at commit, **diff panes with character-level line-by-line highlighting**
+> (diff2html), confirmed restore, plus hardening (parser fuzzing, recovery
+> paths, request expiry, security re-audit) and release workflows.
 > Version History Diff exposes no public provider API (it consumes obsidian-git's
 > private API), so the history/diff UX is provided by this plugin's own views; 
 > an upstream adapter PR remains an option (see docs/research-notes.md).
@@ -165,4 +168,8 @@ npm run build     # type check + bundle to main.js
 ## License
 
 MIT. Version History Diff (MIT) and obsidian-git were reviewed for integration
-(see research notes); no code was copied from either.
+(see research notes); no code was copied from either. Diff rendering bundles
+[diff2html](https://github.com/rtfpessoa/diff2html) (MIT) — a render-only
+library; git itself always runs natively in Termux. The diff stylesheet in
+`styles.css` is adapted from diff2html's MIT-licensed CSS with the
+Obsidian-variable adaptations pioneered by Version History Diff.

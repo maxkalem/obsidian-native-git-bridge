@@ -86,4 +86,9 @@ first round trip confirms the whole chain. If nothing comes back, run
 *Native Git: Check bridge* — it diagnoses locally (runner never ran here /
 outdated runner / stuck requests) without waiting for a timeout.
 
+Once status works, everything else does too: tapping a changed file opens its
+diff in a pane, and the history button (right of the operation log) opens the
+repository history — commits expand into their changed files, each opening the
+diff that commit introduced.
+
 Also see: [troubleshooting.md](troubleshooting.md), [update.md](update.md).

@@ -24,8 +24,12 @@
    exist in some WebViews but are not guaranteed. Implemented as best-effort,
    default-off, and clearly labeled.
 5. **Version History Diff has no public provider API** (uses obsidian-git's private
-   plugin API). Phase 4 will ship our own history/diff views and optionally propose an
-   upstream adapter PR; we will not monkey-patch another plugin's internals.
+   plugin API). This plugin therefore ships its OWN history and diff views (the
+   repository history panel and the diff pane, rendered by bundled diff2html in
+   the same visual style); an upstream adapter PR remains an option. We will
+   not monkey-patch another plugin's internals. One known nuance of our diff
+   pane: a pure rename can display as an addition, because the runner limits
+   the diff pathspec to the file's new path.
 6. **Foreground-session commands on Android ≥ 10** may require Termux's
    "Draw over other apps" permission; the runner therefore always runs as a
    **background task** (`.shortcuts/tasks/`), which is unaffected.

@@ -140,6 +140,10 @@ where it exists, falling back to `display()` on older builds.
 - Before any commit or push, protected sparse paths must show no Git changes,
   or the operation is blocked. Staging uses pathspec excludes, so protected
   paths cannot enter the index through the bridge at all.
+- The diff pane renders git's unified diff through the bundled
+  **diff2html** library (MIT, render-only — no JavaScript Git implementation
+  is involved), and its HTML output is inserted exclusively via Obsidian's
+  `sanitizeHTMLToDom`, never raw `innerHTML`.
 
 Full model, including accepted residual risks and a dated review log:
 [threat-model.md](threat-model.md).
