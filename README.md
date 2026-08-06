@@ -32,6 +32,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 
 **Repository configuration** from the app: sparse exclusions, `.gitignore` and `.git/info/exclude`, per item or in bulk.
 
+**Several vaults on one device**: every vault is a repository of its own with its own Termux profile, its own token and its own credentials; one runner drains them all in one pass, oldest request first. A vault opened inside another vault's repository is kept out of it through the outer repository's `.git/info/exclude` (device-local, nothing tracked is edited), and each side's operations are pinned to its own repository. A second vault can pair itself from the plugin without re-running the installer; a moved vault is found again; a deleted one is reported, never silently replaced.
+
 **Operational**: device-local settings that never sync through the vault, a pairing token imported automatically from the installer, a version handshake between plugin, runner and companion app, a local bridge check that diagnoses without contacting Termux, a redacting operation log, and diagnostics.
 
 ## Why
@@ -102,7 +104,7 @@ npm run build     # type check + bundle to main.js
 
 ## Docs
 
-[Setup guide](docs/setup.md) · [Troubleshooting](docs/troubleshooting.md) · [Updating](docs/update.md) · [Release engineering](docs/release.md) · [Design notes for reviewers](docs/submission.md) · [ADR-001: why a companion app](docs/ADR-001-android-invocation.md) · [Threat model](docs/threat-model.md) · [Protocol](docs/protocol.md) · [Limitations](docs/limitations.md) · [Research notes](docs/research-notes.md)
+[Setup guide](docs/setup.md) · [Troubleshooting](docs/troubleshooting.md) · [Updating](docs/update.md) · [Release engineering](docs/release.md) · [Design notes for reviewers](docs/submission.md) · [ADR-001: why a companion app](docs/ADR-001-android-invocation.md) · [ADR-002: several repositories per device](docs/ADR-002-multiple-repositories.md) · [Threat model](docs/threat-model.md) · [Protocol](docs/protocol.md) · [Limitations](docs/limitations.md) · [Research notes](docs/research-notes.md)
 
 ## Installing the plugin manually
 

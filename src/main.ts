@@ -21,7 +21,7 @@ import {
 import { NativeGitBridgeSettingTab } from "./settings/SettingsTab";
 import { BridgeClient, CancelToken, type RuntimeFS } from "./bridge/BridgeClient";
 import { RuntimePaths } from "./bridge/runtimePaths";
-import { createRequest } from "./bridge/protocol";
+import { createRequest, isValidProfileId, randomSuffix } from "./bridge/protocol";
 import { CompanionIntentTransport, type TriggerTransport } from "./bridge/transport";
 import {
   groupUntrackedChildren,
@@ -75,7 +75,9 @@ import {
   COMPANION_OPEN_TERMUX_URI,
   COMPANION_RELEASES_URL,
   COMPANION_SETUP_URI,
+  CLAIM_FILE,
   PAIRING_FILE,
+  PAIRING_WAIT_MS,
   bootstrapCommand,
   RUNNER_MIN_VERSION,
   RUNNER_OUTDATED_HINT,
@@ -714,6 +716,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         await this.updateDeviceSettings({
           authToken: pairing.token,
           repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
+          profileId: pairing.profileId ?? this.deviceSettings.profileId,
           termuxIntegrationEnabled: true,
         });
         try {
@@ -747,6 +750,112 @@ export default class NativeGitBridgePlugin extends Plugin {
     } catch (e) {
       this.log.add("warn", "pairing", `Pairing import failed: ${String(e)}`);
     }
+  }
+
+  /**
+   * A result names the profile that answered. The first one teaches this vault
+   * its own id; after that the id travels in every request and the runner
+   * rejects anything that names a different profile. A mismatch is never
+   * silently adopted — that would be the plugin re-pointing itself at another
+   * vault's repository.
+   */
+  private async learnProfileId(result: BridgeResult): Promise<void> {
+    const id = typeof result.profileId === "string" ? result.profileId : "";
+    if (!isValidProfileId(id)) return;
+    const current = this.deviceSettings.profileId;
+    if (current === id) return;
+    if (current === "") {
+      await this.updateDeviceSettings({ profileId: id });
+      this.log.add("info", "pairing", `This vault is served by profile ${id}.`);
+      return;
+    }
+    this.log.add(
+      "warn",
+      "pairing",
+      `A result came back from profile ${id}, but this vault is paired with ${current}. Keeping ${current}; re-run the installer if the vault was re-paired.`
+    );
+  }
+
+  /**
+   * Ask Termux to pair THIS vault, without re-running the installer.
+   *
+   * The trigger the companion sends is fixed and carries no vault identity, so
+   * the request goes the other way: the plugin drops a claim file into its own
+   * runtime folder and triggers a runner run. The runner, when it has nothing
+   * else to do, finds the claim, verifies the folder really is a repository of
+   * its own, generates the token IN TERMUX and answers with a pairing file.
+   * Nothing secret leaves Termux, and nothing the claim contains is trusted.
+   *
+   * Poll interval and budget are fields so tests can shrink them.
+   */
+  pairingPollMs = 500;
+  pairingWaitMs = PAIRING_WAIT_MS;
+
+  async cmdPairThisVault(): Promise<void> {
+    if (!Platform.isAndroidApp) {
+      new Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return;
+    }
+    const adapter = this.app.vault.adapter;
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const claimPath = `${root}/${CLAIM_FILE}`;
+    const pairingPath = `${root}/${PAIRING_FILE}`;
+    try {
+      await this.client.ensureRuntimeDirs();
+      await adapter.write(
+        claimPath,
+        JSON.stringify({ createdAt: new Date().toISOString(), vault: this.app.vault.getName() }, null, 2)
+      );
+    } catch (e) {
+      new ResultModal(this.app, "Pairing failed", [`The pairing request could not be written: ${String(e)}`], {
+        isError: true,
+      }).open();
+      return;
+    }
+    this.log.add("info", "pairing", "Pairing request written; asking Termux to pick it up.");
+    // A synthetic id: there is no request file, the runner is simply woken up.
+    this.makeTransport().trigger(`r-${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}-pair`);
+    new Notice("Asked Termux to pair this vault…");
+
+    const deadline = Date.now() + this.pairingWaitMs;
+    for (;;) {
+      await new Promise((r) => window.setTimeout(r, this.pairingPollMs));
+      if (await adapter.exists(pairingPath)) {
+        await this.tryImportPairing();
+        if (this.deviceSettings.authToken) {
+          try {
+            if (await adapter.exists(claimPath)) await adapter.remove(claimPath);
+          } catch {
+            /* best effort */
+          }
+          new ResultModal(this.app, "This vault is paired", [
+            `Profile: ${this.deviceSettings.profileId || "(unnamed)"}`,
+            "Termux answered with a token of its own for this vault. Other vaults keep their own profiles and tokens.",
+          ]).open();
+          return;
+        }
+      }
+      if (Date.now() >= deadline) break;
+    }
+    new ResultModal(
+      this.app,
+      "No answer from Termux yet",
+      [
+        "The pairing request is written and stays there; the runner picks it up on its next run.",
+        "If nothing happens: Termux must be installed and the runner already set up once (the install command below does that), and the companion app needs its RUN_COMMAND permission.",
+      ],
+      {
+        isError: true,
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            cta: true,
+            keepOpen: true,
+            onClick: () => this.copyCommandAndOpenTermux(),
+          },
+        ],
+      }
+    ).open();
   }
 
   private async reconcileAfterRestart(): Promise<void> {
@@ -854,6 +963,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "bridge-self-check", name: "Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "open-companion-setup", name: "Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
+      { id: "pair-this-vault", name: "Pair this vault with Termux", cb: () => void this.cmdPairThisVault() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -930,7 +1040,15 @@ export default class NativeGitBridgePlugin extends Plugin {
       return null;
     }
 
-    const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
+    const req = createRequest(
+      action,
+      args,
+      s.authToken,
+      s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+      new Date(),
+      randomSuffix(),
+      s.profileId
+    );
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
       new Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
@@ -1009,6 +1127,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       const result = waited.result;
       await this.client.consume(req.id);
       this.checkRunnerVersion(result);
+      await this.learnProfileId(result);
       this.log.add(
         result.ok ? "info" : "error",
         action,
@@ -2179,6 +2298,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       `Enabled here: ${s.enabledOnThisDevice ? "yes" : "NO (turn it on in settings)"}`,
       `Termux integration: ${s.termuxIntegrationEnabled ? "on" : "OFF (turn it on in settings)"}`,
       `Paired with a runner: ${s.authToken ? "yes" : "NO (step 3 pairs it automatically)"}`,
+      `Profile for this vault: ${s.profileId || "none yet"}`,
       `Companion seen so far: ${this.lastCompanionAckMs > 0 ? "yes" : "not yet"}`,
       `Termux installed: ${this.lastAckTermuxInstalled === null ? "unknown (the companion reports this)" : this.lastAckTermuxInstalled ? "yes" : "NO"}`,
     ];
@@ -2208,6 +2328,15 @@ export default class NativeGitBridgePlugin extends Plugin {
         onClick: () => this.copyCommandAndOpenTermux(),
       },
     ];
+    // A second vault on a device where Termux is already set up needs no
+    // command at all: it can ask the existing runner for a profile of its own.
+    if (!s.authToken) {
+      actions.splice(actions.length - 1, 0, {
+        label: "Pair this vault",
+        keepOpen: true,
+        onClick: () => void this.cmdPairThisVault(),
+      });
+    }
     if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled) {
       actions.unshift({
         label: "Enable on this device",
@@ -2290,7 +2419,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   async cmdSelfCheck(timedOut = false): Promise<void> {
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
-    const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
+    const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut, this.deviceSettings.profileId);
     const outdated = /ERROR building result for [^(]*$/m.test(report.runnerLogTail);
     const lines = [report.verdict];
     if (outdated) {
@@ -2299,7 +2428,12 @@ export default class NativeGitBridgePlugin extends Plugin {
     lines.push(
       "",
       `Runtime folder (as the plugin sees it): ${paths.root}`,
-      `Runner has written here: ${report.runnerLogExists ? "yes" : "NO"}`,
+      `Profile for this vault: ${report.profileId || "none yet"}${
+        report.markerProfileId && report.markerProfileId !== report.profileId
+          ? ` (the runner wrote ${report.markerProfileId} here)`
+          : ""
+      }`,
+      `Runner has written into THIS vault's runtime folder: ${report.runnerLogExists ? "yes" : "NO"}`,
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
       `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
     );
@@ -2682,6 +2816,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
+    report.pluginSide["Profile for this vault"] = s.profileId || "(none yet)";
     report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Protected paths (derived from sparse)"] =
       (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";

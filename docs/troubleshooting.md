@@ -12,7 +12,7 @@ The request never got an answer. The plugin writes a cancel flag, so the operati
 In order of likelihood:
 
 1. **Companion app missing or unpermitted.** Open the companion; all three checklist items must be green.
-2. **Runner installed for a different vault.** The local check reports when `runner.log` has never appeared in *this* vault's runtime folder: the installer was pointed at another path. Re-run the install command with the correct vault path.
+2. **No profile for this vault.** The local check reports when `runner.log` has never appeared in *this* vault's runtime folder: no Termux profile points here (a second vault that was never paired, or the installer was pointed at another path). Use *Pair this vault* in the settings or the setup guide, or re-run the install command with this vault's path. Other vaults keep their own profiles and tokens.
 3. **Termux is closed or was force-stopped** (swiped away, or battery optimization killed it). Android then refuses to start its background service, so the trigger arrives at the companion but never reaches the runner. The companion detects this case and opens Termux for you (toast: "Termux is closed…"); Bridge check also offers an **Open Termux** button. Keep Termux running (its persistent notification is enough) and consider excluding it from battery optimization.
 4. **A very slow network operation.** Raise the timeout in settings; the runner itself caps network git at 120 s per command.
 
@@ -21,6 +21,19 @@ Recovery path: run `~/.config/native-git-bridge/runner.sh` by hand in Termux and
 ## AUTH: pairing token mismatch
 
 The plugin and the runner hold different tokens (usually after re-running the installer on a device where the plugin had already paired). Re-running the installer keeps the existing token, so this normally heals on the next plugin start (it imports `pairing.json`). If not: plugin settings → pairing → import or paste the token printed at the end of the install output.
+
+## REPO_MISSING: the profile's repository is gone
+
+The runner knows a profile for this vault, but the directory it points at no longer exists, is unreadable, or is no longer a git work tree of its own. Nothing was executed.
+
+- **The vault was moved.** Trigger any operation again: on a run with nothing else to do the runner scans shared storage, finds the marker the vault carries (`runtime/profile.json`) and follows it, keeping the profile and the token.
+- **The `.git` directory is gone.** Restore or re-clone the repository. If the vault sits inside another vault's repository, the runner deliberately refuses to fall back to the outer one — that is the whole point of the ceiling it sets around each repository.
+- **The vault was deleted.** The profile stays behind and is reported, not silently reused. Delete `~/.config/native-git-bridge/profiles/<id>.conf` to clean up.
+- **Dubious ownership** (shared storage owned by another uid): the message names the exact command, `git config --global --add safe.directory "<path>"`.
+
+## AUTH after pairing a second vault
+
+Each vault has its own token. A request file copied from one vault into another's runtime folder is rejected (`AUTH`), and a request naming another vault's profile is rejected (`BAD_REQUEST`). If a vault genuinely lost its token, re-pair it (*Pair this vault*) or re-run the installer for it.
 
 ## SAFETY_BLOCKED: sparse checkout safety check failed
 

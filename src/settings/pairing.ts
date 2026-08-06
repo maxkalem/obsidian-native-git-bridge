@@ -3,10 +3,13 @@
 export interface PairingFile {
   token: string;
   repoPath?: string;
+  /** Which profile (paired vault) the token belongs to; runner v10+. */
+  profileId?: string;
   createdAt?: string;
 }
 
 const TOKEN_RE = /^[A-Za-z0-9]{16,128}$/;
+const PROFILE_RE = /^p-[0-9a-f]{8,32}$/;
 
 export function parsePairingFile(text: string): PairingFile | null {
   let obj: unknown;
@@ -20,6 +23,7 @@ export function parsePairingFile(text: string): PairingFile | null {
   if (typeof r.token !== "string" || !TOKEN_RE.test(r.token)) return null;
   const out: PairingFile = { token: r.token };
   if (typeof r.repoPath === "string" && r.repoPath.length < 4096) out.repoPath = r.repoPath;
+  if (typeof r.profileId === "string" && PROFILE_RE.test(r.profileId)) out.profileId = r.profileId;
   if (typeof r.createdAt === "string") out.createdAt = r.createdAt;
   return out;
 }

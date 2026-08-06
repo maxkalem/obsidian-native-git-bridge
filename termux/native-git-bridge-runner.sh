@@ -1,12 +1,31 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Native Git Bridge - Termux runner (protocol v1).
-# One-shot: drains pending requests, writes results, exits. Never daemonizes.
-# Security: token check, action allow-list, validated paths, argv arrays only.
+# One-shot: drains the pending requests of EVERY paired vault (profile), writes
+# results, exits. Never daemonizes.
+# Security: per-profile token check, action allow-list, validated paths,
+# argv arrays only, git pinned to the profile's own repository.
 set -u
 umask 077
 
-RUNNER_VERSION=9
-CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
+RUNNER_VERSION=10
+PROFILE_FORMAT=1
+
+# The store: one directory holding profiles/<id>.conf (one per paired vault),
+# runner.sh itself and the cross-profile lock. NGB_CONFIG keeps naming the
+# LEGACY single-repo config file; when it is set, its directory becomes the
+# config dir, so a test harness (or a relocated setup) can move the whole store.
+NGB_CONFIG="${NGB_CONFIG:-}"
+if [ -n "$NGB_CONFIG" ]; then
+  NGB_CONFIG_DIR="${NGB_CONFIG_DIR:-$(dirname "$NGB_CONFIG")}"
+else
+  NGB_CONFIG_DIR="${NGB_CONFIG_DIR:-$HOME/.config/native-git-bridge}"
+  NGB_CONFIG="$NGB_CONFIG_DIR/config"
+fi
+PROFILES_DIR="$NGB_CONFIG_DIR/profiles"
+# One runner drains every profile, so the single-instance lock is global and
+# lives with the profiles, not inside one vault's runtime directory.
+LOCK_DIR="$NGB_CONFIG_DIR/.runner.lock"
+NGB_LOG_MAX_BYTES="${NGB_LOG_MAX_BYTES:-262144}"
 
 # Never let git block on an interactive credential prompt: with a missing or
 # expired PAT the command must fail fast with a clear stderr, not hang.
@@ -16,29 +35,22 @@ export SSH_ASKPASS=/bin/false
 
 die() { echo "native-git-bridge-runner: $*" >&2; exit 1; }
 
-[ -f "$CONFIG_FILE" ] || die "config not found: $CONFIG_FILE (run install.sh first)"
-# shellcheck disable=SC1090
-. "$CONFIG_FILE"
-
-: "${NGB_REPO_DIR:?NGB_REPO_DIR missing in config}"
-: "${NGB_TOKEN:?NGB_TOKEN missing in config}"
-NGB_RUNTIME_DIR="${NGB_RUNTIME_DIR:-$NGB_REPO_DIR/.obsidian/plugins/native-git-bridge/runtime}"
-NGB_LOG_MAX_BYTES="${NGB_LOG_MAX_BYTES:-262144}"
-
 command -v git >/dev/null 2>&1 || die "git not installed (pkg install git)"
 command -v jq  >/dev/null 2>&1 || die "jq not installed (pkg install jq)"
 
-cd "$NGB_REPO_DIR" 2>/dev/null || die "repo dir not accessible: $NGB_REPO_DIR"
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "not a git work tree: $NGB_REPO_DIR"
+mkdir -p "$PROFILES_DIR" 2>/dev/null || die "config dir not writable: $NGB_CONFIG_DIR"
+chmod 700 "$NGB_CONFIG_DIR" "$PROFILES_DIR" 2>/dev/null || true
 
-REQ_DIR="$NGB_RUNTIME_DIR/requests"
-PROC_DIR="$NGB_RUNTIME_DIR/processing"
-LOCK_DIR="$NGB_RUNTIME_DIR/.runner.lock"
-RES_DIR="$NGB_RUNTIME_DIR/results"
-CAN_DIR="$NGB_RUNTIME_DIR/cancel"
-DONE_DIR="$NGB_RUNTIME_DIR/done"
-LOG_FILE="$NGB_RUNTIME_DIR/runner.log"
-mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR"
+# Until a profile is activated, log lines go next to the profiles. Every
+# activated profile switches LOG_FILE to its own runtime/runner.log, which is
+# what the plugin's bridge check reads.
+LOG_FILE="$NGB_CONFIG_DIR/runner.log"
+PROFILE_ID=""
+PROFILE_FILE=""
+NGB_REPO_DIR=""
+NGB_TOKEN=""
+NGB_RUNTIME_DIR=""
+REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""
 
 log() {
   # Never log tokens or credentialed URLs.
@@ -53,6 +65,26 @@ redact_url() { sed -E 's#(\w+://)[^/@[:space:]]+:[^/@[:space:]]+@#\1***@#g'; }
 # ---- validation helpers ------------------------------------------------------
 
 valid_id() { printf '%s' "$1" | grep -Eq '^r-[0-9A-Za-z.TZ:-]{1,64}$'; }
+
+# Opaque profile id. It is also a FILE NAME (profiles/<id>.conf), so the
+# charset is deliberately tiny: no dots, no slashes, nothing to traverse with.
+valid_profile_id() { printf '%s' "$1" | grep -Eq '^p-[0-9a-f]{8,32}$'; }
+
+# Tokens are compared verbatim; the charset only has to keep the profile file
+# (KEY="value" lines) parsable and unambiguous.
+valid_token() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]{8,128}$'; }
+
+# Values stored in a profile file: absolute path, no quotes, no control chars.
+valid_abs_path() {
+  local p="$1"
+  case "$p" in
+    /*) : ;;
+    *) return 1 ;;
+  esac
+  case "$p" in *'"'*|*'\'*) return 1 ;; esac
+  printf '%s' "$p" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+  return 0
+}
 
 valid_rel_path() {
   # repository-relative: not empty, no leading /, no backslash, no '..' segment,
@@ -120,6 +152,7 @@ obj_from_fields() {
 write_result() {
   # $1 id, $2 action, $3 ok(true/false), $4 exitCode, $5 dataJson, $6 errorJson, $7 startedAt
   local id="$1" action="$2" ok="$3" ec="$4" data="$5" err="$6" started="$7"
+  mkdir -p "$RES_DIR" 2>/dev/null || true
   local tmp="$RES_DIR/$id.json.tmp"
   local dir; dir="$(json_tmpdir)"
   [ -n "$data" ] || data='null'
@@ -134,10 +167,12 @@ write_result() {
     --arg startedAt "$started" \
     --arg finishedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson runnerVersion "$RUNNER_VERSION" \
+    --arg profileId "$PROFILE_ID" \
     --slurpfile data "$dir/data.json" \
     --slurpfile error "$dir/error.json" \
     '{protocolVersion:1,id:$id,action:$action,ok:$ok,exitCode:$exitCode,
       startedAt:$startedAt,finishedAt:$finishedAt,runnerVersion:$runnerVersion,
+      profileId:$profileId,
       data:($data[0] // null),error:($error[0] // null)}' > "$tmp" 2>>"$LOG_FILE"
   if [ ! -s "$tmp" ]; then
     # Last-resort minimal result: the plugin must never be left hanging.
@@ -146,6 +181,318 @@ write_result() {
       "$id" "$action" > "$tmp"
   fi
   mv "$tmp" "$RES_DIR/$id.json"
+}
+
+# ---- profile store -----------------------------------------------------------
+# One file per paired vault: profiles/<id>.conf, mode 600, KEY="value" lines.
+# One file per profile (rather than one file with repeated keys) keeps writes
+# atomic, removal trivial, and a corrupt profile from taking the others down.
+#
+# Profile files are PARSED, never sourced: a damaged (or tampered) file must not
+# be able to execute anything, and unknown keys are ignored instead of leaking
+# into the runner's environment.
+
+new_profile_id() { printf 'p-%s' "$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"; }
+new_token()      { head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+read_kv_file() { # $1 file -> P_FORMAT P_ID P_REPO P_RUNTIME P_TOKEN
+  P_FORMAT=""; P_ID=""; P_REPO=""; P_RUNTIME=""; P_TOKEN=""
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    [ "$key" = "$line" ] && continue
+    val="${line#*=}"
+    case "$val" in '"'*'"') val="${val#\"}"; val="${val%\"}" ;; esac
+    case "$key" in
+      NGB_PROFILE_FORMAT) P_FORMAT="$val" ;;
+      NGB_PROFILE_ID)     P_ID="$val" ;;
+      NGB_REPO_DIR)       P_REPO="$val" ;;
+      NGB_RUNTIME_DIR)    P_RUNTIME="$val" ;;
+      NGB_TOKEN)          P_TOKEN="$val" ;;
+    esac
+  done < "$1"
+}
+
+read_profile_file() { # $1 file -> validated P_* ; 1 = unusable
+  read_kv_file "$1" || return 1
+  [ "$P_FORMAT" = "$PROFILE_FORMAT" ] || {
+    log "PROFILE ignoring $(basename "$1"): unsupported format '$P_FORMAT'"; return 1; }
+  valid_profile_id "$P_ID" || { log "PROFILE ignoring $(basename "$1"): invalid id"; return 1; }
+  [ "$P_ID.conf" = "$(basename "$1")" ] || {
+    log "PROFILE ignoring $(basename "$1"): id does not match the file name"; return 1; }
+  valid_token "$P_TOKEN" || { log "PROFILE ignoring $P_ID: invalid token"; return 1; }
+  valid_abs_path "$P_REPO" || { log "PROFILE ignoring $P_ID: invalid repo dir"; return 1; }
+  [ -n "$P_RUNTIME" ] || P_RUNTIME="$P_REPO/.obsidian/plugins/native-git-bridge/runtime"
+  valid_abs_path "$P_RUNTIME" || { log "PROFILE ignoring $P_ID: invalid runtime dir"; return 1; }
+  return 0
+}
+
+write_profile_file() { # $1 id, $2 repo, $3 runtime, $4 token
+  local f="$PROFILES_DIR/$1.conf" tmp="$PROFILES_DIR/.$1.conf.tmp"
+  valid_profile_id "$1" && valid_abs_path "$2" && valid_abs_path "$3" && valid_token "$4" || {
+    log "PROFILE refusing to write an invalid profile ($1)"; return 1; }
+  {
+    printf 'NGB_PROFILE_FORMAT=%s\n' "$PROFILE_FORMAT"
+    printf 'NGB_PROFILE_ID="%s"\n' "$1"
+    printf 'NGB_REPO_DIR="%s"\n' "$2"
+    printf 'NGB_RUNTIME_DIR="%s"\n' "$3"
+    printf 'NGB_TOKEN="%s"\n' "$4"
+  } > "$tmp" || return 1
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$f"
+}
+
+list_profile_files() {
+  local f
+  shopt -s nullglob
+  for f in "$PROFILES_DIR"/*.conf; do printf '%s\n' "$f"; done
+}
+
+default_runtime_for() { printf '%s/.obsidian/plugins/native-git-bridge/runtime' "$1"; }
+
+# An existing single-repo config is migrated ONCE, keeping its token, so a
+# current installation keeps working without re-pairing. The old file is kept
+# as config.legacy for reference (and so migration cannot run twice).
+migrate_legacy_config() {
+  [ -z "$(list_profile_files)" ] || return 0
+  [ -f "$NGB_CONFIG" ] || return 0
+  read_kv_file "$NGB_CONFIG"
+  if ! valid_abs_path "${P_REPO:-}" || ! valid_token "${P_TOKEN:-}"; then
+    log "MIGRATE legacy config found but unusable (repo dir or token missing)"
+    return 0
+  fi
+  local id runtime
+  id="$(new_profile_id)"
+  runtime="${P_RUNTIME:-$(default_runtime_for "$P_REPO")}"
+  if write_profile_file "$id" "$P_REPO" "$runtime" "$P_TOKEN"; then
+    mv "$NGB_CONFIG" "$NGB_CONFIG.legacy" 2>/dev/null || true
+    log "MIGRATE legacy config -> profile $id (token preserved, repo $P_REPO)"
+  fi
+}
+
+profile_file_for_repo() { # $1 absolute repo dir -> prints conf path, empty if none
+  local f real target
+  target="$(realpath "$1" 2>/dev/null || printf '%s' "$1")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    read_profile_file "$f" || continue
+    real="$(realpath "$P_REPO" 2>/dev/null || printf '%s' "$P_REPO")"
+    if [ "$real" = "$target" ]; then printf '%s' "$f"; return 0; fi
+  done < <(list_profile_files)
+  return 1
+}
+
+# ---- profile activation ------------------------------------------------------
+
+# Pin git to THIS profile's repository. cwd alone is not enough once two
+# profiles nest (a vault inside another vault's repository): if the inner .git
+# ever disappears, plain discovery would silently walk up and operate on the
+# OUTER repository. The ceiling stops discovery at the repository's own parent,
+# and the toplevel comparison proves which repository answered.
+pin_git_to_repo() {
+  export GIT_CEILING_DIRECTORIES="$(dirname "$NGB_REPO_DIR")"
+  export GIT_DISCOVERY_ACROSS_FILESYSTEM=0
+}
+
+PROFILE_UNHEALTHY_REASON=""
+repo_is_usable() {
+  PROFILE_UNHEALTHY_REASON=""
+  if [ ! -d "$NGB_REPO_DIR" ]; then
+    PROFILE_UNHEALTHY_REASON="The repository directory no longer exists ($NGB_REPO_DIR)."
+    return 1
+  fi
+  cd "$NGB_REPO_DIR" 2>/dev/null || {
+    PROFILE_UNHEALTHY_REASON="The repository directory is not accessible ($NGB_REPO_DIR)."
+    return 1; }
+  pin_git_to_repo
+  local top err
+  err="$(git rev-parse --show-toplevel 2>&1 >/dev/null)"
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -z "$top" ]; then
+    case "$err" in
+      *"dubious ownership"*)
+        PROFILE_UNHEALTHY_REASON="Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory \"$NGB_REPO_DIR\"" ;;
+      *) PROFILE_UNHEALTHY_REASON="Not a git work tree: $NGB_REPO_DIR" ;;
+    esac
+    return 1
+  fi
+  if [ "$(realpath "$top" 2>/dev/null || printf '%s' "$top")" != \
+       "$(realpath "$NGB_REPO_DIR" 2>/dev/null || printf '%s' "$NGB_REPO_DIR")" ]; then
+    # Only possible when the repository directory lost its own .git and sits
+    # inside another repository. Refusing here is what keeps a nested pair apart.
+    PROFILE_UNHEALTHY_REASON="$NGB_REPO_DIR is inside another repository ($top), not a repository of its own."
+    return 1
+  fi
+  return 0
+}
+
+activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASON set)
+  # Clear first: a failed activation must never leave the PREVIOUS profile's
+  # directories in place, or a broken profile would answer its neighbour's queue.
+  PROFILE_ID=""; PROFILE_FILE=""; NGB_REPO_DIR=""; NGB_TOKEN=""; NGB_RUNTIME_DIR=""
+  REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""
+  LOG_FILE="$NGB_CONFIG_DIR/runner.log"
+  read_profile_file "$1" || { PROFILE_UNHEALTHY_REASON="Unusable profile file."; return 1; }
+  PROFILE_FILE="$1"
+  PROFILE_ID="$P_ID"
+  NGB_REPO_DIR="$P_REPO"
+  NGB_TOKEN="$P_TOKEN"
+  NGB_RUNTIME_DIR="$P_RUNTIME"
+  REQ_DIR="$NGB_RUNTIME_DIR/requests"
+  PROC_DIR="$NGB_RUNTIME_DIR/processing"
+  RES_DIR="$NGB_RUNTIME_DIR/results"
+  CAN_DIR="$NGB_RUNTIME_DIR/cancel"
+  DONE_DIR="$NGB_RUNTIME_DIR/done"
+  if [ -d "$NGB_RUNTIME_DIR" ] || mkdir -p "$NGB_RUNTIME_DIR" 2>/dev/null; then
+    LOG_FILE="$NGB_RUNTIME_DIR/runner.log"
+    mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR" 2>/dev/null || true
+  else
+    LOG_FILE="$NGB_CONFIG_DIR/runner.log"
+  fi
+  repo_is_usable || return 1
+  write_profile_marker
+  return 0
+}
+
+# A marker inside the runtime directory ties a vault to its profile. It is how
+# a MOVED repository is recognized again (the profile id travels with the vault,
+# the absolute path does not) and it lives in the runtime dir, which is excluded
+# from git, so it is never synced to another device.
+write_profile_marker() {
+  local f="$NGB_RUNTIME_DIR/profile.json" want
+  want="$(printf '{"profileId":"%s","repoDir":"%s"}' "$PROFILE_ID" "$NGB_REPO_DIR")"
+  [ "$(cat "$f" 2>/dev/null || true)" = "$want" ] && return 0
+  printf '%s\n' "$want" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f" 2>/dev/null || true
+}
+
+# ---- nested vaults -------------------------------------------------------------
+# A vault opened inside another vault's repository (Main/ and
+# Main/Projects/ABCproject/) is TWO repositories. Without help the outer one
+# reports the inner working tree as an untracked directory and would happily
+# record it as a gitlink.
+#
+# The inner repository is excluded from the outer one through the outer repo's
+# .git/info/exclude, matching how the runtime directory is handled: device-local
+# (this device has both vaults, other devices may not), never synced, and it
+# never touches a tracked file. .gitignore was rejected because it is synced and
+# would hide the folder for every collaborator; a submodule was rejected because
+# it rewrites the outer repository's history and the project supports none.
+ensure_nested_exclusion() { # $1 outer repo dir, $2 inner repo dir
+  local rel line xf
+  rel="${2#"$1"/}"
+  [ "$rel" = "$2" ] && return 0
+  line="/$rel/"
+  xf="$(git -C "$1" rev-parse --git-path info/exclude 2>/dev/null || true)"
+  [ -n "$xf" ] || return 0
+  case "$xf" in /*) : ;; *) xf="$1/$xf" ;; esac
+  mkdir -p "$(dirname "$xf")" 2>/dev/null || return 0
+  grep -qxF "$line" "$xf" 2>/dev/null && return 0
+  ensure_trailing_newline "$xf"
+  printf '%s\n' "$line" >> "$xf" || return 0
+  log "NESTED excluded $line from the outer repository $1 (.git/info/exclude, local only)"
+}
+
+# ---- discovery: relocation and adoption ----------------------------------------
+# Both need to find vaults on shared storage. The scan is only run when there is
+# nothing else to do (an idle trigger) or when a profile's repository is missing,
+# so a normal operation never pays for it.
+
+# Note the plain "-": an explicitly EMPTY value disables the scan (the
+# installer uses that so its migration run cannot walk shared storage).
+NGB_SCAN_ROOTS="${NGB_SCAN_ROOTS-/storage/emulated/0 $HOME/storage/shared /sdcard}"
+NGB_SCAN_MAXDEPTH="${NGB_SCAN_MAXDEPTH:-9}"
+NGB_CLAIM_MAX_AGE="${NGB_CLAIM_MAX_AGE:-900}"
+
+scan_runtime_files() { # prints runtime marker/claim files found under the scan roots
+  local r
+  for r in $NGB_SCAN_ROOTS; do
+    [ -d "$r" ] || continue
+    find "$r" -maxdepth "$NGB_SCAN_MAXDEPTH" -type f \
+      \( -name profile.json -o -name claim.json \) \
+      -path '*/plugins/native-git-bridge/runtime/*' 2>/dev/null
+  done | sort -u
+}
+
+vault_dir_of_runtime_file() { # $1 .../<config>/plugins/native-git-bridge/runtime/<file>
+  local d; d="$(dirname "$1")"          # runtime
+  d="$(dirname "$d")"                    # native-git-bridge
+  d="$(dirname "$d")"                    # plugins
+  d="$(dirname "$d")"                    # .obsidian (config dir)
+  dirname "$d"                           # vault root
+}
+
+dir_is_own_worktree() { # $1 dir
+  [ -d "$1" ] || return 1
+  local top
+  top="$(GIT_CEILING_DIRECTORIES="$(dirname "$1")" git -C "$1" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] || return 1
+  [ "$(realpath "$top" 2>/dev/null)" = "$(realpath "$1" 2>/dev/null)" ]
+}
+
+# A repository that moved keeps its profile: the marker in the runtime directory
+# carries the profile id, so the new location can be adopted without re-pairing.
+# A profile whose marker is nowhere to be found is treated as deleted; no
+# replacement repository is ever linked to it automatically.
+relocate_profiles() { # $1..$n = marker files
+  local mf vault id conf
+  for mf in "$@"; do
+    case "$mf" in */profile.json) : ;; *) continue ;; esac
+    id="$(jq -r '.profileId // empty' "$mf" 2>/dev/null || true)"
+    valid_profile_id "$id" || continue
+    conf="$PROFILES_DIR/$id.conf"
+    [ -f "$conf" ] || continue
+    read_profile_file "$conf" || continue
+    vault="$(vault_dir_of_runtime_file "$mf")"
+    [ "$(realpath "$vault" 2>/dev/null)" = "$(realpath "$P_REPO" 2>/dev/null)" ] && continue
+    # Only relocate when the recorded location is really gone: two markers with
+    # the same id (a copied vault) must not make the profile bounce.
+    dir_is_own_worktree "$P_REPO" && continue
+    dir_is_own_worktree "$vault" || continue
+    if write_profile_file "$id" "$vault" "$(default_runtime_for "$vault")" "$P_TOKEN"; then
+      log "RELOCATED profile $id: $P_REPO -> $vault (token kept)"
+    fi
+  done
+}
+
+# A vault that has no profile yet asks for one by writing runtime/claim.json.
+# The token is generated HERE, in Termux: nothing a claim file contains is
+# trusted, so a stray file can at most cause an empty profile for a repository
+# the user already opened as a vault on this device.
+adopt_claims() { # $1..$n = marker files
+  local cf vault created age now id token runtime
+  for cf in "$@"; do
+    case "$cf" in */claim.json) : ;; *) continue ;; esac
+    vault="$(vault_dir_of_runtime_file "$cf")"
+    created="$(jq -r '.createdAt // empty' "$cf" 2>/dev/null || true)"
+    now="$(date -u +%s)"
+    if [ -n "$created" ] && age="$(date -u -d "$created" +%s 2>/dev/null)"; then
+      if [ $((now - age)) -gt "$NGB_CLAIM_MAX_AGE" ]; then
+        log "CLAIM ignoring a stale pairing request in $vault"
+        rm -f "$cf" 2>/dev/null || true
+        continue
+      fi
+    fi
+    if profile_file_for_repo "$vault" >/dev/null; then
+      rm -f "$cf" 2>/dev/null || true
+      continue
+    fi
+    if ! dir_is_own_worktree "$vault"; then
+      log "CLAIM $vault is not a git repository of its own; not pairing it"
+      continue
+    fi
+    id="$(new_profile_id)"
+    token="$(new_token)"
+    runtime="$(default_runtime_for "$vault")"
+    write_profile_file "$id" "$vault" "$runtime" "$token" || continue
+    mkdir -p "$runtime" 2>/dev/null || true
+    printf '{"token":"%s","repoPath":"%s","profileId":"%s","createdAt":"%s"}\n' \
+      "$token" "$vault" "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$runtime/pairing.json.tmp" &&
+      mv "$runtime/pairing.json.tmp" "$runtime/pairing.json"
+    printf '{"profileId":"%s","repoDir":"%s"}\n' "$id" "$vault" > "$runtime/profile.json" 2>/dev/null || true
+    rm -f "$cf" 2>/dev/null || true
+    log "ADOPTED $vault as profile $id (new token; pairing file written)"
+  done
 }
 
 err_json() {
@@ -183,7 +530,7 @@ sparse_safety_raw() {
 # ---- actions -----------------------------------------------------------------
 
 action_ping() {
-  DATA=$(obj_from_fields pong "pong" runnerVersion "$RUNNER_VERSION")
+  DATA=$(obj_from_fields pong "pong" runnerVersion "$RUNNER_VERSION" profileId "$PROFILE_ID")
 }
 
 # Files hidden inside fully untracked directories: git status collapses such a
@@ -307,6 +654,8 @@ action_diagnostics() {
     safeDirectory "$safe_dir" \
     authMethod "$auth_method" \
     runtimeDir "$NGB_RUNTIME_DIR" \
+    profileId "$PROFILE_ID" \
+    profileCount "$(list_profile_files | grep -c . || true)" \
     runnerVersion "$RUNNER_VERSION")
 }
 
@@ -1051,6 +1400,21 @@ process_request() {
     mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
     return
   fi
+  # The profile is decided by the request directory the file was found in, and
+  # the token proves the sender knows THIS profile's secret. When the plugin
+  # also names its profile, the two must agree: a request file copied from
+  # another vault is a mistake (or a replay) and never runs here. The profile is
+  # LOOKED UP, never taken from the request - no repoDir, no path, ever.
+  local claimed_profile
+  claimed_profile=$(jq -r '.profileId // empty' "$req_file")
+  if [ -n "$claimed_profile" ] && [ "$claimed_profile" != "$PROFILE_ID" ]; then
+    log "PROFILE mismatch for $id (request claims $claimed_profile, this is $PROFILE_ID)"
+    write_result "$id" "$action" false 1 'null' \
+      "$(err_json BAD_REQUEST "This request belongs to a different vault (profile mismatch). Nothing was executed." "" "")" \
+      "$started"
+    mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
+    return
+  fi
   if [ -e "$CAN_DIR/$id" ]; then
     log "CANCELLED before start: $id ($action)"
     write_result "$id" "$action" false 1 'null' "$(err_json CANCELLED "Cancelled before execution." "" "")" "$started"
@@ -1181,38 +1545,143 @@ acquire_lock
 # discarded there.
 echo "NGB_RUNNER_VERSION=$RUNNER_VERSION"
 
+shopt -s nullglob
+
 # Requests interrupted mid-flight (device killed Termux) are retried ONCE.
 # A `.retried` marker enforces the cap: a request that reliably kills the
 # runner must not requeue forever. Markers are removed on completion, on
 # give-up, and (as a backstop) by the 24 h sweep.
-shopt -s nullglob
-for stale in "$PROC_DIR"/*.json; do
-  if [ -e "$stale.retried" ]; then
-    log "RECOVER giving up on $(basename "$stale") (already retried once)"
-    rid=$(jq -r '.id // empty' "$stale" 2>/dev/null)
-    ract=$(jq -r '.action // empty' "$stale" 2>/dev/null)
-    if valid_id "$rid"; then
-      write_result "$rid" "${ract:-unknown}" false 1 'null' \
-        "$(err_json RUNNER_INTERNAL "The request was interrupted twice and will not be retried again (see runner.log)." "" "")" \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+recover_interrupted() {
+  local stale rid ract
+  for stale in "$PROC_DIR"/*.json; do
+    if [ -e "$stale.retried" ]; then
+      log "RECOVER giving up on $(basename "$stale") (already retried once)"
+      rid=$(jq -r '.id // empty' "$stale" 2>/dev/null)
+      ract=$(jq -r '.action // empty' "$stale" 2>/dev/null)
+      if valid_id "$rid"; then
+        write_result "$rid" "${ract:-unknown}" false 1 'null' \
+          "$(err_json RUNNER_INTERNAL "The request was interrupted twice and will not be retried again (see runner.log)." "" "")" \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      fi
+      mv "$stale" "$DONE_DIR/" 2>/dev/null || rm -f "$stale"
+      rm -f "$stale.retried"
+      json_cleanup
+    else
+      : > "$stale.retried"
+      log "RECOVER requeueing interrupted request $(basename "$stale")"
+      mv "$stale" "$REQ_DIR/" 2>/dev/null || rm -f "$stale"
     fi
-    mv "$stale" "$DONE_DIR/" 2>/dev/null || rm -f "$stale"
-    rm -f "$stale.retried"
+  done
+}
+
+# A profile whose repository is gone must never abort the whole run: its own
+# queue is answered so the plugin in that vault stops waiting, and the other
+# profiles are drained normally.
+answer_unusable_profile() {
+  local f id action token started
+  started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  for f in "$PROC_DIR"/*.json "$REQ_DIR"/*.json; do
+    [ -e "$f" ] || continue
+    id=$(jq -r '.id // empty' "$f" 2>/dev/null)
+    action=$(jq -r '.action // empty' "$f" 2>/dev/null)
+    token=$(jq -r '.token // empty' "$f" 2>/dev/null)
+    if valid_id "$id" && [ "$token" = "$NGB_TOKEN" ]; then
+      write_result "$id" "${action:-unknown}" false 1 'null' \
+        "$(err_json REPO_MISSING "$PROFILE_UNHEALTHY_REASON" "" "")" "$started"
+    fi
+    mv "$f" "$DONE_DIR/" 2>/dev/null || rm -f "$f"
     json_cleanup
+  done
+}
+
+migrate_legacy_config
+
+# --- pass 1: activate every profile, recover, count work -----------------------
+PROFILE_FILES=()
+HEALTHY_FILES=()
+HEALTHY_REPOS=()
+UNHEALTHY=0
+TOTAL_PENDING=0
+mapfile -t PROFILE_FILES < <(list_profile_files)
+if [ "${#PROFILE_FILES[@]}" -eq 0 ]; then
+  log "RUN no profiles configured (run install.sh for a vault)"
+fi
+for conf in "${PROFILE_FILES[@]}"; do
+  if activate_profile "$conf"; then
+    HEALTHY_FILES+=("$conf")
+    HEALTHY_REPOS+=("$NGB_REPO_DIR")
+    recover_interrupted
+    pending=("$REQ_DIR"/*.json)
+    TOTAL_PENDING=$((TOTAL_PENDING + ${#pending[@]}))
   else
-    : > "$stale.retried"
-    log "RECOVER requeueing interrupted request $(basename "$stale")"
-    mv "$stale" "$REQ_DIR/" 2>/dev/null || rm -f "$stale"
+    UNHEALTHY=1
+    log "PROFILE ${PROFILE_ID:-$(basename "$conf")} unusable: $PROFILE_UNHEALTHY_REASON"
+    [ -d "$REQ_DIR" ] && answer_unusable_profile
   fi
 done
 
-pending=("$REQ_DIR"/*.json)
-if [ "${#pending[@]}" -eq 0 ]; then
+# --- discovery: only when idle or when something is broken ---------------------
+# An idle trigger is the signal that a vault we cannot see asked for something -
+# typically a new vault requesting a profile. A missing repository may simply
+# have been moved. Both are answered by one scan of shared storage; a run with
+# real work to do never pays for it.
+if [ "${NGB_DISCOVER:-}" = "1" ] || [ "$UNHEALTHY" = 1 ] || [ "$TOTAL_PENDING" -eq 0 ]; then
+  # Cross-profile work: log it next to the profiles, not into whichever vault
+  # happened to be activated last.
+  LOG_FILE="$NGB_CONFIG_DIR/runner.log"
+  mapfile -t MARKERS < <(scan_runtime_files)
+  if [ "${#MARKERS[@]}" -gt 0 ]; then
+    relocate_profiles "${MARKERS[@]}"
+    adopt_claims "${MARKERS[@]}"
+  fi
+  # Re-activate: relocation and adoption may have added or moved work.
+  HEALTHY_FILES=()
+  HEALTHY_REPOS=()
+  mapfile -t PROFILE_FILES < <(list_profile_files)
+  for conf in "${PROFILE_FILES[@]}"; do
+    if activate_profile "$conf"; then
+      HEALTHY_FILES+=("$conf")
+      HEALTHY_REPOS+=("$NGB_REPO_DIR")
+      recover_interrupted
+    fi
+  done
+fi
+
+# Nested vaults: exclude every inner repository from its outer one (local only).
+# Runs after discovery so a freshly adopted inner vault is handled immediately.
+LOG_FILE="$NGB_CONFIG_DIR/runner.log"
+for i in "${!HEALTHY_REPOS[@]}"; do
+  for j in "${!HEALTHY_REPOS[@]}"; do
+    [ "$i" = "$j" ] && continue
+    case "${HEALTHY_REPOS[$j]}" in
+      "${HEALTHY_REPOS[$i]}"/*) ensure_nested_exclusion "${HEALTHY_REPOS[$i]}" "${HEALTHY_REPOS[$j]}" ;;
+    esac
+  done
+done
+
+# --- pass 2: drain every queue, globally oldest first --------------------------
+# Request ids embed a UTC timestamp, so sorting by file name orders the work
+# across profiles chronologically. One request at a time, as before.
+QUEUE=()
+for conf in "${HEALTHY_FILES[@]}"; do
+  read_profile_file "$conf" || continue
+  for f in "$P_RUNTIME"/requests/*.json; do
+    [ -e "$f" ] || continue
+    QUEUE+=("$(printf '%s\t%s\t%s' "$(basename "$f")" "$conf" "$f")")
+  done
+done
+
+if [ "${#QUEUE[@]}" -eq 0 ]; then
   log "RUN no pending requests"
 else
-  # oldest first (ids embed a UTC timestamp, so lexical sort is chronological)
-  mapfile -t sorted < <(printf '%s\n' "${pending[@]}" | sort)
-  for f in "${sorted[@]}"; do
+  mapfile -t SORTED < <(printf '%s\n' "${QUEUE[@]}" | sort)
+  ACTIVE_CONF=""
+  for entry in "${SORTED[@]}"; do
+    IFS=$'\t' read -r _reqname conf f <<< "$entry"
+    if [ "$conf" != "$ACTIVE_CONF" ]; then
+      activate_profile "$conf" || { log "SKIP profile $conf became unusable mid-run"; ACTIVE_CONF=""; continue; }
+      ACTIVE_CONF="$conf"
+    fi
     # Claim atomically: if another process took it first, mv fails and we skip.
     claimed="$PROC_DIR/$(basename "$f")"
     if mv "$f" "$claimed" 2>/dev/null; then
@@ -1223,6 +1692,10 @@ else
     fi
   done
 fi
-cleanup_old
+
+for conf in "${HEALTHY_FILES[@]}"; do
+  activate_profile "$conf" >/dev/null 2>&1 || continue
+  cleanup_old
+done
 json_cleanup
 exit 0

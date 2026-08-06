@@ -86,6 +86,13 @@ export interface BridgeRequest {
   createdAt: string;
   timeoutSeconds: number;
   args: Record<string, unknown>;
+  /**
+   * Which paired vault this request belongs to (runner v10+). It is an opaque
+   * id the runner LOOKS UP; a repository path is never sent. Omitted while this
+   * vault has not learned its profile yet (an older pairing), in which case the
+   * request directory it lands in decides — and the token still has to match.
+   */
+  profileId?: string;
 }
 
 /** Codes this plugin knows how to explain; the runner may add new ones. */
@@ -101,7 +108,9 @@ export type KnownBridgeErrorCode =
   | "EXPIRED"
   | "RUNNER_INTERNAL"
   | "FILE_ABSENT"
-  | "TOO_LARGE";
+  | "TOO_LARGE"
+  /** The profile's repository is gone or is no longer a work tree (runner v10+). */
+  | "REPO_MISSING";
 
 /**
  * `(string & {})` keeps the literals visible to autocompletion while still
@@ -123,6 +132,8 @@ export interface BridgeResult {
   startedAt?: string;
   finishedAt?: string;
   runnerVersion?: number;
+  /** The profile that answered (runner v10+); how a vault learns its own id. */
+  profileId?: string;
   data?: Record<string, string>;
   error?: BridgeErrorInfo | null;
 }

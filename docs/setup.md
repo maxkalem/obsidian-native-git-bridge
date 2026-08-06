@@ -33,9 +33,22 @@ curl -fsSL https://github.com/maxkalem/obsidian-native-git-bridge/releases/lates
 
 Better: copy the command from the plugin (Settings → Copy command) or from the companion app's step 3. Those versions are **pinned to the release you are running**, so the runner they install is exactly the one your plugin build was tested against. The command above tracks the newest release instead, and neither fetches from the `main` branch, which is the development state and may be mid-change.
 
-The installer requests storage access (accept the Android dialog), installs git/jq/openssh, marks the repo as `safe.directory` if needed (asks first), enables `allow-external-apps` (required for the companion), checks your authentication non-interactively, installs the runner to `~/.config/native-git-bridge/runner.sh`, excludes the runtime folder from git locally, runs a ping self-test, and drops a one-shot `pairing.json` that the plugin imports and deletes on its next start.
+The installer requests storage access (accept the Android dialog), installs git/jq/openssh, marks the repo as `safe.directory` if needed (asks first), enables `allow-external-apps` (required for the companion), configures authentication for this repository non-interactively, installs the runner to `~/.config/native-git-bridge/runner.sh`, writes a profile for this vault (`~/.config/native-git-bridge/profiles/<id>.conf`, mode 600, with a token of its own), excludes the runtime folder from git locally, runs a ping self-test, and drops a one-shot `pairing.json` that the plugin imports and deletes on its next start.
 
-Authentication stays entirely in Termux: an existing PAT via credential helper, a token in the remote URL (the installer offers to move it into `~/.git-credentials`), or an SSH key (generated automatically for SSH remotes; add the printed public key to your git host).
+Authentication stays entirely in Termux and is configured **per repository**, so two vaults can use two different accounts: an existing PAT via credential helper, a token in the remote URL (the installer offers to move it into this repository's own credential file, mode 600), or an SSH key (generated automatically for SSH remotes; on a device that already has one, the installer offers a separate key for this vault and sets `core.sshCommand` locally). Add the printed public key to your git host. No credential ever reaches the plugin, a result file or any log.
+
+## Step 3b: more than one vault on the device
+
+Each vault is a repository of its own and gets its own profile, its own token and its own runtime folder. One runner drains them all, so you never have to switch anything.
+
+- **Easiest**: open the second vault in Obsidian and use *Settings → Native Git Bridge → Profile for this vault → Pair this vault* (also in the setup guide and the command palette). The plugin writes a pairing request into its runtime folder and wakes the runner; Termux checks that the vault really is a git repository of its own, generates a token there, and answers. Nothing secret leaves Termux.
+- **Or** run the install command again with the second vault's path. That also configures authentication for it and prints what it did. Re-running the installer for a vault that already has a profile keeps its token.
+
+A vault opened **inside** another vault's repository (`Main/` and `Main/Projects/ABCproject/`) works too. The installer adds `/<relative path>/` to the **outer** repository's `.git/info/exclude` — device-local, never synced, no tracked file touched — so the outer repository stops offering the inner vault's files. The runner re-checks this on every run. Each side's operations stay inside its own repository.
+
+An existing single-vault setup is migrated automatically the first time the new runner runs: the old `config` becomes a profile with the **same token** (no re-pairing) and is kept as `config.legacy`.
+
+If you move a vault to another folder, the runner finds it again by the marker it left in the runtime folder and keeps the profile. If a vault is deleted, its profile stays behind and is reported as broken; it is never re-pointed at some other repository.
 
 ## Step 4: the plugin
 

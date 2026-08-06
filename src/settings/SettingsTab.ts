@@ -168,6 +168,19 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName("Profile for this vault")
+      .setDesc(
+        s.profileId
+          ? `Termux serves this vault as ${s.profileId}. Every vault on the device has its own profile and its own token; one runner drains them all.`
+          : "This vault has no Termux profile yet. Pairing asks the runner for one; it generates the token in Termux and answers with it."
+      )
+      .addButton((b) =>
+        b
+          .setButtonText(s.profileId ? "Pair again" : "Pair this vault")
+          .onClick(() => void this.plugin.cmdPairThisVault())
+      );
+
+    new Setting(containerEl)
       .setName("Repository path (informational)")
       .setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.")
       .addText((t) =>

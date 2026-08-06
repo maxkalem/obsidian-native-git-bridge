@@ -14,6 +14,11 @@ trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNNER="$SCRIPT_DIR/termux/native-git-bridge-runner.sh"
 
+# The runner scans shared storage for vaults when it has nothing else to do.
+# Point that scan at a directory that does not exist, so the suite can never
+# touch a real device path; the multi-profile phase overrides it per run.
+export NGB_SCAN_ROOTS="$ROOT/no-scan-roots"
+
 echo "# setup: bare remote + working clone with protected dirs"
 git init -q --bare "$ROOT/remote.git"
 git clone -q "$ROOT/remote.git" "$ROOT/vault" 2>/dev/null
@@ -552,11 +557,12 @@ DONE_COUNT="$(grep -c "DONE r-20260804T150000Z-conc01" "$RUNTIME/runner.log" || 
 check '[ "$DONE_COUNT" = "1" ]' "request processed exactly once (got $DONE_COUNT DONE lines)"
 check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T150000Z-conc01.json" >/dev/null' "result still produced under concurrency"
 check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drained"
-check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
+check '[ ! -d "$RUNTIME/.runner.lock" ]' "no lock left inside the vault runtime dir"
+check '[ ! -d "$ROOT/conf/.runner.lock" ]' "global lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "9" ]' "runnerVersion = 9 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=9"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "10" ]' "runnerVersion = 10 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=10"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -799,6 +805,171 @@ kill "$SRV_PID" 2>/dev/null; wait "$SRV_PID" 2>/dev/null
 
 echo "# test: runner exits (no daemon) and log has no token"
 check '! grep -q "$TOKEN" "$RUNTIME/runner.log"' "token never written to runner.log"
+
+# =============================================================================
+# phase 6: several repositories on one device (profiles)
+# =============================================================================
+# Everything below uses its own config directory, so the single-repo phases
+# above keep proving that a legacy setup still works.
+
+MULTI="$ROOT/multi"
+MCONF="$ROOT/conf-multi"
+mkdir -p "$MULTI" "$MCONF"
+mrun() { NGB_CONFIG="$MCONF/config" NGB_SCAN_ROOTS="$MULTI" bash "$RUNNER" "$@"; }
+mkvault() { # $1 dir
+  mkdir -p "$1/.obsidian/plugins/native-git-bridge/runtime/requests"
+  git init -q "$1"
+  git -C "$1" config user.email m@e; git -C "$1" config user.name m
+  echo "note in $(basename "$1")" > "$1/note.md"
+  git -C "$1" add -A && git -C "$1" commit -qm "init $(basename "$1")"
+  # Mirror the installer: the runtime dir is excluded locally, never committed.
+  echo ".obsidian/plugins/native-git-bridge/runtime/" >> "$1/.git/info/exclude"
+}
+mreq() { # $1 runtime, $2 id, $3 token, $4 action, $5 profileId(optional), $6 args(optional)
+  local pid="${5:-}" args="${6:-}"
+  [ -z "$args" ] && args='{}'
+  mkdir -p "$1/requests"
+  cat > "$1/requests/$2.json" <<REQ
+{"protocolVersion":1,"id":"$2","token":"$3","action":"$4","profileId":"$pid","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":$args}
+REQ
+}
+claim() { # $1 runtime
+  mkdir -p "$1"
+  printf '{"createdAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$1/claim.json"
+}
+
+echo "# phase 6: an existing single-repo config is migrated to a profile"
+mkvault "$MULTI/VaultA"
+A_RT="$MULTI/VaultA/.obsidian/plugins/native-git-bridge/runtime"
+A_TOKEN="legacy-token-abc123"
+cat > "$MCONF/config" <<CONF
+NGB_REPO_DIR="$MULTI/VaultA"
+NGB_TOKEN="$A_TOKEN"
+NGB_RUNTIME_DIR="$A_RT"
+CONF
+mreq "$A_RT" "r-20260805T100000Z-mig001" "$A_TOKEN" ping
+mrun >/dev/null
+A_CONF="$(ls "$MCONF"/profiles/*.conf 2>/dev/null | head -1)"
+check '[ -n "$A_CONF" ]' "legacy config migrated into profiles/<id>.conf"
+check 'grep -q "NGB_TOKEN=\"$A_TOKEN\"" "$A_CONF"' "migration keeps the existing token (no re-pairing)"
+check 'grep -q "^NGB_PROFILE_FORMAT=1$" "$A_CONF"' "profile carries a format marker for future migrations"
+check '[ "$(stat -c %a "$A_CONF")" = "600" ]' "profile file is chmod 600"
+check '[ -f "$MCONF/config.legacy" ] && [ ! -f "$MCONF/config" ]' "legacy config retired (migration cannot run twice)"
+check 'jq -e ".ok == true" "$A_RT/results/r-20260805T100000Z-mig001.json" >/dev/null' "the migrated vault keeps working with its old token"
+A_PID="$(jq -r .profileId "$A_RT/results/r-20260805T100000Z-mig001.json")"
+check '[ -n "$A_PID" ] && [ "$A_PID" != "null" ]' "results name the profile they were answered by"
+check '[ "$(jq -r .profileId "$A_RT/profile.json")" = "$A_PID" ]' "runtime dir carries a profile marker"
+
+echo "# phase 6: a second vault pairs itself without re-running the installer"
+mkvault "$MULTI/VaultB"
+B_RT="$MULTI/VaultB/.obsidian/plugins/native-git-bridge/runtime"
+claim "$B_RT"
+mrun >/dev/null
+check '[ "$(ls "$MCONF"/profiles/*.conf | wc -l)" = "2" ]' "claim from an unpaired vault created a second profile"
+check '[ -f "$B_RT/pairing.json" ]' "pairing file written into the new vault"
+check '[ ! -f "$B_RT/claim.json" ]' "claim consumed"
+B_TOKEN="$(jq -r .token "$B_RT/pairing.json")"
+B_PID="$(jq -r .profileId "$B_RT/pairing.json")"
+check '[ -n "$B_TOKEN" ] && [ "$B_TOKEN" != "$A_TOKEN" ]' "the second vault gets its OWN token"
+check 'printf %s "$B_PID" | grep -Eq "^p-[0-9a-f]{8,32}$"' "pairing file carries an opaque profile id"
+
+echo "# phase 6: one run drains every profile's queue"
+mreq "$A_RT" "r-20260805T110000Z-two001" "$A_TOKEN" status "$A_PID"
+mreq "$B_RT" "r-20260805T110001Z-two002" "$B_TOKEN" status "$B_PID"
+mrun >/dev/null
+check 'jq -e ".ok == true" "$A_RT/results/r-20260805T110000Z-two001.json" >/dev/null' "vault A answered"
+check 'jq -e ".ok == true" "$B_RT/results/r-20260805T110001Z-two002.json" >/dev/null' "vault B answered in the same run"
+check '[ "$(jq -r .profileId "$B_RT/results/r-20260805T110001Z-two002.json")" = "$B_PID" ]' "each result carries its own profile id"
+# The queue is one global list sorted by request id, and ids embed a UTC
+# timestamp: the older request can never start after the newer one.
+check '[ "$(jq -r .startedAt "$A_RT/results/r-20260805T110000Z-two001.json")" \< "$(jq -r .startedAt "$B_RT/results/r-20260805T110001Z-two002.json")" ] || [ "$(jq -r .startedAt "$A_RT/results/r-20260805T110000Z-two001.json")" = "$(jq -r .startedAt "$B_RT/results/r-20260805T110001Z-two002.json")" ]' "oldest request first across profiles"
+
+echo "# phase 6: a token is valid for its own profile only"
+mreq "$B_RT" "r-20260805T120000Z-tok001" "$A_TOKEN" status "$A_PID"
+mrun >/dev/null
+check 'jq -e ".error.code == \"AUTH\"" "$B_RT/results/r-20260805T120000Z-tok001.json" >/dev/null' "vault A's request replayed into vault B -> AUTH"
+mreq "$A_RT" "r-20260805T120001Z-tok002" "$A_TOKEN" status "$B_PID"
+mrun >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$A_RT/results/r-20260805T120001Z-tok002.json" >/dev/null' "right token but foreign profile id -> BAD_REQUEST"
+check '! grep -q "$A_TOKEN" "$MCONF/runner.log"' "no token in the shared runner log"
+check '! grep -q "$B_TOKEN" "$B_RT/runner.log"' "no token in the per-vault runner log"
+
+echo "# phase 6: a vault inside another vault's repository"
+# VaultN lives INSIDE VaultA's working tree and is its own repository.
+mkvault "$MULTI/VaultA/Projects/VaultN"
+N_RT="$MULTI/VaultA/Projects/VaultN/.obsidian/plugins/native-git-bridge/runtime"
+claim "$N_RT"
+mrun >/dev/null
+N_TOKEN="$(jq -r .token "$N_RT/pairing.json")"
+N_PID="$(jq -r .profileId "$N_RT/pairing.json")"
+check '[ -n "$N_TOKEN" ] && [ "$N_TOKEN" != "$A_TOKEN" ]' "the nested vault is a profile of its own"
+check 'grep -qxF "/Projects/VaultN/" "$MULTI/VaultA/.git/info/exclude"' "inner repository excluded from the outer one via .git/info/exclude (local, not synced)"
+check '! git -C "$MULTI/VaultA" status --porcelain | grep -q "VaultN"' "outer repository no longer offers the inner working tree for staging"
+check '[ -z "$(git -C "$MULTI/VaultA" status --porcelain -- Projects)" ]' "outer status is clean: the inner vault is invisible to it"
+check '! grep -q "VaultN" "$MULTI/VaultA/.gitignore" 2>/dev/null' "no tracked file was edited to achieve it"
+# Operations must stay inside the repository they were sent to.
+mreq "$N_RT" "r-20260805T130000Z-nst001" "$N_TOKEN" status "$N_PID"
+mreq "$A_RT" "r-20260805T130001Z-nst002" "$A_TOKEN" status "$A_PID"
+mrun >/dev/null
+check '[ "$(jq -r .data.branchInfo "$N_RT/results/r-20260805T130000Z-nst001.json" | grep -c "branch.head")" = "1" ]' "inner vault answers with its own branch header"
+check 'jq -er .data.lastCommit "$N_RT/results/r-20260805T130000Z-nst001.json" | grep -q "init VaultN"' "inner status reports the INNER repository's last commit"
+check 'jq -er .data.lastCommit "$A_RT/results/r-20260805T130001Z-nst002.json" | grep -q "init VaultA"' "outer status reports the OUTER repository's last commit"
+echo "inner change" >> "$MULTI/VaultA/Projects/VaultN/note.md"
+mreq "$N_RT" "r-20260805T130100Z-nst003" "$N_TOKEN" commit "$N_PID" '{"protectedPaths":[],"message":"e2e: inner commit"}'
+mrun >/dev/null
+check 'jq -e ".ok == true" "$N_RT/results/r-20260805T130100Z-nst003.json" >/dev/null' "commit inside the inner repository succeeds"
+check '[ "$(git -C "$MULTI/VaultA/Projects/VaultN" rev-list --count HEAD)" = "2" ]' "the commit landed in the inner repository"
+check '[ "$(git -C "$MULTI/VaultA" rev-list --count HEAD)" = "1" ]' "the outer repository did not gain a commit"
+check '[ -z "$(git -C "$MULTI/VaultA" status --porcelain)" ]' "the outer repository stayed clean throughout"
+
+echo "# phase 6: an inner repository that lost its .git never falls back to the outer one"
+mv "$MULTI/VaultA/Projects/VaultN/.git" "$MULTI/VaultA/Projects/VaultN/.git-off"
+mreq "$N_RT" "r-20260805T140000Z-esc001" "$N_TOKEN" status "$N_PID"
+mreq "$A_RT" "r-20260805T140001Z-esc002" "$A_TOKEN" status "$A_PID"
+mrun >/dev/null
+check 'jq -e ".error.code == \"REPO_MISSING\"" "$N_RT/results/r-20260805T140000Z-esc001.json" >/dev/null' "no work tree of its own -> REPO_MISSING, not the outer repository"
+check 'jq -e ".ok == true" "$A_RT/results/r-20260805T140001Z-esc002.json" >/dev/null' "the other profiles are drained in the same run"
+mv "$MULTI/VaultA/Projects/VaultN/.git-off" "$MULTI/VaultA/Projects/VaultN/.git"
+
+echo "# phase 6: a moved repository is found again by its profile marker"
+mv "$MULTI/VaultB" "$MULTI/VaultB-moved"
+B_RT="$MULTI/VaultB-moved/.obsidian/plugins/native-git-bridge/runtime"
+mrun >/dev/null
+check 'grep -q "NGB_REPO_DIR=\"$MULTI/VaultB-moved\"" "$MCONF/profiles/$B_PID.conf"' "profile follows the repository to its new location"
+check 'grep -q "NGB_TOKEN=\"$B_TOKEN\"" "$MCONF/profiles/$B_PID.conf"' "relocation keeps the token (no re-pairing)"
+mreq "$B_RT" "r-20260805T150000Z-mov001" "$B_TOKEN" status "$B_PID"
+mrun >/dev/null
+check 'jq -e ".ok == true" "$B_RT/results/r-20260805T150000Z-mov001.json" >/dev/null' "the moved vault works without touching the installer"
+
+echo "# phase 6: a deleted repository is reported, not fatal, and never replaced"
+rm -rf "$MULTI/VaultB-moved/.git"
+mreq "$B_RT" "r-20260805T160000Z-del001" "$B_TOKEN" status "$B_PID"
+mreq "$A_RT" "r-20260805T160001Z-del002" "$A_TOKEN" status "$A_PID"
+mrun >/dev/null
+check 'jq -e ".error.code == \"REPO_MISSING\"" "$B_RT/results/r-20260805T160000Z-del001.json" >/dev/null' "queued request of a dead profile is answered (no silent timeout)"
+check 'jq -e ".ok == true" "$A_RT/results/r-20260805T160001Z-del002.json" >/dev/null' "removing one vault leaves the others fully functional"
+check 'grep -q "NGB_REPO_DIR=\"$MULTI/VaultB-moved\"" "$MCONF/profiles/$B_PID.conf"' "a dead profile is never re-pointed at another repository"
+
+echo "# phase 6: claims are not a way in"
+mkdir -p "$MULTI/NotARepo/.obsidian/plugins/native-git-bridge/runtime"
+claim "$MULTI/NotARepo/.obsidian/plugins/native-git-bridge/runtime"
+BEFORE="$(ls "$MCONF"/profiles/*.conf | wc -l)"
+mrun >/dev/null
+check '[ "$(ls "$MCONF"/profiles/*.conf | wc -l)" = "$BEFORE" ]' "a claim from a directory that is not a repository pairs nothing"
+mkvault "$MULTI/VaultStale"
+S_RT="$MULTI/VaultStale/.obsidian/plugins/native-git-bridge/runtime"
+printf '{"createdAt":"2020-01-01T00:00:00Z"}\n' > "$S_RT/claim.json"
+mrun >/dev/null
+check '[ "$(ls "$MCONF"/profiles/*.conf | wc -l)" = "$BEFORE" ]' "a stale claim is discarded, not honoured"
+check '[ ! -f "$S_RT/claim.json" ]' "stale claim removed"
+
+echo "# phase 6: a corrupt profile cannot take the others down"
+printf 'this is not a profile\n' > "$MCONF/profiles/p-00000000deadbeef.conf"
+mreq "$A_RT" "r-20260805T170000Z-cor001" "$A_TOKEN" status "$A_PID"
+mrun >/dev/null
+check 'jq -e ".ok == true" "$A_RT/results/r-20260805T170000Z-cor001.json" >/dev/null' "healthy profiles keep working next to a corrupt one"
+check 'grep -q "PROFILE ignoring" "$MCONF/runner.log"' "the corrupt profile is logged and skipped"
+rm -f "$MCONF/profiles/p-00000000deadbeef.conf"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

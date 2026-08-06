@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bootstrapCommand } from "../src/constants";
-import { createRequest, makeRequestId, parseResult } from "../src/bridge/protocol";
+import { createRequest, isValidProfileId, makeRequestId, parseResult } from "../src/bridge/protocol";
 import { isValidRequestId } from "../src/settings/pathValidation";
 import { idTimestampMs } from "../src/bridge/BridgeClient";
 
@@ -12,9 +12,29 @@ describe("request creation", () => {
     expect(req.protocolVersion).toBe(1);
     expect(req.timeoutSeconds).toBe(60);
   });
+  it("carries the profile id only when it is a valid one", () => {
+    const withId = createRequest("status", {}, "tok", 60, new Date(), "abc123", "p-0011223344556677");
+    expect(withId.profileId).toBe("p-0011223344556677");
+    // Garbage (or an empty setting) is dropped rather than sent: the runner
+    // would reject the request, and an empty string is not "no profile".
+    expect(createRequest("status", {}, "tok", 60, new Date(), "abc123", "").profileId).toBeUndefined();
+    expect(createRequest("status", {}, "tok", 60, new Date(), "abc123", "../etc").profileId).toBeUndefined();
+  });
   it("id timestamp round-trips for cleanup age checks", () => {
     const id = makeRequestId(new Date("2026-08-03T10:15:00Z"), "xyz");
     expect(idTimestampMs(`${id}.json`)).toBe(Date.parse("2026-08-03T10:15:00Z"));
+  });
+});
+
+describe("isValidProfileId", () => {
+  it("accepts the runner's opaque ids and nothing else", () => {
+    expect(isValidProfileId("p-0011223344556677")).toBe(true);
+    expect(isValidProfileId("p-00112233")).toBe(true);
+    expect(isValidProfileId("p-001122")).toBe(false);
+    expect(isValidProfileId("p-XXXXXXXXXXXXXXXX")).toBe(false);
+    expect(isValidProfileId("../../etc/passwd")).toBe(false);
+    expect(isValidProfileId("p-0011223344556677/../x")).toBe(false);
+    expect(isValidProfileId("")).toBe(false);
   });
 });
 

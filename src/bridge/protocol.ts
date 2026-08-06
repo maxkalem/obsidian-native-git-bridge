@@ -29,11 +29,12 @@ export function createRequest(
   token: string,
   timeoutSeconds: number,
   now: Date = new Date(),
-  rand: string = randomSuffix()
+  rand: string = randomSuffix(),
+  profileId = ""
 ): BridgeRequest {
   const id = makeRequestId(now, rand);
   if (!isValidRequestId(id)) throw new Error(`Generated invalid request id: ${id}`);
-  return {
+  const req: BridgeRequest = {
     protocolVersion: PROTOCOL_VERSION,
     id,
     token,
@@ -42,6 +43,18 @@ export function createRequest(
     timeoutSeconds,
     args,
   };
+  // Only sent once this vault knows its profile: an empty field would look
+  // like a claim to a profile named "" to a future runner.
+  if (isValidProfileId(profileId)) req.profileId = profileId;
+  return req;
+}
+
+/**
+ * The opaque per-vault id the Termux runner generates. Validated on both sides
+ * so a garbled value never reaches a request or a profile lookup.
+ */
+export function isValidProfileId(id: string): boolean {
+  return /^p-[0-9a-f]{8,32}$/.test(id);
 }
 
 export function serializeRequest(req: BridgeRequest): string {

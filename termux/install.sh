@@ -136,48 +136,160 @@ else
   say "-- allow-external-apps already enabled."
 fi
 
-# 4c. Authentication check - adapts to what you already use (PAT over HTTPS,
-# credential helper, or SSH). Credentials never leave Termux.
+# 5. Install runner + profile + token.
+# One profile per vault: profiles/<id>.conf, mode 600, its own token. Running
+# this installer for a second vault ADDS a profile; it never overwrites the
+# first one (which used to leave that vault silently unanswered).
+CONF_DIR="$HOME/.config/native-git-bridge"
+PROFILES_DIR="$CONF_DIR/profiles"
+mkdir -p "$PROFILES_DIR"
+chmod 700 "$CONF_DIR" "$PROFILES_DIR"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RUNNER_SRC="$SCRIPT_DIR/native-git-bridge-runner.sh"
+[ -f "$RUNNER_SRC" ] || fail "runner script not found next to installer: $RUNNER_SRC"
+cp "$RUNNER_SRC" "$CONF_DIR/runner.sh"
+chmod 700 "$CONF_DIR/runner.sh"
+
+# Migrate an existing single-repo config before looking for a profile: the
+# runner does it on its first run, so one implementation covers both paths.
+# NGB_SCAN_ROOTS="" keeps this run from scanning shared storage - it is here to
+# migrate, and a scan of a full phone would look like a hang.
+NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" >/dev/null 2>&1 || true
+
+profile_value() { # $1 file, $2 key
+  sed -n "s/^$2=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$1" | head -1
+}
+
+# Reuse the profile of THIS repository if it already has one (re-running the
+# installer must not re-pair a working vault), otherwise create a new one.
+PROFILE_FILE=""
+REPO_REAL="$(realpath "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")"
+for f in "$PROFILES_DIR"/*.conf; do
+  [ -f "$f" ] || continue
+  p="$(profile_value "$f" NGB_REPO_DIR)"
+  [ -n "$p" ] || continue
+  if [ "$(realpath "$p" 2>/dev/null || printf '%s' "$p")" = "$REPO_REAL" ]; then
+    PROFILE_FILE="$f"; break
+  fi
+done
+
+RUNTIME_DIR="$REPO_DIR/.obsidian/plugins/native-git-bridge/runtime"
+if [ -n "$PROFILE_FILE" ]; then
+  PROFILE_ID="$(profile_value "$PROFILE_FILE" NGB_PROFILE_ID)"
+  TOKEN="$(profile_value "$PROFILE_FILE" NGB_TOKEN)"
+  say "-- Existing profile for this vault reused: $PROFILE_ID (token kept)."
+else
+  PROFILE_ID="p-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  PROFILE_FILE="$PROFILES_DIR/$PROFILE_ID.conf"
+  say "-- New profile for this vault: $PROFILE_ID (its own token)."
+fi
+cat > "$PROFILE_FILE" <<CONF
+NGB_PROFILE_FORMAT=1
+NGB_PROFILE_ID="$PROFILE_ID"
+NGB_REPO_DIR="$REPO_DIR"
+NGB_RUNTIME_DIR="$RUNTIME_DIR"
+NGB_TOKEN="$TOKEN"
+CONF
+chmod 600 "$PROFILE_FILE"
+OTHER_COUNT=$(( $(ls -1 "$PROFILES_DIR"/*.conf 2>/dev/null | wc -l) - 1 ))
+say "-- Runner installed to $CONF_DIR/runner.sh (profile chmod 600)."
+[ "$OTHER_COUNT" -gt 0 ] && say "-- $OTHER_COUNT other vault(s) stay paired; one runner drains them all."
+
+# 5b. Nested vaults: a vault opened INSIDE another vault's repository is its own
+# repository, and the outer one would otherwise offer the inner working tree for
+# staging. The exclusion goes into the OUTER repository's .git/info/exclude:
+# device-local (only this device has both vaults), never synced, and it never
+# touches a tracked file such as .gitignore.
+OUTER=""
+probe="$(dirname "$REPO_DIR")"
+while [ "$probe" != "/" ] && [ -n "$probe" ]; do
+  if [ -d "$probe/.git" ]; then OUTER="$probe"; break; fi
+  probe="$(dirname "$probe")"
+done
+if [ -n "$OUTER" ]; then
+  REL="${REPO_DIR#"$OUTER"/}"
+  OUTER_EXCLUDE="$OUTER/.git/info/exclude"
+  mkdir -p "$(dirname "$OUTER_EXCLUDE")"
+  if [ -s "$OUTER_EXCLUDE" ] && [ "$(tail -c 1 "$OUTER_EXCLUDE" | od -An -tx1 | tr -d ' \n')" != "0a" ]; then
+    printf '\n' >> "$OUTER_EXCLUDE"
+  fi
+  if grep -qxF "/$REL/" "$OUTER_EXCLUDE" 2>/dev/null; then
+    say "-- This vault sits inside the repository $OUTER; it is already excluded there."
+  else
+    printf '/%s\n' "$REL" >> "$OUTER_EXCLUDE"
+    say "-- This vault sits INSIDE another repository: $OUTER"
+    say "   Added '/$REL/' to $OUTER_EXCLUDE (local only, nothing tracked was changed),"
+    say "   so the outer repository never records this vault's files."
+  fi
+fi
+
+# 5c. Authentication - adapts to what you already use (PAT over HTTPS,
+# credential helper, or SSH) and is configured PER REPOSITORY, so two vaults can
+# use two different accounts. Credentials never leave Termux and never reach
+# the plugin, a result file or any log.
+CREDS_DIR="$CONF_DIR/creds"
+PROFILE_CREDS="$CREDS_DIR/$PROFILE_ID"
 REMOTE_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
 case "$REMOTE_URL" in
   https://*@*)
     say "-- HTTPS remote with credentials embedded in the URL detected."
     say "   This works, but the token then appears in .git/config."
-    if confirm "Move the token into the git credential store (~/.git-credentials, chmod 600) and clean the URL?"; then
+    if confirm "Move the token into this repository's own credential file (chmod 600) and clean the URL?"; then
       CREDS="${REMOTE_URL#https://}"; CREDS="${CREDS%%@*}"
       HOSTPATH="${REMOTE_URL#https://*@}"
       HOSTONLY="${HOSTPATH%%/*}"
-      printf 'https://%s@%s\n' "$CREDS" "$HOSTONLY" >> "$HOME/.git-credentials"
-      chmod 600 "$HOME/.git-credentials"
-      git -C "$REPO_DIR" config --local credential.helper store
+      mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"
+      printf 'https://%s@%s\n' "$CREDS" "$HOSTONLY" >> "$PROFILE_CREDS"
+      chmod 600 "$PROFILE_CREDS"
+      git -C "$REPO_DIR" config --local credential.helper "store --file=$PROFILE_CREDS"
       git -C "$REPO_DIR" remote set-url origin "https://$HOSTPATH"
-      say "-- Token moved to credential store; remote URL cleaned."
+      say "-- Token moved to $PROFILE_CREDS (this repository only); remote URL cleaned."
     else
       say "-- Left as is (the bridge redacts credentials from all logs and results)."
     fi
     ;;
   https://*)
-    HELPER="$(git -C "$REPO_DIR" config --get credential.helper 2>/dev/null || git config --global --get credential.helper 2>/dev/null || true)"
+    HELPER="$(git -C "$REPO_DIR" config --local --get credential.helper 2>/dev/null || true)"
     if [ -z "$HELPER" ]; then
-      say "-- HTTPS remote without a credential helper: pushes from the bridge would fail"
-      say "   (the runner never prompts interactively)."
-      if confirm "Enable the git credential store and cache your PAT on the next pull?"; then
-        git -C "$REPO_DIR" config --local credential.helper store
-        say "-- credential.helper=store set (repo-local). Run 'git pull' once in Termux and"
-        say "   enter your PAT as the password; it will be reused non-interactively afterwards."
+      GLOBAL_HELPER="$(git config --global --get credential.helper 2>/dev/null || true)"
+      say "-- HTTPS remote without a repository-local credential helper: pushes from the bridge"
+      say "   would fail or would silently use another vault's account (the runner never prompts)."
+      if confirm "Give this repository its own credential file ($PROFILE_CREDS)?"; then
+        mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"
+        : >> "$PROFILE_CREDS"; chmod 600 "$PROFILE_CREDS"
+        git -C "$REPO_DIR" config --local credential.helper "store --file=$PROFILE_CREDS"
+        say "-- credential.helper set for this repository only. Run 'git -C \"$REPO_DIR\" pull' once"
+        say "   in Termux and enter your PAT as the password; it is reused non-interactively after that."
+      elif [ -n "$GLOBAL_HELPER" ]; then
+        say "-- Falling back to the global credential helper '$GLOBAL_HELPER'."
       fi
     else
-      say "-- HTTPS remote with credential helper '$HELPER': OK, your PAT will be used."
+      say "-- HTTPS remote with a repository-local credential helper: OK, this vault's PAT will be used."
     fi
     ;;
   git@*|ssh://*)
-    if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+    SSH_KEY="$HOME/.ssh/id_ed25519"
+    LOCAL_SSH="$(git -C "$REPO_DIR" config --local --get core.sshCommand 2>/dev/null || true)"
+    if [ -n "$LOCAL_SSH" ]; then
+      say "-- SSH remote with a repository-local key configuration: OK."
+    elif [ ! -f "$SSH_KEY" ]; then
       mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"
-      ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/id_ed25519" -C "native-git-bridge@termux" >/dev/null
-      say "-- Generated SSH key ~/.ssh/id_ed25519 (add the public key to your repo):"
-      cat "$HOME/.ssh/id_ed25519.pub"
+      ssh-keygen -t ed25519 -N "" -f "$SSH_KEY" -C "native-git-bridge@termux" >/dev/null
+      say "-- Generated SSH key $SSH_KEY (add the public key to your repository):"
+      cat "$SSH_KEY.pub"
     else
-      say "-- SSH remote with existing key: OK."
+      say "-- SSH remote with an existing key: OK."
+      if [ "$OTHER_COUNT" -gt 0 ] || [ "$WITH_SSH" = true ]; then
+        if confirm "Use a SEPARATE ssh key for this vault (needed for a different account)?"; then
+          NEWKEY="$HOME/.ssh/ngb-$PROFILE_ID"
+          [ -f "$NEWKEY" ] || ssh-keygen -t ed25519 -N "" -f "$NEWKEY" -C "native-git-bridge@termux ($PROFILE_ID)" >/dev/null
+          git -C "$REPO_DIR" config --local core.sshCommand "ssh -i $NEWKEY -o IdentitiesOnly=yes"
+          say "-- This repository now uses $NEWKEY. Add the public key to that account:"
+          cat "$NEWKEY.pub"
+        fi
+      fi
     fi
     ;;
   "")
@@ -194,35 +306,6 @@ if [ -n "$REMOTE_URL" ]; then
     say "   to fetch/push until credentials work without a prompt (expired PAT? missing helper?)."
   fi
 fi
-
-# 5. Install runner + config + token.
-CONF_DIR="$HOME/.config/native-git-bridge"
-mkdir -p "$CONF_DIR"
-chmod 700 "$CONF_DIR"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNNER_SRC="$SCRIPT_DIR/native-git-bridge-runner.sh"
-[ -f "$RUNNER_SRC" ] || fail "runner script not found next to installer: $RUNNER_SRC"
-cp "$RUNNER_SRC" "$CONF_DIR/runner.sh"
-chmod 700 "$CONF_DIR/runner.sh"
-
-TOKEN=""
-if [ -f "$CONF_DIR/config" ]; then
-  # shellcheck disable=SC1091
-  . "$CONF_DIR/config" 2>/dev/null || true
-  TOKEN="${NGB_TOKEN:-}"
-fi
-if [ -z "$TOKEN" ]; then
-  TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-fi
-RUNTIME_DIR="$REPO_DIR/.obsidian/plugins/native-git-bridge/runtime"
-cat > "$CONF_DIR/config" <<CONF
-NGB_REPO_DIR="$REPO_DIR"
-NGB_TOKEN="$TOKEN"
-NGB_RUNTIME_DIR="$RUNTIME_DIR"
-CONF
-chmod 600 "$CONF_DIR/config"
-say "-- Runner installed to $CONF_DIR/runner.sh (config chmod 600)."
 
 # 6. Exclude the runtime dir locally (never synced).
 GIT_DIR_PATH="$(git -C "$REPO_DIR" rev-parse --git-dir)"
@@ -259,7 +342,7 @@ fi
 # so the token never has to be copied by hand. (It transits vault storage once;
 # same trust boundary as the request files themselves.)
 cat > "$RUNTIME_DIR/pairing.json" <<PAIR
-{"token":"$TOKEN","repoPath":"$REPO_DIR","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"token":"$TOKEN","repoPath":"$REPO_DIR","profileId":"$PROFILE_ID","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 PAIR
 say "-- Pairing file written; the Obsidian plugin will import the token automatically."
 
@@ -274,5 +357,8 @@ say "3. Authentication: whatever you already use in Termux (PAT via credential h
 say "   token in URL, or SSH key) keeps working - see the auth check result above."
 say ""
 say "Manual pairing token (only needed if auto-import fails): $TOKEN"
+say "Profile for this vault: $PROFILE_ID  ($PROFILE_FILE)"
 say "Note: nothing runs in the background; the runner executes only when triggered."
 say "Recovery: you can always run it by hand with  ~/.config/native-git-bridge/runner.sh"
+say "Another vault? Run the same command with its path; each vault gets its own"
+say "profile and token, and one runner drains them all."

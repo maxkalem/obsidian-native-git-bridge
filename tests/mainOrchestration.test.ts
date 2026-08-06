@@ -433,6 +433,115 @@ describe("runOperation round trip through the transport seam", () => {
   });
 });
 
+describe("several vaults on one device (profiles)", () => {
+  it("names its profile in every request once it knows it", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ profileId: "p-0011223344556677" });
+    h.useFastClient();
+    let sent: Any = null;
+    h.runner.onTrigger = (id) => {
+      sent = JSON.parse(h.adapter.files.get(paths.requestFile(id))!);
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, RUNNER_MIN_VERSION));
+    };
+    await h.plugin.cmdStatus(true);
+    expect(sent.profileId).toBe("p-0011223344556677");
+    // Still no repository path anywhere in the request: the runner looks the
+    // profile up, it never accepts a directory from the plugin.
+    expect(JSON.stringify(sent)).not.toContain("/storage/");
+  });
+
+  it("omits the profile field while this vault has not learned its id", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let sent: Any = null;
+    h.runner.onTrigger = (id) => {
+      sent = JSON.parse(h.adapter.files.get(paths.requestFile(id))!);
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, RUNNER_MIN_VERSION));
+    };
+    await h.plugin.cmdStatus(true);
+    expect("profileId" in sent).toBe(false);
+  });
+
+  it("learns its profile from the first result that carries one", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id) => {
+      const r = JSON.parse(okStatusResult(id, RUNNER_MIN_VERSION));
+      r.profileId = "p-aabbccdd11223344";
+      h.adapter.files.set(paths.resultFile(id), JSON.stringify(r));
+    };
+    await h.plugin.cmdStatus(true);
+    expect(h.plugin.deviceSettings.profileId).toBe("p-aabbccdd11223344");
+  });
+
+  it("never re-points itself at a different profile", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ profileId: "p-0011223344556677" });
+    h.useFastClient();
+    h.runner.onTrigger = (id) => {
+      const r = JSON.parse(okStatusResult(id, RUNNER_MIN_VERSION));
+      r.profileId = "p-ffffffffffffffff";
+      h.adapter.files.set(paths.resultFile(id), JSON.stringify(r));
+    };
+    await h.plugin.cmdStatus(true);
+    expect(h.plugin.deviceSettings.profileId).toBe("p-0011223344556677");
+  });
+
+  it("imports the profile id together with the token from a pairing file", async () => {
+    const h = await loadPlugin();
+    h.adapter.files.set(
+      `${paths.root}/pairing.json`,
+      JSON.stringify({
+        token: "b1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6",
+        repoPath: "/storage/emulated/0/Work",
+        profileId: "p-1234567890abcdef",
+      })
+    );
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.plugin.deviceSettings.authToken).toBe("b1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6");
+    expect(h.plugin.deviceSettings.profileId).toBe("p-1234567890abcdef");
+    expect(h.adapter.files.has(`${paths.root}/pairing.json`)).toBe(false);
+  });
+
+  it("asks Termux for a profile of its own: claim out, pairing in, no secret sent", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    await h.plugin.updateDeviceSettings({ enabledOnThisDevice: true, termuxIntegrationEnabled: true });
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 200;
+    h.runner.onTrigger = () => {
+      // What the claim file may contain: no token, no path of ours.
+      const claim = JSON.parse(h.adapter.files.get(`${paths.root}/claim.json`)!);
+      expect(claim.token).toBeUndefined();
+      // Termux answers with a token IT generated.
+      h.adapter.files.set(
+        `${paths.root}/pairing.json`,
+        JSON.stringify({ token: "c1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6", profileId: "p-5566778899aabbcc" })
+      );
+    };
+    await h.plugin.cmdPairThisVault();
+    expect(h.runner.uris.some((u) => u.startsWith("nativegitbridge://run?id="))).toBe(true);
+    expect(h.plugin.deviceSettings.authToken).toBe("c1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6");
+    expect(h.plugin.deviceSettings.profileId).toBe("p-5566778899aabbcc");
+    expect(h.adapter.files.has(`${paths.root}/claim.json`)).toBe(false);
+  });
+
+  it("leaves the pairing request in place when Termux does not answer", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 20;
+    await h.plugin.cmdPairThisVault();
+    expect(h.adapter.files.has(`${paths.root}/claim.json`)).toBe(true);
+    expect(h.plugin.deviceSettings.authToken).toBe("");
+  });
+});
+
 describe("startup reconciliation", () => {
   it("consumes a result that arrived while Obsidian was closed", async () => {
     const h = await loadPlugin();

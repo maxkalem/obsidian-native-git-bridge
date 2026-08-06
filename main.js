@@ -645,7 +645,7 @@ var import_obsidian16 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 9;
+var RUNNER_MIN_VERSION = 10;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -668,6 +668,8 @@ function bootstrapCommand(pluginVersion, repoPathHint) {
   return repoPathHint ? `${cmd} "${repoPathHint}"` : cmd;
 }
 var PAIRING_FILE = "pairing.json";
+var CLAIM_FILE = "claim.json";
+var PAIRING_WAIT_MS = 2e4;
 var COMPANION_SETUP_URI = "nativegitbridge://setup";
 var COMPANION_RELEASES_URL = "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
 var COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
@@ -715,6 +717,7 @@ var DEFAULT_DEVICE_SETTINGS = {
   termuxIntegrationEnabled: false,
   repoPathHint: "",
   authToken: "",
+  profileId: "",
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
   derivedProtectedPaths: [],
   autoProtectSparse: true,
@@ -1358,6 +1361,11 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
         })();
       });
     });
+    new import_obsidian4.Setting(containerEl).setName("Profile for this vault").setDesc(
+      s.profileId ? `Termux serves this vault as ${s.profileId}. Every vault on the device has its own profile and its own token; one runner drains them all.` : "This vault has no Termux profile yet. Pairing asks the runner for one; it generates the token in Termux and answers with it."
+    ).addButton(
+      (b) => b.setButtonText(s.profileId ? "Pair again" : "Pair this vault").onClick(() => void this.plugin.cmdPairThisVault())
+    );
     new import_obsidian4.Setting(containerEl).setName("Repository path (informational)").setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.").addText(
       (t) => t.setValue(s.repoPathHint).onChange((v) => {
         void (async () => {
@@ -1729,10 +1737,10 @@ function randomSuffix(len = 6) {
   for (const b of arr) s += alphabet[b % alphabet.length];
   return s;
 }
-function createRequest(action, args, token, timeoutSeconds, now = /* @__PURE__ */ new Date(), rand = randomSuffix()) {
+function createRequest(action, args, token, timeoutSeconds, now = /* @__PURE__ */ new Date(), rand = randomSuffix(), profileId = "") {
   const id = makeRequestId(now, rand);
   if (!isValidRequestId(id)) throw new Error(`Generated invalid request id: ${id}`);
-  return {
+  const req = {
     protocolVersion: PROTOCOL_VERSION,
     id,
     token,
@@ -1741,6 +1749,11 @@ function createRequest(action, args, token, timeoutSeconds, now = /* @__PURE__ *
     timeoutSeconds,
     args
   };
+  if (isValidProfileId(profileId)) req.profileId = profileId;
+  return req;
+}
+function isValidProfileId(id) {
+  return /^p-[0-9a-f]{8,32}$/.test(id);
 }
 function serializeRequest(req) {
   return JSON.stringify(req, null, 2);
@@ -2452,6 +2465,7 @@ var ConflictModal = class extends import_obsidian7.Modal {
 
 // src/settings/pairing.ts
 var TOKEN_RE = /^[A-Za-z0-9]{16,128}$/;
+var PROFILE_RE = /^p-[0-9a-f]{8,32}$/;
 function parsePairingFile(text) {
   let obj;
   try {
@@ -2464,6 +2478,7 @@ function parsePairingFile(text) {
   if (typeof r.token !== "string" || !TOKEN_RE.test(r.token)) return null;
   const out = { token: r.token };
   if (typeof r.repoPath === "string" && r.repoPath.length < 4096) out.repoPath = r.repoPath;
+  if (typeof r.profileId === "string" && PROFILE_RE.test(r.profileId)) out.profileId = r.profileId;
   if (typeof r.createdAt === "string") out.createdAt = r.createdAt;
   return out;
 }
@@ -6268,7 +6283,7 @@ function wrapRow(bar, sibling) {
 
 // src/bridge/selfCheck.ts
 var LOG_TAIL_BYTES = 4e3;
-async function runSelfCheck(fs, paths, hasQueuedTimeout) {
+async function runSelfCheck(fs, paths, hasQueuedTimeout, profileId = "") {
   const runtimeDirExists = await safeExists(fs, paths.root);
   const queuedRequests = runtimeDirExists && await safeExists(fs, paths.requestsDir) ? (await safeList(fs, paths.requestsDir)).filter((f) => f.endsWith(".json")).map(baseName) : [];
   const logPath = `${paths.root}/runner.log`;
@@ -6283,12 +6298,22 @@ async function runSelfCheck(fs, paths, hasQueuedTimeout) {
     }
   }
   const pairingFilePresent = await safeExists(fs, `${paths.root}/pairing.json`);
+  const claimPending = await safeExists(fs, `${paths.root}/claim.json`);
+  let markerProfileId = "";
+  try {
+    const raw = await fs.read(`${paths.root}/profile.json`);
+    const parsed = JSON.parse(raw);
+    if (typeof parsed.profileId === "string") markerProfileId = parsed.profileId;
+  } catch {
+  }
   let verdict;
   let ok = false;
   if (!runtimeDirExists) {
     verdict = "The runtime folder does not exist yet. Run a command once (it is created automatically), or complete the Termux setup.";
   } else if (!runnerLogExists) {
-    verdict = "No runner.log in this vault's runtime folder \u2014 the Termux runner has never written here. Most likely the installer configured a DIFFERENT folder (another vault or path spelling). Fix: in Termux run  cat ~/.config/native-git-bridge/config  and compare NGB_RUNTIME_DIR with the path shown below; re-run the install command with the correct vault path if they differ.";
+    verdict = claimPending ? "This vault is waiting to be paired: the pairing request is still lying here, so Termux has not run yet. Open Termux (or tap 'Pair this vault' again) \u2014 the runner picks the request up on its next run." : "No runner.log in this vault's runtime folder \u2014 the Termux runner has never written here, so no profile points at THIS vault. Fix: run the install command below in Termux with this vault's path (each vault gets its own profile and token; other vaults keep working), or use 'Pair this vault' if Termux is already set up.";
+  } else if (markerProfileId && profileId && markerProfileId !== profileId) {
+    verdict = `This vault is paired with profile ${profileId}, but the runner last wrote profile ${markerProfileId} here. Re-run the install command for this vault to get the two back in step.`;
   } else if (hasQueuedTimeout && queuedRequests.length > 0) {
     verdict = "The runner has written here before, but your request is still queued. Either the runner was not triggered (companion permission / allow-external-apps), or it stopped before processing the queue \u2014 see the log tail below.";
   } else if (queuedRequests.length > 0) {
@@ -6303,6 +6328,9 @@ async function runSelfCheck(fs, paths, hasQueuedTimeout) {
     runnerLogExists,
     runnerLogTail,
     pairingFilePresent,
+    profileId,
+    markerProfileId,
+    claimPending,
     verdict,
     ok
   };
@@ -6351,6 +6379,20 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.lastStatus = null;
     this.lastAutoSyncMs = 0;
     this.statusPollId = null;
+    /**
+     * Ask Termux to pair THIS vault, without re-running the installer.
+     *
+     * The trigger the companion sends is fixed and carries no vault identity, so
+     * the request goes the other way: the plugin drops a claim file into its own
+     * runtime folder and triggers a runner run. The runner, when it has nothing
+     * else to do, finds the claim, verifies the folder really is a repository of
+     * its own, generates the token IN TERMUX and answers with a pairing file.
+     * Nothing secret leaves Termux, and nothing the claim contains is trusted.
+     *
+     * Poll interval and budget are fields so tests can shrink them.
+     */
+    this.pairingPollMs = 500;
+    this.pairingWaitMs = PAIRING_WAIT_MS;
     /**
      * Warn once per session when the Termux-side runner predates this plugin
      * build. Updating main.js in the vault does not touch the runner script, so a
@@ -6875,6 +6917,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         await this.updateDeviceSettings({
           authToken: pairing.token,
           repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
+          profileId: pairing.profileId ?? this.deviceSettings.profileId,
           termuxIntegrationEnabled: true
         });
         try {
@@ -6907,6 +6950,92 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     } catch (e) {
       this.log.add("warn", "pairing", `Pairing import failed: ${String(e)}`);
     }
+  }
+  /**
+   * A result names the profile that answered. The first one teaches this vault
+   * its own id; after that the id travels in every request and the runner
+   * rejects anything that names a different profile. A mismatch is never
+   * silently adopted — that would be the plugin re-pointing itself at another
+   * vault's repository.
+   */
+  async learnProfileId(result) {
+    const id = typeof result.profileId === "string" ? result.profileId : "";
+    if (!isValidProfileId(id)) return;
+    const current = this.deviceSettings.profileId;
+    if (current === id) return;
+    if (current === "") {
+      await this.updateDeviceSettings({ profileId: id });
+      this.log.add("info", "pairing", `This vault is served by profile ${id}.`);
+      return;
+    }
+    this.log.add(
+      "warn",
+      "pairing",
+      `A result came back from profile ${id}, but this vault is paired with ${current}. Keeping ${current}; re-run the installer if the vault was re-paired.`
+    );
+  }
+  async cmdPairThisVault() {
+    if (!import_obsidian16.Platform.isAndroidApp) {
+      new import_obsidian16.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return;
+    }
+    const adapter = this.app.vault.adapter;
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const claimPath = `${root}/${CLAIM_FILE}`;
+    const pairingPath = `${root}/${PAIRING_FILE}`;
+    try {
+      await this.client.ensureRuntimeDirs();
+      await adapter.write(
+        claimPath,
+        JSON.stringify({ createdAt: (/* @__PURE__ */ new Date()).toISOString(), vault: this.app.vault.getName() }, null, 2)
+      );
+    } catch (e) {
+      new ResultModal(this.app, "Pairing failed", [`The pairing request could not be written: ${String(e)}`], {
+        isError: true
+      }).open();
+      return;
+    }
+    this.log.add("info", "pairing", "Pairing request written; asking Termux to pick it up.");
+    this.makeTransport().trigger(`r-${(/* @__PURE__ */ new Date()).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}-pair`);
+    new import_obsidian16.Notice("Asked Termux to pair this vault\u2026");
+    const deadline = Date.now() + this.pairingWaitMs;
+    for (; ; ) {
+      await new Promise((r) => window.setTimeout(r, this.pairingPollMs));
+      if (await adapter.exists(pairingPath)) {
+        await this.tryImportPairing();
+        if (this.deviceSettings.authToken) {
+          try {
+            if (await adapter.exists(claimPath)) await adapter.remove(claimPath);
+          } catch {
+          }
+          new ResultModal(this.app, "This vault is paired", [
+            `Profile: ${this.deviceSettings.profileId || "(unnamed)"}`,
+            "Termux answered with a token of its own for this vault. Other vaults keep their own profiles and tokens."
+          ]).open();
+          return;
+        }
+      }
+      if (Date.now() >= deadline) break;
+    }
+    new ResultModal(
+      this.app,
+      "No answer from Termux yet",
+      [
+        "The pairing request is written and stays there; the runner picks it up on its next run.",
+        "If nothing happens: Termux must be installed and the runner already set up once (the install command below does that), and the companion app needs its RUN_COMMAND permission."
+      ],
+      {
+        isError: true,
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            cta: true,
+            keepOpen: true,
+            onClick: () => this.copyCommandAndOpenTermux()
+          }
+        ]
+      }
+    ).open();
   }
   async reconcileAfterRestart() {
     const raw = this.store.getValue(MARKER_KEY);
@@ -7003,6 +7132,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       { id: "bridge-self-check", name: "Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "open-companion-setup", name: "Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
+      { id: "pair-this-vault", name: "Pair this vault with Termux", cb: () => void this.cmdPairThisVault() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -7056,7 +7186,15 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       ).open();
       return null;
     }
-    const req = createRequest(action, args, s.authToken, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS);
+    const req = createRequest(
+      action,
+      args,
+      s.authToken,
+      s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+      /* @__PURE__ */ new Date(),
+      randomSuffix(),
+      s.profileId
+    );
     const mutating = MUTATING_ACTIONS.has(action);
     if (mutating && !this.lock.tryAcquire(req.id, action)) {
       new import_obsidian16.Notice(`Another operation is running (${this.lock.active?.action}). Try again later.`);
@@ -7116,6 +7254,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       const result = waited.result;
       await this.client.consume(req.id);
       this.checkRunnerVersion(result);
+      await this.learnProfileId(result);
       this.log.add(
         result.ok ? "info" : "error",
         action,
@@ -8151,6 +8290,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       `Enabled here: ${s.enabledOnThisDevice ? "yes" : "NO (turn it on in settings)"}`,
       `Termux integration: ${s.termuxIntegrationEnabled ? "on" : "OFF (turn it on in settings)"}`,
       `Paired with a runner: ${s.authToken ? "yes" : "NO (step 3 pairs it automatically)"}`,
+      `Profile for this vault: ${s.profileId || "none yet"}`,
       `Companion seen so far: ${this.lastCompanionAckMs > 0 ? "yes" : "not yet"}`,
       `Termux installed: ${this.lastAckTermuxInstalled === null ? "unknown (the companion reports this)" : this.lastAckTermuxInstalled ? "yes" : "NO"}`
     ];
@@ -8180,6 +8320,13 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         onClick: () => this.copyCommandAndOpenTermux()
       }
     ];
+    if (!s.authToken) {
+      actions.splice(actions.length - 1, 0, {
+        label: "Pair this vault",
+        keepOpen: true,
+        onClick: () => void this.cmdPairThisVault()
+      });
+    }
     if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled) {
       actions.unshift({
         label: "Enable on this device",
@@ -8253,7 +8400,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   async cmdSelfCheck(timedOut = false) {
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
-    const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut);
+    const report = await runSelfCheck(this.makeRuntimeFS(), paths, timedOut, this.deviceSettings.profileId);
     const outdated = /ERROR building result for [^(]*$/m.test(report.runnerLogTail);
     const lines = [report.verdict];
     if (outdated) {
@@ -8262,7 +8409,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     lines.push(
       "",
       `Runtime folder (as the plugin sees it): ${paths.root}`,
-      `Runner has written here: ${report.runnerLogExists ? "yes" : "NO"}`,
+      `Profile for this vault: ${report.profileId || "none yet"}${report.markerProfileId && report.markerProfileId !== report.profileId ? ` (the runner wrote ${report.markerProfileId} here)` : ""}`,
+      `Runner has written into THIS vault's runtime folder: ${report.runnerLogExists ? "yes" : "NO"}`,
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
       `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
     );
@@ -8599,6 +8747,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     report.pluginSide["Enabled on this device"] = String(s.enabledOnThisDevice);
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
+    report.pluginSide["Profile for this vault"] = s.profileId || "(none yet)";
     report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Protected paths (derived from sparse)"] = (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";
     report.pluginSide["Protected paths (effective)"] = this.effectiveProtectedPaths().join(", ") || "(none)";

@@ -7,6 +7,12 @@ export interface SelfCheckReport {
   runnerLogExists: boolean;
   runnerLogTail: string;
   pairingFilePresent: boolean;
+  /** Profile this vault believes it is paired with (device-local setting). */
+  profileId: string;
+  /** Profile id the runner wrote into this runtime directory, if any. */
+  markerProfileId: string;
+  /** Waiting to be paired: a claim file is present and unanswered. */
+  claimPending: boolean;
   /** Human verdict describing the most likely cause when something is wrong. */
   verdict: string;
   ok: boolean;
@@ -26,7 +32,8 @@ const LOG_TAIL_BYTES = 4000;
 export async function runSelfCheck(
   fs: RuntimeFS,
   paths: RuntimePaths,
-  hasQueuedTimeout: boolean
+  hasQueuedTimeout: boolean,
+  profileId = ""
 ): Promise<SelfCheckReport> {
   const runtimeDirExists = await safeExists(fs, paths.root);
   const queuedRequests = runtimeDirExists && (await safeExists(fs, paths.requestsDir))
@@ -44,6 +51,15 @@ export async function runSelfCheck(
     }
   }
   const pairingFilePresent = await safeExists(fs, `${paths.root}/pairing.json`);
+  const claimPending = await safeExists(fs, `${paths.root}/claim.json`);
+  let markerProfileId = "";
+  try {
+    const raw = await fs.read(`${paths.root}/profile.json`);
+    const parsed = JSON.parse(raw) as { profileId?: unknown };
+    if (typeof parsed.profileId === "string") markerProfileId = parsed.profileId;
+  } catch {
+    /* absent or unreadable: the runner has not claimed this folder */
+  }
 
   let verdict: string;
   let ok = false;
@@ -52,11 +68,20 @@ export async function runSelfCheck(
       "The runtime folder does not exist yet. Run a command once (it is created automatically), " +
       "or complete the Termux setup.";
   } else if (!runnerLogExists) {
+    // The runner writes into the runtime folder of every profile it knows. No
+    // log here means no profile points at THIS vault — which is the normal
+    // state of a second vault that was never paired, not a broken install.
+    verdict = claimPending
+      ? "This vault is waiting to be paired: the pairing request is still lying here, so Termux has not " +
+        "run yet. Open Termux (or tap 'Pair this vault' again) — the runner picks the request up on its next run."
+      : "No runner.log in this vault's runtime folder — the Termux runner has never written here, so " +
+        "no profile points at THIS vault. Fix: run the install command below in Termux with this vault's path " +
+        "(each vault gets its own profile and token; other vaults keep working), or use 'Pair this vault' " +
+        "if Termux is already set up.";
+  } else if (markerProfileId && profileId && markerProfileId !== profileId) {
     verdict =
-      "No runner.log in this vault's runtime folder — the Termux runner has never written here. " +
-      "Most likely the installer configured a DIFFERENT folder (another vault or path spelling). " +
-      "Fix: in Termux run  cat ~/.config/native-git-bridge/config  and compare NGB_RUNTIME_DIR with the " +
-      "path shown below; re-run the install command with the correct vault path if they differ.";
+      `This vault is paired with profile ${profileId}, but the runner last wrote profile ${markerProfileId} here. ` +
+      "Re-run the install command for this vault to get the two back in step.";
   } else if (hasQueuedTimeout && queuedRequests.length > 0) {
     verdict =
       "The runner has written here before, but your request is still queued. Either the runner was not " +
@@ -74,6 +99,9 @@ export async function runSelfCheck(
     runnerLogExists,
     runnerLogTail,
     pairingFilePresent,
+    profileId,
+    markerProfileId,
+    claimPending,
     verdict,
     ok,
   };

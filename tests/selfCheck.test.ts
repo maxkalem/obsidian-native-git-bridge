@@ -36,7 +36,7 @@ describe("runSelfCheck", () => {
     expect(r.queuedRequests).toEqual([]);
   });
 
-  it("detects the runtime-dir mismatch (no runner.log here at all)", async () => {
+  it("detects that no profile points at this vault (no runner.log here at all)", async () => {
     const r = await runSelfCheck(
       fsWith({ [`${paths.requestsDir}/r-20260804T100000Z-a.json`]: "{}" }),
       paths,
@@ -44,7 +44,47 @@ describe("runSelfCheck", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.runnerLogExists).toBe(false);
-    expect(r.verdict).toContain("DIFFERENT folder");
+    expect(r.verdict).toContain("no profile points at THIS vault");
+    expect(r.verdict).toContain("Pair this vault");
+  });
+
+  it("reports a pairing request that Termux has not answered yet", async () => {
+    const r = await runSelfCheck(
+      fsWith({ [`${paths.root}/claim.json`]: '{"createdAt":"2026-08-05T10:00:00Z"}' }),
+      paths,
+      false
+    );
+    expect(r.claimPending).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.verdict).toContain("waiting to be paired");
+  });
+
+  it("reads the profile marker the runner left behind", async () => {
+    const r = await runSelfCheck(
+      fsWith({
+        [`${paths.root}/runner.log`]: "RUN\n",
+        [`${paths.root}/profile.json`]: '{"profileId":"p-0011223344556677","repoDir":"/x"}',
+      }),
+      paths,
+      false,
+      "p-0011223344556677"
+    );
+    expect(r.markerProfileId).toBe("p-0011223344556677");
+    expect(r.ok).toBe(true);
+  });
+
+  it("flags a vault whose runtime folder is served by a different profile", async () => {
+    const r = await runSelfCheck(
+      fsWith({
+        [`${paths.root}/runner.log`]: "RUN\n",
+        [`${paths.root}/profile.json`]: '{"profileId":"p-aaaaaaaabbbbbbbb","repoDir":"/x"}',
+      }),
+      paths,
+      false,
+      "p-0011223344556677"
+    );
+    expect(r.ok).toBe(false);
+    expect(r.verdict).toContain("p-aaaaaaaabbbbbbbb");
   });
 
   it("detects a stuck queue when the runner has written before", async () => {

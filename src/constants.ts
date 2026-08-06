@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 9;
+export const RUNNER_MIN_VERSION = 10;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).
@@ -54,6 +54,19 @@ export function bootstrapCommand(pluginVersion: string, repoPathHint: string): s
   return repoPathHint ? `${cmd} "${repoPathHint}"` : cmd;
 }
 export const PAIRING_FILE = "pairing.json";
+
+/**
+ * Written by this vault when it has no profile yet, read by the runner on an
+ * otherwise idle run: it asks Termux to pair THIS vault. It carries no secret —
+ * the token is generated in Termux and comes back in pairing.json.
+ */
+export const CLAIM_FILE = "claim.json";
+
+/** Written by the runner; ties this runtime directory to a profile id. */
+export const PROFILE_MARKER_FILE = "profile.json";
+
+/** How long the plugin waits for Termux to answer a pairing request. */
+export const PAIRING_WAIT_MS = 20000;
 
 /** Opens the companion app's setup checklist (permission + Termux + round trip). */
 export const COMPANION_SETUP_URI = "nativegitbridge://setup";
