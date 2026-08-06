@@ -18,7 +18,7 @@ A pure Obsidian plugin **cannot** trigger Termux: sending Termux's `RUN_COMMAND`
 - the URI it receives carries a **request id** and display-only version numbers, never the pairing token and never command content;
 - it installs nothing and holds no vault access.
 
-Rationale and the rejected alternatives (local HTTP server, Termux:Widget taps, Tasker) are in [ADR-001](ADR-001-android-invocation.md).
+Rationale and the rejected alternatives (local HTTP server, [Termux:Widget](https://github.com/termux/termux-widget) taps, Tasker) are in [ADR-001](ADR-001-android-invocation.md).
 
 ## Nothing runs in the background
 
@@ -81,7 +81,7 @@ Full model, including accepted residual risks and a dated review log: [threat-mo
 
 ## Testing
 
-`npm test` runs 182 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 194 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches and an expired PAT.
+`npm test` runs 229 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 221 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches and an expired PAT.
 
 What is **not** machine-verified: there is no Android device or emulator in CI. The APK builds are verified; RUN_COMMAND forwarding, storage permissions and the Termux round trip are verified by hand on a device. That is also why the companion ships a three-step verified checklist.
 

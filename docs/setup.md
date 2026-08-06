@@ -46,9 +46,11 @@ Authentication stays entirely in Termux: an existing PAT via credential helper, 
 
 ## Step 5: verify
 
-Run *Native Git: Status* from the command palette or the sidebar panel. The first round trip confirms the whole chain. If nothing comes back, run *Native Git: Check bridge*. It diagnoses locally (runner never ran here / outdated runner / stuck requests) without waiting for a timeout.
+Run *Native Git Bridge: Status* from the command palette or the sidebar panel. The first round trip confirms the whole chain. If nothing comes back, run *Native Git Bridge: Check bridge*. It diagnoses locally (runner never ran here / outdated runner / stuck requests) without waiting for a timeout.
 
 Once status works, everything else does too. Tapping a changed file opens its diff in a pane (a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`). The two buttons on the right of the operation strip switch the file list between **list and tree layout** and open the **repository history**, where commits expand into their changed files and each file opens the diff that commit introduced. Conflicted files are marked with a warning icon and open conflict resolution (see [troubleshooting.md](troubleshooting.md#conflict-merge-conflicts)).
+
+Long-pressing (or right-clicking) a row, a folder or a group header opens the Git menu for that target; on a single file it also offers **Open file history**, a panel that lists the commits that touched the file, says what each did to it, and can restore the whole file or one block of it.
 
 Worth a look in the settings: wrap long diff lines, show invisible characters, show raw conflict markers, and an optional auto-refresh interval for the status panel (off by default, since each refresh wakes Termux).
 

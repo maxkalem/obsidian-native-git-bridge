@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Every failed operation shows an error code. Find yours below. When in doubt, run *Native Git: Check bridge* (local, instant) and *Native Git: Diagnostics* (full Termux round trip), and check the operation log (Settings → Native Git Bridge → Advanced → Operation log, or the *Open operation log* command).
+Every failed operation shows an error code. Find yours below. When in doubt, run *Native Git Bridge: Check bridge* (local, instant) and *Native Git Bridge: Diagnostics* (full Termux round trip), and check the operation log (Settings → Native Git Bridge → Advanced → Operation log, or the *Open operation log* command).
 
 ## TIMEOUT: the plugin stopped waiting
 
@@ -24,7 +24,7 @@ The plugin and the runner hold different tokens (usually after re-running the in
 
 ## SAFETY_BLOCKED: sparse checkout safety check failed
 
-The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git: Verify sparse safety* to see the exact entries, then *Native Git: Reapply sparse checkout*. If entries remain staged, unstage them in Termux (`git restore --staged -- <path>`), then verify again. The bridge never auto-repairs here by design.
+The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*. If entries remain staged, unstage them in Termux (`git restore --staged -- <path>`), then verify again. The bridge never auto-repairs here by design.
 
 ## CONFLICT: merge conflicts
 
@@ -33,7 +33,7 @@ A pull/sync produced conflicting files; nothing was committed or pushed. The Con
 - **Tap a conflicted text file** → the resolution pane: every conflict block shows *LOCAL (yours)* against *REMOTE (branch or commit)* with a Keep button per block. Blocks you leave unresolved are rewritten with Obsidian-safe markers (`-<<<<<<<` / `-=======` / `->>>>>>>`) so the note still renders sanely; both marker forms are understood. Settings → *Show raw conflict markers* switches between hiding the marker lines under the action rows and showing them as real lines.
 - **Tap a conflicted binary file** (or long-press any conflicted row) → the Git menu: *keep local version*, *keep remote version* (whole file, confirmed), or *Open in default app* to inspect it first.
 - Resolve the file in the editor yourself and stage it.
-- *Native Git: Abort merge* returns to the pre-merge state.
+- *Native Git Bridge: Abort merge* returns to the pre-merge state.
 
 When every conflict is resolved, **Commit** prefills git's own merge message (`Merge branch … # Conflicts: …`) and **Sync** uses it automatically.
 
@@ -69,6 +69,14 @@ You cancelled, or a timed-out request was later archived. Nothing was executed (
 ## FILE_ABSENT / TOO_LARGE (history views)
 
 The file does not exist at that commit (rename? use the file history view, which follows renames), or is beyond the 1 MB view limit at that commit.
+
+## Restoring one block from the file history did nothing
+
+The file-history panel restores a block only when the current file still contains it exactly as it was before or after that commit. If the note has drifted since, the plugin refuses instead of guessing where the block belongs, and says so. Restore the whole file version from that commit, or copy the lines by hand from the expanded diff.
+
+## A move shows as a deletion plus an untracked file
+
+That is git, not the panel. Rename detection compares the index, so a file moved in the working tree is a deletion and a new untracked file until the change is staged; `git status --find-renames` does not change it. Stage both halves (the "+" buttons on the Changes and Untracked groups, or Stage all) and the two rows collapse into one "renamed" row that shows the old path.
 
 ## Still stuck
 

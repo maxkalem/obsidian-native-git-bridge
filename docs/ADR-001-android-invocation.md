@@ -17,13 +17,13 @@ Native Git lives inside Termux. Termux offers exactly one supported programmatic
    - Obsidian's manifest does not declare this permission. An Obsidian plugin cannot add manifest entries. **Therefore a pure Obsidian plugin cannot send RUN_COMMAND.**
    - Android does not allow starting a *service* from an `intent:` URI opened by a WebView/browser (`Intent.parseUri` results are delivered via `startActivity` only). So an `intent://…RunCommandService` URL is not a workaround.
 
-2. **Termux:Widget** (termux-widget README, v0.15.0):
+2. **[Termux:Widget](https://github.com/termux/termux-widget)** (termux-widget README, v0.15.0):
    - Scripts in `~/.shortcuts/tasks/` run as **background tasks in Termux** when the user taps a home-screen widget entry, a pinned launcher shortcut, or a dynamic shortcut. No extra permission on the calling side; the tap *is* the authorization.
    - Fully documented; requires no third-party app.
 
-3. **obsidian-git README** (Vinzent03/obsidian-git, master): mobile backend is isomorphic-git, explicitly described as "very unstable"; "It is not possible for an Obsidian plugin to use a native Git installation on Android or iOS" (i.e. not possible *in-process*, which is why this project delegates to Termux).
+3. **[obsidian-git](https://github.com/Vinzent03/obsidian-git) README** (Vinzent03/obsidian-git, master): mobile backend is isomorphic-git, explicitly described as "very unstable"; "It is not possible for an Obsidian plugin to use a native Git installation on Android or iOS" (i.e. not possible *in-process*, which is why this project delegates to Termux).
 
-4. **Version History Diff** (kometenstaub/obsidian-version-history-diff): MIT licensed. Its README states it "uses private APIs" and credits Vinzent03 "for creating the necessary APIs in the Obsidian Git plugin", i.e. it consumes obsidian-git's plugin instance directly; there is **no documented provider-registration API**.
+4. **[Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff)** (kometenstaub/obsidian-version-history-diff): MIT licensed. Its README states it "uses private APIs" and credits Vinzent03 "for creating the necessary APIs in the Obsidian Git plugin", i.e. it consumes obsidian-git's plugin instance directly; there is **no documented provider-registration API**.
 
 ## Decision
 
@@ -35,7 +35,7 @@ Implement a **file-based request/response protocol** through the vault directory
 
 Rejected alternatives:
 - Local HTTP server / port listener in Termux: forbidden by requirements, and would require a permanent background process.
-- Termux:Boot / cron / inotify daemon watching the request dir: permanent background process; forbidden.
+- [Termux:Boot](https://github.com/termux/termux-boot) / cron / inotify daemon watching the request dir: permanent background process; forbidden.
 - Direct RUN_COMMAND from Obsidian: impossible (permission must be in sender manifest).
 - Tasker / MacroDroid glue: workable for individual users but not a supportable default; documented in README as a DIY variant of Transport B.
 

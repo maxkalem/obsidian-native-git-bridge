@@ -6,7 +6,33 @@
 
 Native Git for Obsidian on **Android**, executed by the real `git` binary inside **Termux**, with first-class **sparse checkout** support. No isomorphic-git, no HTTP server, no open ports, nothing running in the background.
 
-> Status: implemented. Status panel with **list or folder-tree layout** (folder rows act on their group's files; untracked folders expand into their files), sparse safety, pull/commit/push, sync/fetch, **manual merge-conflict resolution** (per-block keep-local / keep-remote, or whole-file from the context menu), **repository-wide history panel** (commits expand into changed files, a tap opens the diff that commit introduced), per-file history (rename-aware), view at commit, **diff panes with character-level line-by-line highlighting** (diff2html; staged rows diff `HEAD → staged`, unstaged rows `staged → working tree`), confirmed restore, plus hardening (parser fuzzing, recovery paths, request expiry, security re-audit) and release workflows. Version History Diff exposes no public provider API (it consumes obsidian-git's private API), so the history/diff UX is provided by this plugin's own views; an upstream adapter PR remains an option (see docs/research-notes.md).
+> [!info]
+> Status: Work in progress
+
+## Implemented
+
+**Git operations**, all executed by the real `git` binary in Termux: status, fetch, pull, push, commit, sync (fetch, merge, commit, push in one step), abort merge, stage and unstage per file, per folder or everything, discard local changes, reset the working tree and index to HEAD, restore a file from a commit.
+
+**Status panel** (the primary surface on mobile):
+
+- groups for conflicts, staged changes, changes and untracked files, each collapsible, with counts in the right-hand column;
+- **list or folder-tree layout**, switched by one button; folder rows act only on the files in their group's state, and untracked folders expand into the files inside them;
+- per-row actions (open, stage/unstage, discard) and a Git context menu on rows, folders and group headers with the same entries everywhere;
+- renames shown as moves, with the old path on the row;
+- an operation strip with progress, a cancel slot, and directional activity animations on fetch, pull and push;
+- optional auto-refresh at a chosen interval.
+
+**Diff panes** rendered by diff2html with character-level, line-by-line highlighting: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. Optional line wrapping and whitespace glyphs.
+
+**History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`) and can restore the whole file or a single block from that commit.
+
+**Merge conflicts**, resolved manually and only on an explicit choice: a resolution pane with keep-local / keep-remote per block, whole-file resolution from the context menu for anything the pane cannot display, git's own merge message prefilled for the commit that follows.
+
+**Sparse-checkout safety**: protected paths are derived from the repository's own sparse exclusions, every commit and push is blocked while any of them shows as a change, staging always excludes them, and the block window offers the two recoveries that apply (trash the new files, or drop the exclusion).
+
+**Repository configuration** from the app: sparse exclusions, `.gitignore` and `.git/info/exclude`, per item or in bulk.
+
+**Operational**: device-local settings that never sync through the vault, a pairing token imported automatically from the installer, a version handshake between plugin, runner and companion app, a local bridge check that diagnoses without contacting Termux, a redacting operation log, and diagnostics.
 
 ## Why
 
@@ -14,10 +40,11 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 
 ## Alternatives, and when to prefer them
 
-The community directory already has several Git plugins. On mobile they take one of two approaches, and **neither can work with a native sparse-checkout index**, which is the entire reason this one exists:
+The community directory already has several Git plugins. On mobile they take one of three approaches, and **none of them works with a native sparse-checkout index**, which is the entire reason this one exists:
 
 - **isomorphic-git in the app**, e.g. [obsidian-git](https://github.com/Vinzent03/obsidian-git). A JavaScript Git implementation that does not implement sparse checkout and does not honour skip-worktree, so a sparse index can be misread as mass deletions.
 - **The hosting provider's REST API**, e.g. [Hybrid Git Sync](https://community.obsidian.md/plugins/hybrid-git-sync), [Fit](https://community.obsidian.md/plugins/fit), [Git Vault Sync](https://community.obsidian.md/plugins/git-vault-sync). There is no repository on the phone at all: files are transferred over HTTP. That means no local history, no offline commits, no SSH, provider-specific limits, and an access token stored in the plugin's own settings.
+- **A diff viewer on top of another Git plugin**, e.g. [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff). It shows file history and diffs well, but takes its data from [obsidian-git](https://github.com/Vinzent03/obsidian-git) through that plugin's internals (its own README calls them private APIs), so it inherits whatever the underlying plugin can do. On a sparse-checkout vault that is the isomorphic-git backend again, and it offers no way for another plugin to supply the data instead. This plugin therefore renders its own history and diff views; proposing an adapter interface upstream remains an option (see [research notes](docs/research-notes.md)).
 
 **Prefer one of those** if your vault is a normal full checkout, you sync only through GitHub/GitLab, and you would rather not install Termux and a companion app. They are simpler to set up and they work on iOS, which this plugin never will.
 
@@ -25,7 +52,7 @@ The community directory already has several Git plugins. On mobile they take one
 
 ## How it works
 
-1. You run a command (e.g. *Native Git: Status*).
+1. You run a command (e.g. *Native Git Bridge: Status*).
 2. The plugin writes `runtime/requests/<id>.json` inside the plugin folder (locally excluded from Git via `.git/info/exclude`).
 3. The plugin opens `nativegitbridge://run`; the companion app (the only supported trigger) forwards a RUN_COMMAND intent to Termux, which executes the fixed runner script once in the background. See `docs/ADR-001-android-invocation.md` for why a companion app is required.
 4. The runner validates the pairing token, the action allow-list and all paths, runs git with argv arrays, writes `runtime/results/<id>.json` atomically and **exits**.
@@ -56,7 +83,9 @@ git diff --cached --name-status -- "<protected>" …
 
 and blocks the operation if either reports anything. Sparse omissions are never treated as deletions, and there is no automatic destructive "repair".
 
-Sparse exclusions, `.gitignore` entries and `.git/info/exclude` entries can be managed per item from the settings (collapsible sections) and from the file context menu (long tap / right click): stage/unstage, add/remove in `.gitignore`, hide/show via sparse, add/remove in the local exclude file.
+Sparse exclusions, `.gitignore` entries and `.git/info/exclude` entries can be managed per item from the settings (collapsible sections) and from the Git context menu (long tap / right click).
+
+That menu is described once and rendered identically wherever it opens: on a file row, a folder row, a group header and in the file explorer. The order is fixed: stage/unstage, discard, keep local / keep remote for conflicts, open diff or conflict view, open file history, open in the default app, copy path, then the `.gitignore` / sparse / `.git/info/exclude` entries. Entries appear only where they apply: opening things needs a single file, discard is never offered for staged content, and a folder or group entry states how many paths it will touch. A single path can flip a config rule off again; a folder or group can only add rules, because a mixed selection has no single state to flip.
 
 ## Device-local by design
 
@@ -85,4 +114,4 @@ npm run build     # type check + bundle to main.js
 
 ## License
 
-MIT. Version History Diff (MIT) and obsidian-git were reviewed for integration (see research notes); no code was copied from either. Diff rendering bundles [diff2html](https://github.com/rtfpessoa/diff2html) (MIT), a render-only library; git itself always runs natively in Termux. The diff stylesheet in `styles.css` is adapted from diff2html's MIT-licensed CSS with the Obsidian-variable adaptations pioneered by Version History Diff.
+MIT. No code was copied from [obsidian-git](https://github.com/Vinzent03/obsidian-git) or [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff) (both MIT); they were read to see what users already expect, and some of their interface conventions are followed here (a history panel whose commits expand into changed files, a diff pane, a go-to-file button on rows). Diff rendering bundles [diff2html](https://github.com/rtfpessoa/diff2html) (MIT), a render-only library; git itself always runs natively in Termux. The diff stylesheet in `styles.css` is adapted from diff2html's MIT-licensed CSS with the Obsidian-variable adaptations pioneered by Version History Diff.

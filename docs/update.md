@@ -32,4 +32,4 @@ Note Android's signature rule: a debug APK and a signed release APK cannot updat
 
 ## After any update
 
-Run *Native Git: Status* once. If the versions disagree you get the exact message telling you which side to update.
+Run *Native Git Bridge: Status* once. If the versions disagree you get the exact message telling you which side to update.
