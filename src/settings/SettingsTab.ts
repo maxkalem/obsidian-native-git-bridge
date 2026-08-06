@@ -182,6 +182,16 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Repository for this vault")
+      .setDesc(
+        "Create a repository here, clone an existing one into this vault, or change the remote. " +
+          "Everything that needs a password stays in Termux; this only does the parts that carry no secret."
+      )
+      .addButton((b) =>
+        b.setButtonText("Set up repository").onClick(() => void this.plugin.cmdSetupRepository())
+      );
+
+    new Setting(containerEl)
       .setName("Repository path (informational)")
       .setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.")
       .addText((t) =>

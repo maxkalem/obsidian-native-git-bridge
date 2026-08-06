@@ -29,7 +29,13 @@ export type BridgeAction =
   | "repo-log"
   | "resolve-conflict"
   | "discard-all"
-  | "reset-all";
+  | "reset-all"
+  // Runner v11: the beginning of the story — a vault that is not a repository
+  // yet, or one without a remote.
+  | "init-repo"
+  | "set-remote"
+  | "clone-into-vault"
+  | "adopt-remote";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -49,6 +55,10 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["resolve-conflict", 6],
   ["discard-all", 8],
   ["reset-all", 8],
+  ["init-repo", 11],
+  ["set-remote", 11],
+  ["clone-into-vault", 11],
+  ["adopt-remote", 11],
 ]);
 
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
@@ -76,6 +86,10 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "resolve-conflict",
   "discard-all",
   "reset-all",
+  "init-repo",
+  "set-remote",
+  "clone-into-vault",
+  "adopt-remote",
 ]);
 
 export interface BridgeRequest {
@@ -110,7 +124,9 @@ export type KnownBridgeErrorCode =
   | "FILE_ABSENT"
   | "TOO_LARGE"
   /** The profile's repository is gone or is no longer a work tree (runner v10+). */
-  | "REPO_MISSING";
+  | "REPO_MISSING"
+  /** Refusing to initialise or clone over a repository that already exists (v11). */
+  | "REPO_EXISTS";
 
 /**
  * `(string & {})` keeps the literals visible to autocompletion while still

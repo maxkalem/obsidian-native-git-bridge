@@ -645,7 +645,7 @@ var import_obsidian16 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 10;
+var RUNNER_MIN_VERSION = 11;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -655,6 +655,10 @@ var CANCEL_DIR = "cancel";
 var DONE_DIR = "done";
 var POLL_INTERVAL_MS = 400;
 var DEFAULT_TIMEOUT_SECONDS = 90;
+var ACTION_TIMEOUT_SECONDS = {
+  "clone-into-vault": 900,
+  "adopt-remote": 900
+};
 var RESULT_RETENTION_MS = 24 * 60 * 60 * 1e3;
 var STALE_LOCK_MS = 30 * 60 * 1e3;
 var DISPLAY_OUTPUT_LIMIT = 100 * 1024;
@@ -689,7 +693,11 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repo-log", 5],
   ["resolve-conflict", 6],
   ["discard-all", 8],
-  ["reset-all", 8]
+  ["reset-all", 8],
+  ["init-repo", 11],
+  ["set-remote", 11],
+  ["clone-into-vault", 11],
+  ["adopt-remote", 11]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -706,7 +714,11 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "unstage-all",
   "resolve-conflict",
   "discard-all",
-  "reset-all"
+  "reset-all",
+  "init-repo",
+  "set-remote",
+  "clone-into-vault",
+  "adopt-remote"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -1418,6 +1430,11 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       s.profileId ? `Termux serves this vault as ${s.profileId}. Every vault on the device has its own profile and its own token; one runner drains them all.` : "This vault has no Termux profile yet. Pairing asks the runner for one; it generates the token in Termux and answers with it."
     ).addButton(
       (b) => b.setButtonText(s.profileId ? "Pair again" : "Pair this vault").onClick(() => void this.plugin.cmdPairThisVault())
+    );
+    new import_obsidian4.Setting(containerEl).setName("Repository for this vault").setDesc(
+      "Create a repository here, clone an existing one into this vault, or change the remote. Everything that needs a password stays in Termux; this only does the parts that carry no secret."
+    ).addButton(
+      (b) => b.setButtonText("Set up repository").onClick(() => void this.plugin.cmdSetupRepository())
     );
     new import_obsidian4.Setting(containerEl).setName("Repository path (informational)").setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.").addText(
       (t) => t.setValue(s.repoPathHint).onChange((v) => {
@@ -6494,6 +6511,49 @@ function baseName(p) {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
+// src/git/remoteUrl.ts
+var MAX_REMOTE_URL_LENGTH = 512;
+var REASONS = {
+  empty: "Enter the repository URL.",
+  "too-long": `The URL is longer than ${MAX_REMOTE_URL_LENGTH} characters.`,
+  "option-like": "A URL may not start with '-': git would read it as an option, not an address.",
+  "not-printable-ascii": "The URL contains a space or a character that is not plain ASCII. Copy it again from your git host.",
+  credentials: "This URL carries a password. Remove it: credentials stay in Termux (a credential helper, an SSH key, or `gh auth login`), and this plugin never handles one.",
+  "unsupported-scheme": "Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git, or file:///absolute/path for a local copy. Plain http and git:// are not accepted."
+};
+var PRINTABLE_ASCII = /^[!-~]+$/;
+var CREDENTIALS = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/;
+var SCP_LIKE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^ ]+$/;
+function validateRemoteUrl(raw) {
+  const url = raw.trim();
+  const fail = (problem) => ({
+    ok: false,
+    url,
+    problem,
+    reason: REASONS[problem]
+  });
+  if (url === "") return fail("empty");
+  if (url.length > MAX_REMOTE_URL_LENGTH) return fail("too-long");
+  if (url.startsWith("-")) return fail("option-like");
+  if (!PRINTABLE_ASCII.test(url)) return fail("not-printable-ascii");
+  if (CREDENTIALS.test(url)) return fail("credentials");
+  if (url.startsWith("https://") || url.startsWith("ssh://") || url.startsWith("file:///")) {
+    return { ok: true, url };
+  }
+  if (SCP_LIKE.test(url)) return { ok: true, url };
+  return fail("unsupported-scheme");
+}
+function redactRemoteUrl(url) {
+  return url.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@]+@/, "$1***@");
+}
+function isValidBranchName(name) {
+  if (name === "" || name.length > 100) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)) return false;
+  if (name.includes("..") || name.includes("//")) return false;
+  if (name.endsWith(".lock") || name.endsWith("/")) return false;
+  return true;
+}
+
 // src/main.ts
 var import_obsidian17 = require("obsidian");
 var DEFAULT_SHARED_PREFS = {
@@ -6536,6 +6596,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
      */
     this.pairingPollMs = 500;
     this.pairingWaitMs = PAIRING_WAIT_MS;
+    /** Remote URL of the repository as of the last status (already redacted by the runner). */
+    this.lastRemoteUrl = "";
     /**
      * Warn once per session when the Termux-side runner predates this plugin
      * build. Updating main.js in the vault does not touch the runner script, so a
@@ -7136,11 +7198,20 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const root = new RuntimePaths(this.app.vault.configDir).root;
     const claimPath = `${root}/${CLAIM_FILE}`;
     const pairingPath = `${root}/${PAIRING_FILE}`;
+    const needsRepo = !await this.vaultHasRepository();
     try {
       await this.client.ensureRuntimeDirs();
       await adapter.write(
         claimPath,
-        JSON.stringify({ createdAt: (/* @__PURE__ */ new Date()).toISOString(), vault: this.app.vault.getName() }, null, 2)
+        JSON.stringify(
+          {
+            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+            vault: this.app.vault.getName(),
+            bootstrap: needsRepo
+          },
+          null,
+          2
+        )
       );
     } catch (e) {
       new ResultModal(this.app, "Pairing failed", [`The pairing request could not be written: ${String(e)}`], {
@@ -7189,6 +7260,300 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         ]
       }
     ).open();
+  }
+  /**
+   * Does this vault hold a repository? Answered from the vault itself, without
+   * a Termux round trip: `.git` is either a directory (normal) or a file (a
+   * worktree link). Used to decide which bootstrap steps make sense.
+   */
+  async vaultHasRepository() {
+    try {
+      return await this.app.vault.adapter.exists(".git");
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * "Set up the repository for this vault": the missing beginning of the
+   * story, in the same shape as the setup guide — a short list of steps, one
+   * action each, decided from what this vault actually is right now.
+   */
+  async cmdSetupRepository() {
+    if (!import_obsidian16.Platform.isAndroidApp) {
+      new import_obsidian16.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return;
+    }
+    const s = this.deviceSettings;
+    const hasRepo = await this.vaultHasRepository();
+    const paired = s.authToken !== "";
+    const lines = [];
+    const actions = [];
+    lines.push(
+      hasRepo ? "This vault is a git repository." : "This vault is NOT a git repository yet.",
+      `Paired with Termux: ${paired ? `yes (${s.profileId || "profile unknown"})` : "no"}`,
+      ""
+    );
+    if (!paired) {
+      lines.push(
+        "Termux has to know this vault before it can do anything here. Pairing works even before the repository exists.",
+        "1. Pair this vault (Termux generates the token and answers).",
+        "2. Then come back here to create or clone the repository."
+      );
+      actions.push({
+        label: "Pair this vault",
+        cta: true,
+        keepOpen: true,
+        onClick: () => void this.cmdPairThisVault()
+      });
+      new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
+      return;
+    }
+    if (!hasRepo) {
+      lines.push(
+        "Two ways to give it one:",
+        "\u2022 Start fresh \u2014 create an empty repository here and, if you want, commit what the vault already contains. You can add a remote afterwards.",
+        "\u2022 Clone an existing one \u2014 the vault keeps the files it already has; anything that exists on both sides is reported and you decide, nothing is overwritten silently.",
+        "",
+        "Credentials never come through the plugin. Set them up once in Termux (a credential helper, an SSH key, or `gh auth login`) \u2014 see docs/setup.md."
+      );
+      actions.push(
+        { label: "Create a repository here", cta: true, keepOpen: true, onClick: () => this.promptInitRepo() },
+        { label: "Clone from a remote", keepOpen: true, onClick: () => this.promptClone() }
+      );
+    } else {
+      lines.push(
+        `Remote, as of the last status: ${this.lastRemoteUrl || "not seen yet \u2014 run Status to find out"}`,
+        "",
+        "Fetch, pull and push need one. Set it if the repository has none, or change it if it moved or was set up with the wrong account."
+      );
+      actions.push({
+        label: this.lastRemoteUrl ? "Change the remote" : "Add a remote",
+        cta: true,
+        keepOpen: true,
+        onClick: () => this.promptSetRemote()
+      });
+    }
+    new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
+  }
+  promptInitRepo() {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Create a repository in this vault",
+        placeholder: "main",
+        submitLabel: "Create repository",
+        initial: "main"
+      },
+      (branch) => {
+        if (branch === null) return;
+        if (!isValidBranchName(branch)) {
+          new ResultModal(this.app, "Invalid branch name", [
+            `'${branch}' is not a branch name this plugin will send.`,
+            "Letters, digits, dot, dash, underscore and slash; no '..', no leading dash."
+          ], { isError: true }).open();
+          return;
+        }
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Commit what is here?",
+            body: [
+              `A new repository on branch '${branch}' will be created in this vault.`,
+              "Confirm to also make a first commit containing every file the vault currently holds (the plugin's runtime folder is excluded automatically).",
+              "Decline to create the repository empty and commit later, after reviewing what is in it."
+            ],
+            confirmLabel: "Create and commit everything",
+            icon: "check"
+          },
+          async (commitAll) => {
+            const result = await this.runOperation("init-repo", {
+              branch,
+              initialCommit: commitAll,
+              message: "Initial commit (native git bridge)"
+            });
+            if (!result) return;
+            if (!result.ok) return this.renderMutationError("Native Git: init failed", result);
+            this.absorbStatusData(result.data ?? {});
+            new ResultModal(this.app, "Repository created", [
+              `Branch: ${result.data?.branch ?? branch}`,
+              result.data?.committed === "true" ? "The vault's files are in the first commit." : "Nothing is committed yet.",
+              "Next: add a remote, then push."
+            ], {
+              actions: [
+                { label: "Add a remote", cta: true, keepOpen: true, onClick: () => this.promptSetRemote() }
+              ]
+            }).open();
+          }
+        ).open();
+      }
+    ).open();
+  }
+  promptSetRemote() {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Remote for this vault",
+        placeholder: "https://github.com/you/vault.git",
+        submitLabel: "Save remote",
+        initial: ""
+      },
+      async (raw) => {
+        if (raw === null) return;
+        const verdict = validateRemoteUrl(raw);
+        if (!verdict.ok) {
+          new ResultModal(this.app, "That URL cannot be used", [verdict.reason ?? "Invalid URL."], {
+            isError: true
+          }).open();
+          return;
+        }
+        const result = await this.runOperation("set-remote", { url: verdict.url });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: set remote failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.afterRemoteSet(verdict.url, result.data ?? {});
+      }
+    ).open();
+  }
+  promptClone() {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Clone into this vault",
+        placeholder: "https://github.com/you/vault.git",
+        submitLabel: "Clone",
+        initial: ""
+      },
+      (raw) => {
+        if (raw === null) return;
+        const verdict = validateRemoteUrl(raw);
+        if (!verdict.ok) {
+          new ResultModal(this.app, "That URL cannot be used", [verdict.reason ?? "Invalid URL."], {
+            isError: true
+          }).open();
+          return;
+        }
+        void this.runClone(verdict.url);
+      }
+    ).open();
+  }
+  /**
+   * Clone into a vault that already holds files.
+   *
+   * Nothing the vault already has is written over: the repository's tree goes
+   * into the index, everything the vault does not have is written out of it,
+   * and the files that exist on both sides stay as they are and appear in the
+   * panel as ordinary local changes. So the decision the user faces is not a
+   * blind "keep mine or take theirs" before they can see anything — it is the
+   * per-file one they already know, with a diff, after the fact.
+   */
+  /**
+   * Setting a remote is where the two ways of attaching a repository either
+   * converge or part company, so this is the moment to say which one happened.
+   *
+   * A vault whose repository was created here has a history of its own. If the
+   * remote also has one, the two are unrelated and git will refuse to merge
+   * them later, with a message that arrives far too late to be useful. If the
+   * local repository has no commits yet, the remote's history can simply be
+   * taken over, which lands in exactly the state cloning would have produced.
+   */
+  afterRemoteSet(url, d) {
+    const shown = redactRemoteUrl(url);
+    const remoteBranches = (d.remoteBranches ?? "").split("\n").filter((b) => b.trim() !== "");
+    const localCommits = d.localCommits === "true";
+    if (d.remoteReachable !== "true") {
+      new ResultModal(this.app, "Remote saved", [
+        `Origin is now ${shown}.`,
+        "It could not be reached just now, so there is nothing more to say about it yet \u2014 usually credentials that are not set up in Termux, or no connection. Run Fetch once they are."
+      ]).open();
+      return;
+    }
+    if (remoteBranches.length === 0) {
+      new ResultModal(this.app, "Remote saved", [
+        `Origin is now ${shown}.`,
+        "The remote is empty, so this vault's history will be the first thing in it. Commit, then push."
+      ]).open();
+      return;
+    }
+    if (!localCommits) {
+      new ResultModal(
+        this.app,
+        "Remote saved \u2014 it already has content",
+        [
+          `Origin is now ${shown}, and it already contains: ${remoteBranches.join(", ")}.`,
+          "This vault has no commits yet, so it can simply take that history over. Your existing files are kept: the ones that also exist in the repository become ordinary local changes, and the rest of the repository is checked out around them \u2014 the same result cloning would have given."
+        ],
+        {
+          actions: [
+            {
+              label: "Get the repository's content",
+              cta: true,
+              onClick: () => void this.runAdoptRemote()
+            }
+          ]
+        }
+      ).open();
+      return;
+    }
+    new ResultModal(
+      this.app,
+      "Remote saved \u2014 but the two histories are unrelated",
+      [
+        `Origin is now ${shown}, and it already contains: ${remoteBranches.join(", ")}.`,
+        "This vault also has commits of its own, made here. Git treats the two as unrelated histories: pull will refuse to merge them, and push will be rejected. Nothing is broken \u2014 but they cannot simply be joined.",
+        "",
+        "The clean way out: open a NEW empty vault and clone the repository into it, then move your notes across.",
+        "The deliberate way: in Termux, either `git pull --allow-unrelated-histories` (keeps both, expect conflicts) or reset onto the remote branch (throws your local commits away). This plugin does neither for you."
+      ],
+      { isError: true }
+    ).open();
+  }
+  /** Take an already configured remote's history into a repository with none. */
+  async runAdoptRemote() {
+    const result = await this.runOperation("adopt-remote", {});
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: could not take the remote's content", result);
+    this.absorbStatusData(result.data ?? {});
+    const collisions = (result.data?.collisions ?? "").split("\n").filter((l) => l.trim() !== "");
+    const lines = [`Branch: ${result.data?.branch ?? "(unknown)"}`];
+    if (collisions.length === 0) {
+      lines.push("The repository's files are in the vault. Nothing you already had was touched.");
+    } else {
+      lines.push(
+        `${collisions.length} file${collisions.length === 1 ? "" : "s"} existed here as well; your versions were kept and now show in the panel as local changes:`,
+        ...collisions.slice(0, 10),
+        collisions.length > 10 ? `\u2026and ${collisions.length - 10} more` : ""
+      );
+    }
+    new ResultModal(this.app, "Repository content taken over", lines.filter((l) => l !== "")).open();
+  }
+  async runClone(url) {
+    const result = await this.runOperation("clone-into-vault", { url });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
+    this.absorbStatusData(result.data ?? {});
+    const collisions = (result.data?.collisions ?? "").split("\n").filter((l) => l.trim() !== "");
+    const lines = [`Branch: ${result.data?.branch || "(unborn)"}`];
+    if (result.data?.empty === "true") {
+      lines.push("The remote is empty; the vault is linked to it and ready for a first commit.");
+    } else if (collisions.length === 0) {
+      lines.push("The repository's files are in the vault. Nothing you already had was touched.");
+    } else {
+      lines.push(
+        `The repository's files are in the vault, and ${collisions.length} of them also existed here.`,
+        "Your versions were kept \u2014 they now show in the panel as local changes:",
+        ...collisions.slice(0, 10),
+        collisions.length > 10 ? `\u2026and ${collisions.length - 10} more` : "",
+        "",
+        "Open each one to see the difference, then commit to keep yours or discard to take the repository's version. Files that exist only here were left alone and are simply untracked."
+      );
+    }
+    if (result.data?.configDirTracked === "true" && result.data?.empty !== "true") {
+      lines.push(
+        "",
+        `This repository also tracks ${this.app.vault.configDir}/. Restart Obsidian now: it read the old configuration when it started and can overwrite parts of it from memory until you do. Plugins that arrived with the clone appear only after the restart.`
+      );
+    }
+    new ResultModal(this.app, "Repository cloned", lines.filter((l) => l !== "")).open();
   }
   async reconcileAfterRestart() {
     const raw = this.store.getValue(MARKER_KEY);
@@ -7286,6 +7651,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       { id: "open-companion-setup", name: "Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
       { id: "pair-this-vault", name: "Pair this vault with Termux", cb: () => void this.cmdPairThisVault() },
+      { id: "setup-repository", name: "Set up the repository for this vault", cb: () => void this.cmdSetupRepository() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -7343,7 +7709,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       action,
       args,
       s.authToken,
-      s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+      ACTION_TIMEOUT_SECONDS[action] ?? s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
       /* @__PURE__ */ new Date(),
       randomSuffix(),
       s.profileId
@@ -8015,6 +8381,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   }
   /** Parse the status fields every mutating action returns and refresh UI. */
   absorbStatusData(d) {
+    if (typeof d.remoteUrl === "string") this.lastRemoteUrl = d.remoteUrl;
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);
     if (d.untrackedChildren !== void 0)
@@ -8573,6 +8940,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         label: "Pair this vault",
         keepOpen: true,
         onClick: () => void this.cmdPairThisVault()
+      });
+    } else {
+      actions.splice(actions.length - 1, 0, {
+        label: "Set up repository",
+        keepOpen: true,
+        onClick: () => void this.cmdSetupRepository()
       });
     }
     if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled) {

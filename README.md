@@ -32,6 +32,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 
 **Repository configuration** from the app: sparse exclusions, `.gitignore` and `.git/info/exclude`, per item or in bulk.
 
+**Starting from nothing**: a vault that is not a repository yet can be paired, given a repository (chosen default branch, optional first commit) or have one cloned into it. Cloning into a vault that already holds files never overwrites a single one of them: the repository's other files are checked out, and the ones that exist on both sides keep your version and appear in the panel as ordinary local changes, with a diff to look at before you decide.
+
 **Authentication** never leaves Termux: a PAT through a credential helper, an SSH key, or GitHub's OAuth device flow through the GitHub CLI (`gh`), configured per repository so two vaults can use two accounts.
 
 **Several vaults on one device**: every vault is a repository of its own with its own Termux profile, its own token and its own credentials; one runner drains them all in one pass, oldest request first. A vault opened inside another vault's repository is kept out of it through the outer repository's `.git/info/exclude` (device-local, nothing tracked is edited), and each side's operations are pinned to its own repository. A second vault can pair itself from the plugin without re-running the installer; a moved vault is found again; a deleted one is reported, never silently replaced.
@@ -90,6 +92,16 @@ and blocks the operation if either reports anything. Sparse omissions are never 
 Sparse exclusions, `.gitignore` entries and `.git/info/exclude` entries can be managed per item from the settings (collapsible sections) and from the Git context menu (long tap / right click).
 
 That menu is described once and rendered identically wherever it opens: on a file row, a folder row, a group header and in the file explorer. The order is fixed: stage/unstage, discard, keep local / keep remote for conflicts, open diff or conflict view, open file history, open in the default app, copy path, then the `.gitignore` / sparse / `.git/info/exclude` entries. Entries appear only where they apply: opening things needs a single file, discard is never offered for staged content, and a folder or group entry states how many paths it will touch. A single path can flip a config rule off again; a folder or group can only add rules, because a mixed selection has no single state to flip.
+
+## What this plugin accesses
+
+Stated plainly, because Obsidian's [developer policies](https://docs.obsidian.md/Developer+policies) require network use and any access outside the vault to be disclosed in the README.
+
+- **The plugin makes no network requests of its own.** It contacts no server, sends no telemetry, needs no account, and downloads nothing. Every byte that travels does so because **git in Termux** talked to the remote **you** configured, during an operation you started (or an automatic sync you enabled). Links to GitHub in the setup screens open your browser; nothing is fetched in the background.
+- **The plugin only reads and writes inside the vault**: the request and result files under `.obsidian/plugins/native-git-bridge/runtime/`, `.gitignore` at the vault root, and — only when you use the Git actions — your notes, through git. It never reads or writes anything elsewhere on the device.
+- **Termux is a separate app**, and everything outside the vault lives there: the runner script, the pairing profiles and your git credentials, all under Termux's private storage. The plugin cannot read them; it only leaves a request file in the vault and asks the companion app to wake the runner.
+- **Cloning** writes into the vault only. The source may be a `file:///` path elsewhere on the device (a backup on the SD card, say) — that is git in Termux reading a location you typed, and nothing outside the vault is ever written. **Cloning a repository that tracks `.obsidian/`** will write plugin files and settings into your vault, exactly as a `git pull` would. That is your own repository doing it, chosen by you; nothing is fetched from this project's servers, and no plugin (this one included) is ever updated behind your back — but you should restart Obsidian afterwards, and the plugin says so.
+- **Not required, not present:** payment, an account, ads, telemetry, remote code, obfuscation.
 
 ## Device-local by design
 

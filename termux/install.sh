@@ -93,7 +93,11 @@ if [ -z "$REPO_ARG" ]; then
     REPO_ARG="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
     [ -n "$REPO_ARG" ] || fail "Invalid selection."
   else
-    fail "No vault with a .git repository found on shared storage. Clone your repo first, or pass the path: bash install.sh /storage/emulated/0/<YourVault>"
+    fail "No vault with a .git repository found on shared storage.
+   Either pass the path explicitly:  bash install.sh /storage/emulated/0/<YourVault>
+   or, if the vault has no repository yet, let the plugin make one: open the vault in
+   Obsidian and use Settings -> Native Git Bridge -> Set up repository (it pairs the
+   vault first, then creates or clones the repository without leaving the app)."
   fi
 fi
 REPO_DIR="$REPO_ARG"

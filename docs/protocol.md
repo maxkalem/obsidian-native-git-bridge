@@ -70,7 +70,7 @@ Termux side (runner ≥ 10), mode 600, never inside a vault:
 
 - `data` carries *raw* git output fields (e.g. `statusPorcelainV2`, `sparseCheckoutList`); parsing happens in TypeScript so bash stays trivial and auditable.
 - `profileId` (runner ≥ 10): the profile that answered. A vault with no id yet adopts the one from its first result; a vault that already has one never replaces it on the strength of a result (that would be the plugin re-pointing itself at another repository).
-- `error`: `{ "code": "AUTH" | "BAD_REQUEST" | "GIT_FAILED" | "CANCELLED" | "SAFETY_BLOCKED" | "TIMEOUT" | "EXPIRED" | "RUNNER_INTERNAL" | "CONFLICT" | "FILE_ABSENT" | "TOO_LARGE" | "REPO_MISSING", "message": "…" , "stdout": "…", "stderr": "…" }`.
+- `error`: `{ "code": "AUTH" | "BAD_REQUEST" | "GIT_FAILED" | "CANCELLED" | "SAFETY_BLOCKED" | "TIMEOUT" | "EXPIRED" | "RUNNER_INTERNAL" | "CONFLICT" | "FILE_ABSENT" | "TOO_LARGE" | "REPO_MISSING" | "REPO_EXISTS", "message": "…" , "stdout": "…", "stderr": "…" }`.
 - Written atomically: `results/<id>.json.tmp` → `mv` → `results/<id>.json`.
 
 ## `status` result data
@@ -117,6 +117,93 @@ Why that and not the alternatives:
 
 Both repositories may hold overlapping content; only the inner repository's own files stop appearing in the outer one's status. The installer prints exactly which line it added to which file.
 
+## Repository bootstrap (runner ≥ 11)
+
+Until v11 the plugin assumed the vault already was a repository with a working remote. These three actions add the beginning of the story; everything interactive (a PAT, a passphrase) still happens in Termux, and no secret ever travels towards the plugin.
+
+- **`init-repo`** — `args.branch` (default `main`), `args.initialCommit`, `args.message`. Creates a repository in the vault, sets the default branch explicitly, writes the runtime exclude, optionally makes the first commit. It refuses `REPO_EXISTS` when one is already there. Once `git init` has run the repository EXISTS, so a failure after that point (no `user.name`, for example) is reported with `data.initialised = true` and a message that says so, never as a bare "init failed".
+- **`set-remote`** — `args.url`. Adds `origin`, or changes it when it is already there. Returns the previous URL redacted, plus what it found: `remoteReachable`, `remoteBranches` (from `ls-remote`, 30 s budget, an unreachable remote is reported as unknown rather than as a failure) and `localCommits`. Those three decide what can happen next.
+- **`adopt-remote`** — optional `args.branch`. Takes an already configured remote's history into a repository that has **no commits of its own**: fetch, point HEAD at the branch, then the same two steps the clone uses. It refuses when the local side already has commits, because then the two histories are unrelated and no automatic answer would be honest.
+- **`clone-into-vault`** — `args.url`, optional `args.branch`.
+
+### Cloning into a directory that is not empty
+
+A vault always holds at least its configuration directory, so a plain `git clone` refuses it. The sequence is:
+
+1. `git clone --no-checkout` into `runtime/clone-tmp/` — inside the vault, so the next step is a rename on the same filesystem rather than a copy. A failure here leaves the vault untouched; the temporary directory is removed either way.
+2. Move `.git` into the vault (refusing if one appeared meanwhile), write the runtime exclude, exclude the new repository from any outer paired vault.
+3. `git reset HEAD` — the repository's tree goes into the **index**, the working tree is not touched. Files the vault already had now differ from the index, which is exactly what "a local change" means.
+4. `git ls-files --deleted | git checkout-index --stdin -u` — everything the vault does **not** have is written out of the index. Only those paths are written, so no existing file is touched.
+
+What the user ends up with is a complete checkout **plus** their own versions of the overlapping files, listed in the panel as ordinary modifications. Taking the repository's version is then the per-file *discard* the panel already has, with the diff visible first, instead of a blind decision before anything can be inspected. Files that exist only in the vault are left alone and are simply untracked. The result reports `collisions` so the plugin can name them.
+
+Rejected alternatives, both of which were built and thrown away:
+
+- **`onCollision` = abort / keep-local / take-remote**, decided before the clone. `abort` meant the common case (a vault always has `.obsidian/`) refused to do anything; `keep-local` used `git reset` alone and therefore never checked out the repository's *other* files, leaving them listed as deleted; `take-remote` overwrote files that exist in no history. Three modes, two of them wrong.
+- **Moving the vault's files aside** into a scratch folder (or into `.trash`) and back after the checkout. It reaches the same end state, but it mixes tool state into the user's own trash, it doubles disk use while it runs, and an interruption strands the user's notes in a folder they have to fish them out of. Reset + checkout-index reaches the same place with no file ever moved: an interruption at worst leaves some repository files not yet written, which the panel shows as deletions and one *discard* fixes.
+
+Why the temporary directory lives in `runtime/` rather than a `.tmp` at the vault root: it is already excluded from git and invisible in Obsidian, and it is on the same filesystem, which is what makes the move a rename.
+
+A clone gets `NGB_CLONE_TIMEOUT` (900 s) instead of the ordinary network budget, and the plugin sends a matching `timeoutSeconds`. Cancellation cannot interrupt a clone in flight — the runner has no cancellation point inside a git command — but because the repository is moved into place only on success, a cancelled or timed-out clone still leaves the vault either untouched or complete, never half populated.
+
+### Remote URLs
+
+Validated identically on both sides (`src/git/remoteUrl.ts` and `valid_remote_url` in the runner), passed to git as an argv element, and redacted in every log and result:
+
+- accepted: `https://…`, `ssh://…`, `user@host:path`, `file:///absolute/path` (a local copy, e.g. on the SD card);
+- refused: anything starting with `-` (git would read it as an option), plain `http://`, `git://`, `ext::…`, whitespace, control characters, non-ASCII, and **any URL carrying a password** — that would put a secret into a file inside the vault and into `.git/config`, so it is rejected with a message pointing at the credential helper, the SSH key or `gh auth login`.
+
+### What the vault looks like afterwards
+
+The top level of the vault is the remote's top level plus `.git`, and it does not matter which way the repository got there. Nothing else is added: no scratch directory (the clone works inside `runtime/`, which is removed afterwards), nothing placed in the trash, nothing renamed. A vault that already held notes keeps them, untracked. Given a remote containing
+
+```
+.obsidian/  .trash/  Private/  Projects/  .gitignore
+```
+
+both routes end with exactly
+
+```
+.git  .gitignore  .obsidian  .trash  Private  Projects
+```
+
+and the only entries in `git status` are the files that existed on both sides (kept as the vault's version, shown as modified) plus whatever the vault had of its own (untracked). The e2e suite asserts that listing literally, for both routes, against a vault populated the way Obsidian really leaves one.
+
+### The two ways in end in the same place
+
+"Create a repository here, then point it at my existing remote" must land where cloning lands, or the plugin has two doors into two different rooms. It does — with one condition:
+
+| | after `clone-into-vault` | after `init-repo` (no commit) + `set-remote` + `adopt-remote` |
+|---|---|---|
+| history | the remote's | the remote's |
+| branch | the remote's | the remote's (the name chosen at init is replaced) |
+| upstream | set | set |
+| overlapping files | the vault's version, shown as a local change | identical |
+| other repository files | checked out | identical |
+| vault-only files | untouched, untracked | identical |
+
+The e2e suite asserts that literally: same HEAD, same branch, same upstream, same `status --porcelain`, same files on disk.
+
+The condition is that the local side has **no commits**. `init-repo` with `initialCommit: true` against a remote that already has content produces two unrelated histories — `pull` then answers `refusing to merge unrelated histories` and `push` is rejected. `set-remote` therefore reports `remoteBranches` and `localCommits` so the plugin can say this immediately, while it is still cheap to fix, instead of letting git say it days later. The plugin offers *Get the repository's content* in the recoverable case and explains the two deliberate ways out (`--allow-unrelated-histories`, or resetting onto the remote branch in Termux) in the other. It does neither by itself.
+
+### A remote whose HEAD is stale
+
+`git init --bare` writes `HEAD -> master`; a repository that only ever received `main` therefore advertises a HEAD that does not exist. Plain `git clone` gives up there ("unable to checkout working tree") and leaves an unusable repository. The runner picks a branch instead: the requested one, else `main`, else `master`, else the only one there is — and names them all in the error if the choice is genuinely ambiguous.
+
+### A vault that is not a repository yet
+
+Bootstrap has to work before there is anything to work on, which touches the profile model of v10. The decision: **the bootstrap flow creates the profile itself**, rather than requiring the installer first.
+
+A profile is therefore in one of three states, decided on every activation:
+
+| state | meaning | allowed actions |
+|---|---|---|
+| `ready` | a git work tree of its own | everything |
+| `bootstrap` | the directory is there, no repository of its own | `ping`, `diagnostics`, `init-repo`, `clone-into-vault` |
+| unusable | gone, unreadable, or git refuses it (dubious ownership) | none; the queue is answered `REPO_MISSING` |
+
+A vault with no repository pairs by writing `claim.json` with `"bootstrap": true`; the runner then adopts a directory that is not a work tree, which it otherwise refuses. Everything else about adoption is unchanged: the claim carries no secret, the token is generated in Termux, and the claim must be fresh. Until a repository exists the profile can answer nothing but the two actions that create one, so the widened adoption cannot be used to reach anything else.
+
 ## Runner version history
 
 Updating the plugin does **not** update the runner in Termux, so the two carry independent version numbers and every result echoes `runnerVersion`. The rule: `RUNNER_VERSION` (runner script) and `RUNNER_MIN_VERSION` (plugin) move together in the release that ships the change, and a capability is attributed to the version **users actually received it in**, not to whatever the constant happened to say while the code was being written. Without that rule, "your runner is v5, this build needs v7" would not be actionable.
@@ -133,5 +220,6 @@ Updating the plugin does **not** update the runner in Termux, so the two carry i
 | 8 | 0.5.9 | Per-path actions (`stage-file`, `unstage-file`, `discard-file`) exclude protected paths that lie UNDER the requested path, so acting on a parent folder can no longer stage or discard a sparse-protected subdirectory; `discard-file` on an untracked folder deletes the untracked files it contains instead of failing; new `discard-all` (drops unstaged work, keeps staged content and untracked files) and `reset-all` (index and worktree back to HEAD, expressed as a pathspec restore so protected paths stay excluded and untracked files survive) |
 | 9 | 0.5.10 | `file-log` uses `--raw --numstat`, so each commit reports the change letter, both sides of a rename and the added/deleted counts the file-history view shows |
 | 10 | 0.6.0 | Several repositories per device: `profiles/<id>.conf` (one per vault, own token), automatic migration of the single-repo config, one run drains every profile oldest-first, `profileId` in requests and results, `REPO_MISSING` for a dead profile, git pinned per profile (`GIT_CEILING_DIRECTORIES` + toplevel check) so nested vaults cannot leak into each other, nested-vault exclusion in the outer repository's `.git/info/exclude`, relocation of a moved vault and self-pairing of a new one (`claim.json` → `pairing.json`), global single-instance lock in the config directory; `verify-sparse-safety` and the safety gate run `git status -uall`, so a new folder under a protected path is reported file by file instead of as one collapsed `dir/` line (the plugin offers to trash exactly that list) |
+| 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin |
 
 Versions 1–3 predate the first tagged release: the oldest runner any published release shipped is v4. Actions introduced after v4 are additionally listed in the plugin's `ACTION_MIN_RUNNER` map, so requesting one against an older runner produces a named "runner too old for this action" message instead of a bare `BAD_REQUEST`. Capabilities that are argument-level rather than new actions (the `INDEX` ref, `stage-file` `mode`) are covered by the version handshake only, hence the strict `RUNNER_MIN_VERSION` bump for them.

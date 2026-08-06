@@ -4,7 +4,7 @@ What you install, in order: **Termux** (runs real git), the **Git Bridge Compani
 
 ## Prerequisites
 
-- An Obsidian vault on shared storage (e.g. `/storage/emulated/0/MyVault`) that is already a git repository with a configured remote. Sparse checkout is supported but not required.
+- An Obsidian vault on shared storage (e.g. `/storage/emulated/0/MyVault`). It does **not** have to be a git repository yet — since plugin 0.6.1 the plugin can create one or clone one into it (see *Step 3c*). Sparse checkout is supported but not required.
 - Termux from **F-Droid** (the Play Store build is deprecated and its RUN_COMMAND behaviour differs).
 
 ## Step 1: Termux
@@ -68,6 +68,18 @@ A vault opened **inside** another vault's repository (`Main/` and `Main/Projects
 An existing single-vault setup is migrated automatically the first time the new runner runs: the old `config` becomes a profile with the **same token** (no re-pairing) and is kept as `config.legacy`.
 
 If you move a vault to another folder, the runner finds it again by the marker it left in the runtime folder and keeps the profile. If a vault is deleted, its profile stays behind and is reported as broken; it is never re-pointed at some other repository.
+
+## Step 3c: a vault that is not a repository yet
+
+*Settings → Native Git Bridge → Repository for this vault → **Set up repository***, also in the setup guide and the command palette. It looks at what the vault actually is and offers only the steps that apply:
+
+- **Pair first.** Termux has to know the vault before it can do anything in it. Pairing works before the repository exists: the plugin marks its pairing request accordingly, and until a repository is there the profile can answer nothing except "create one" and "clone one".
+- **Create a repository here.** Choose the default branch (`main` by default), and decide whether to make a first commit of everything the vault already holds. The plugin's runtime folder is excluded automatically, and a repository created inside another paired vault is excluded from that outer repository straight away.
+- **Clone an existing repository into this vault.** The vault normally already holds files (`.obsidian/` at least), which a plain `git clone` refuses. The plugin clones without a checkout, moves the repository in, and then writes out only the files the vault does **not** have. Nothing you already had is overwritten: the files that exist on both sides keep your version and appear in the panel as ordinary local changes, so you can open each diff and either commit yours or discard it to take the repository's. Files that exist only in the vault are left alone and are simply untracked.
+
+- **Add or change the remote.** For a repository that has none, or one pointing at the wrong place. The plugin checks what the remote already contains and says what that means: an empty remote is ready for your first push; a remote with content offers *Get the repository's content*, which lands in exactly the state cloning would have produced (your files kept, the rest checked out around them). If this vault **also** has commits of its own, the two histories are unrelated — git will refuse to merge them, so the plugin says so at once and points at the two deliberate ways out rather than pretending.
+
+A URL that carries a password is refused with a message rather than accepted: credentials belong in Termux (credential helper, SSH key, or `gh auth login`), never in a request file inside the vault. Accepted forms are `https://…`, `ssh://…`, `git@host:owner/repo.git` and `file:///absolute/path` for a local copy.
 
 ## Step 4: the plugin
 

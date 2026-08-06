@@ -58,6 +58,8 @@ The installer writes the line and prints what it wrote where; the runner re-chec
 
 Both scans run only when a profile is broken or the run has no work at all, so a normal operation never pays for a filesystem scan.
 
+**Amendment (runner v11, plugin 0.6.1).** Repository bootstrap needs a profile before there is a repository, so a claim may carry `"bootstrap": true` and the runner then adopts a directory that is not a work tree. The profile it creates is in the `bootstrap` state and answers only the actions that create a repository; everything else gets `REPO_MISSING`. The alternative — requiring the installer for any new vault — was rejected because it puts a terminal between the user and the first thing they want to do, and the installer path remains available and unchanged.
+
 ## Consequences
 
 - The plugin gains one device-local setting per vault (`profileId`) and sends it with every request.

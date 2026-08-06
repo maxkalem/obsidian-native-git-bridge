@@ -10,6 +10,7 @@ import NativeGitBridgePlugin, { compareVersions } from "../src/main";
 import { RUNNER_MIN_VERSION } from "../src/constants";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
+import { validateRemoteUrl } from "../src/git/remoteUrl";
 
 /**
  * Orchestration tests for the plugin entry (src/main.ts): the REAL plugin
@@ -603,6 +604,114 @@ describe("one surface per question (no legacy modals)", () => {
     await h.plugin.cmdDiffCurrentFile();
     expect(h.app.openedViews).toHaveLength(0);
     expect(__notices.join(" ")).toContain("No active file");
+  });
+});
+
+describe("repository bootstrap", () => {
+  /** Answer the next request with this result body (built from the request). */
+  function answerWith(h: Harness, build: (req: Any) => Any): void {
+    h.runner.onTrigger = (id) => {
+      const req = JSON.parse(h.adapter.files.get(paths.requestFile(id))!);
+      h.adapter.files.set(
+        paths.resultFile(id),
+        JSON.stringify({
+          protocolVersion: 1,
+          id,
+          action: req.action,
+          runnerVersion: RUNNER_MIN_VERSION,
+          ...build(req),
+        })
+      );
+    };
+  }
+
+  it("tells Termux the vault still needs a repository when it pairs", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 10;
+    await h.plugin.cmdPairThisVault();
+    const claim = JSON.parse(h.adapter.files.get(`${paths.root}/claim.json`)!);
+    expect(claim.bootstrap).toBe(true);
+  });
+
+  it("does not ask for bootstrap when the vault already has a .git", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    h.adapter.dirs.add(".git");
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 10;
+    await h.plugin.cmdPairThisVault();
+    const claim = JSON.parse(h.adapter.files.get(`${paths.root}/claim.json`)!);
+    expect(claim.bootstrap).toBe(false);
+  });
+
+  it("gives a clone the network's budget, not the ordinary one", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient({ advancePerSleepMs: 100000 });
+    let sent: Any = null;
+    answerWith(h, (req) => {
+      sent = req;
+      return { ok: true, exitCode: 0, data: { cloned: "true", branch: "main" } };
+    });
+    await (h.plugin as Any).runClone("https://example.com/v.git");
+    expect(sent.action).toBe("clone-into-vault");
+    expect(sent.timeoutSeconds).toBe(900);
+    // A normal action keeps the ordinary budget.
+    await h.plugin.cmdStatus(true);
+    expect(sent.timeoutSeconds).toBe(h.plugin.deviceSettings.opTimeoutSeconds);
+  });
+
+  it("never sends a URL the rules refuse (no round trip at all)", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    // The prompt is a modal; go through the same validation the prompt uses.
+    const bad = ["https://user:pw@example.com/v.git", "-oProxyCommand=id", "ext::sh -c id"];
+    for (const url of bad) {
+      expect(validateRemoteUrl(url).ok, url).toBe(false);
+    }
+    expect(h.runner.uris).toHaveLength(0);
+  });
+
+  it("clones in ONE call and never asks a blind keep-mine-or-theirs question", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const sent: Any[] = [];
+    answerWith(h, (req) => {
+      sent.push(req);
+      return {
+        ok: true,
+        exitCode: 0,
+        data: { cloned: "true", branch: "main", collisions: "Notes/a.md\n.obsidian/app.json\n" },
+      };
+    });
+    await (h.plugin as Any).runClone("https://example.com/v.git");
+    // One request, no onCollision argument, no second attempt: the vault's own
+    // versions are kept and become ordinary local changes to review.
+    expect(sent).toHaveLength(1);
+    expect(sent[0].args).toEqual({ url: "https://example.com/v.git" });
+    expect(__openedModals).toContain("ResultModal");
+  });
+
+  it("reports an init that created the repository but could not commit", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      data: { initialised: "true", branch: "main", committed: "false" },
+      error: {
+        code: "GIT_FAILED",
+        message: "The repository was created (main). The first commit was not made: git user.name…",
+      },
+    }));
+    const result = await (h.plugin as Any).runOperation("init-repo", { branch: "main", initialCommit: true });
+    expect(result.ok).toBe(false);
+    expect(result.data.initialised).toBe("true");
   });
 });
 

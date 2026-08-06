@@ -1,6 +1,6 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
-export const RUNNER_MIN_VERSION = 10;
+export const RUNNER_MIN_VERSION = 11;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).
@@ -24,6 +24,17 @@ export const DONE_DIR = "done";
 
 export const POLL_INTERVAL_MS = 400;
 export const DEFAULT_TIMEOUT_SECONDS = 90;
+
+/**
+ * Actions that take as long as the network takes, rather than as long as git
+ * takes. A clone of a real vault over a phone connection routinely outlives
+ * the ordinary 90 s budget, and a timeout there would leave the user staring
+ * at an error while Termux is still working.
+ */
+export const ACTION_TIMEOUT_SECONDS: Readonly<Record<string, number>> = {
+  "clone-into-vault": 900,
+  "adopt-remote": 900,
+};
 export const RESULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const STALE_LOCK_MS = 30 * 60 * 1000;
 export const DISPLAY_OUTPUT_LIMIT = 100 * 1024;

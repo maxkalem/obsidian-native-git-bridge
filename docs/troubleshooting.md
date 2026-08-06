@@ -31,6 +31,15 @@ The runner knows a profile for this vault, but the directory it points at no lon
 - **The vault was deleted.** The profile stays behind and is reported, not silently reused. Delete `~/.config/native-git-bridge/profiles/<id>.conf` to clean up.
 - **Dubious ownership** (shared storage owned by another uid): the message names the exact command, `git config --global --add safe.directory "<path>"`.
 
+## REPO_EXISTS and other bootstrap questions
+
+- **REPO_EXISTS** — the vault already holds a repository, so "create" and "clone" refuse rather than write over it. If you meant to point it somewhere else, use *Set up repository → Change the remote*; if you really want to start over, remove `.git` in Termux yourself, deliberately.
+- **After a clone, files show as modified** — that is the design, not a fault: those files existed in the vault and in the repository, and your versions were kept rather than overwritten. Open one to see the difference; commit to keep yours, discard to take the repository's. Files that exist only in the vault are untracked, exactly as they were.
+- **After a clone, files show as deleted** — the repository has files that could not be written into the working tree (a name that collides with a directory, or storage that filled up). The repository itself is fine: *discard* restores them from the index.
+- **The repository was created, but the first commit failed** — usually `user.name` / `user.email` are not configured in Termux. The message carries the two commands; run them, then commit from the panel. The repository itself is there and needs no repair.
+- **"refusing to merge unrelated histories"** — the vault was made a repository here *and* committed, and the remote it was later pointed at has its own history. They share no commit, so git will not join them. The clean way out is a new empty vault with the repository cloned into it; the deliberate ways (`git pull --allow-unrelated-histories`, or resetting onto the remote branch) are yours to run in Termux. To avoid it entirely: create the repository without the first commit, set the remote, then *Get the repository's content*.
+- **A clone that seems to hang** — the plugin gives a clone 15 minutes, not the ordinary 90 seconds. Cancelling does not stop the clone inside Termux, but because the repository is only moved into place on success, the vault is either untouched or complete; run *Status* afterwards to see which.
+
 ## AUTH after pairing a second vault
 
 Each vault has its own token. A request file copied from one vault into another's runtime folder is rejected (`AUTH`), and a request naming another vault's profile is rejected (`BAD_REQUEST`). If a vault genuinely lost its token, re-pair it (*Pair this vault*) or re-run the installer for it.

@@ -14,6 +14,15 @@ trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNNER="$SCRIPT_DIR/termux/native-git-bridge-runner.sh"
 
+# Hermetic HOME: git's global config and the runner's default config directory
+# both live under it, so the suite can set a commit identity (init-repo makes
+# the first commit) without touching the developer's own ~/.gitconfig, and a
+# test that forgets NGB_CONFIG cannot write into a real home directory.
+export HOME="$ROOT/home"
+mkdir -p "$HOME"
+git config --global user.email e2e@example.com
+git config --global user.name "E2E"
+
 # The runner scans shared storage for vaults when it has nothing else to do.
 # Point that scan at a directory that does not exist, so the suite can never
 # touch a real device path; the multi-profile phase overrides it per run.
@@ -578,8 +587,8 @@ check '[ ! -d "$RUNTIME/.runner.lock" ]' "no lock left inside the vault runtime 
 check '[ ! -d "$ROOT/conf/.runner.lock" ]' "global lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "10" ]' "runnerVersion = 10 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=10"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "11" ]' "runnerVersion = 11 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=11"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -987,6 +996,298 @@ mrun >/dev/null
 check 'jq -e ".ok == true" "$A_RT/results/r-20260805T170000Z-cor001.json" >/dev/null' "healthy profiles keep working next to a corrupt one"
 check 'grep -q "PROFILE ignoring" "$MCONF/runner.log"' "the corrupt profile is logged and skipped"
 rm -f "$MCONF/profiles/p-00000000deadbeef.conf"
+
+# =============================================================================
+# phase 7: repository bootstrap (runner v11)
+# =============================================================================
+# A vault that is not a repository yet, or one without a remote. Its own config
+# directory again, so nothing here can disturb the phases above.
+
+BOOT="$ROOT/boot"
+BCONF="$ROOT/conf-boot"
+mkdir -p "$BOOT" "$BCONF"
+brun() { NGB_CONFIG="$BCONF/config" NGB_SCAN_ROOTS="$BOOT" bash "$RUNNER" "$@"; }
+# A vault with files but NO repository, asking to be paired for bootstrap.
+newvault() { # $1 dir
+  mkdir -p "$1/.obsidian/plugins/native-git-bridge/runtime"
+  printf '{"createdAt":"%s","bootstrap":true}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$1/.obsidian/plugins/native-git-bridge/runtime/claim.json"
+}
+breq() { # $1 runtime, $2 id, $3 token, $4 action, $5 profileId, $6 args
+  local args="${6:-}"
+  [ -z "$args" ] && args='{}'
+  mkdir -p "$1/requests"
+  cat > "$1/requests/$2.json" <<REQ
+{"protocolVersion":1,"id":"$2","token":"$3","action":"$4","profileId":"$5","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":$args}
+REQ
+}
+
+echo "# phase 7: a vault with no repository can be paired, and says so"
+newvault "$BOOT/Fresh"
+F_RT="$BOOT/Fresh/.obsidian/plugins/native-git-bridge/runtime"
+echo "my note" > "$BOOT/Fresh/note.md"
+brun >/dev/null
+check '[ -f "$F_RT/pairing.json" ]' "a vault without a repository can pair for bootstrap"
+F_TOKEN="$(jq -r .token "$F_RT/pairing.json")"
+F_PID="$(jq -r .profileId "$F_RT/pairing.json")"
+breq "$F_RT" "r-20260806T100000Z-boot01" "$F_TOKEN" status "$F_PID"
+brun >/dev/null
+check 'jq -e ".error.code == \"REPO_MISSING\"" "$F_RT/results/r-20260806T100000Z-boot01.json" >/dev/null' "a normal action before there is a repository -> REPO_MISSING"
+check 'jq -er ".error.message" "$F_RT/results/r-20260806T100000Z-boot01.json" | grep -qi "clone"' "the message says what to do about it"
+# A claim without the bootstrap flag is still refused for a non-repository.
+mkdir -p "$BOOT/NotAsked/.obsidian/plugins/native-git-bridge/runtime"
+printf '{"createdAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  > "$BOOT/NotAsked/.obsidian/plugins/native-git-bridge/runtime/claim.json"
+BEFORE_N="$(ls "$BCONF"/profiles/*.conf | wc -l)"
+brun >/dev/null
+check '[ "$(ls "$BCONF"/profiles/*.conf | wc -l)" = "$BEFORE_N" ]' "a plain claim still needs a repository (only bootstrap claims may pair without one)"
+
+echo "# phase 7: init-repo"
+breq "$F_RT" "r-20260806T101000Z-init01" "$F_TOKEN" init-repo "$F_PID" '{"branch":"trunk","initialCommit":true,"message":"e2e: first commit"}'
+brun >/dev/null
+RES="$F_RT/results/r-20260806T101000Z-init01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "init-repo succeeds in a vault that has files"
+check '[ "$(jq -r .data.branch "$RES")" = "trunk" ]' "the default branch is the one that was asked for"
+check '[ "$(git -C "$BOOT/Fresh" symbolic-ref --short HEAD)" = "trunk" ]' "…and git agrees"
+check '[ "$(jq -r .data.committed "$RES")" = "true" ]' "the first commit was made"
+check 'git -C "$BOOT/Fresh" ls-files | grep -qx "note.md"' "the vault's note is in that commit"
+check '! git -C "$BOOT/Fresh" ls-files | grep -q "runtime/"' "the runtime folder is NOT committed"
+check 'grep -q "native-git-bridge/runtime/" "$BOOT/Fresh/.git/info/exclude"' "init writes the runtime exclude itself"
+breq "$F_RT" "r-20260806T101001Z-init02" "$F_TOKEN" init-repo "$F_PID" '{"branch":"main"}'
+brun >/dev/null
+check 'jq -e ".error.code == \"REPO_EXISTS\"" "$F_RT/results/r-20260806T101001Z-init02.json" >/dev/null' "an existing repository is never re-initialised"
+check '[ "$(git -C "$BOOT/Fresh" symbolic-ref --short HEAD)" = "trunk" ]' "…and the refusal changed nothing"
+newvault "$BOOT/BadBranch"
+BB_RT="$BOOT/BadBranch/.obsidian/plugins/native-git-bridge/runtime"
+brun >/dev/null
+BB_TOKEN="$(jq -r .token "$BB_RT/pairing.json")"; BB_PID="$(jq -r .profileId "$BB_RT/pairing.json")"
+breq "$BB_RT" "r-20260806T101002Z-init03" "$BB_TOKEN" init-repo "$BB_PID" '{"branch":"--upload-pack=id"}'
+brun >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$BB_RT/results/r-20260806T101002Z-init03.json" >/dev/null' "a branch name that could be an option is rejected"
+check '[ ! -d "$BOOT/BadBranch/.git" ]' "…and nothing was created"
+
+echo "# phase 7: set-remote"
+breq "$F_RT" "r-20260806T102000Z-rem01" "$F_TOKEN" set-remote "$F_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+check 'jq -e ".ok == true" "$F_RT/results/r-20260806T102000Z-rem01.json" >/dev/null' "set-remote adds origin"
+check '[ "$(git -C "$BOOT/Fresh" remote get-url origin)" = "file://$ROOT/remote.git" ]' "…and git has it"
+breq "$F_RT" "r-20260806T102001Z-rem02" "$F_TOKEN" set-remote "$F_PID" "{\"url\":\"https://example.com/changed.git\"}"
+brun >/dev/null
+check '[ "$(git -C "$BOOT/Fresh" remote get-url origin)" = "https://example.com/changed.git" ]' "set-remote changes an existing origin"
+for BAD in '"https://user:hunter2@example.com/x.git"' '"-oProxyCommand=id"' '"http://example.com/x.git"' '"ext::sh -c id"' '"https://exa mple.com/x.git"'; do
+  breq "$F_RT" "r-20260806T1030$(printf %02d $RANDOM | tail -c 3)Z-bad$$" "$F_TOKEN" set-remote "$F_PID" "{\"url\":$BAD}"
+done
+brun >/dev/null
+check '[ "$(grep -l "BAD_REQUEST" "$F_RT"/results/*bad$$.json 2>/dev/null | wc -l)" -ge 1 ]' "credentials in a URL, option-like URLs, http, ext:: and whitespace are all refused"
+check '[ "$(git -C "$BOOT/Fresh" remote get-url origin)" = "https://example.com/changed.git" ]' "…and none of them changed the remote"
+check '! grep -rq "hunter2" "$F_RT/results" "$F_RT/runner.log" "$BCONF/runner.log"' "a password in a rejected URL never reaches a result or a log"
+
+echo "# phase 7: clone into a vault that already has files"
+newvault "$BOOT/CloneA"
+CA_RT="$BOOT/CloneA/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$BOOT/CloneA/Notes"
+echo "local version" > "$BOOT/CloneA/Notes/note.md"   # exists in the repository too
+echo "only here" > "$BOOT/CloneA/mine.md"             # exists only in the vault
+brun >/dev/null
+CA_TOKEN="$(jq -r .token "$CA_RT/pairing.json")"; CA_PID="$(jq -r .profileId "$CA_RT/pairing.json")"
+breq "$CA_RT" "r-20260806T104000Z-cln01" "$CA_TOKEN" clone-into-vault "$CA_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+RES="$CA_RT/results/r-20260806T104000Z-cln01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the clone succeeds even though files exist on both sides"
+check 'jq -er ".data.collisions" "$RES" | grep -qx "Notes/note.md"' "the overlapping file is reported"
+# The point of the whole flow: nothing of the user's is written over, and the
+# rest of the repository still arrives.
+check '[ "$(cat "$BOOT/CloneA/Notes/note.md")" = "local version" ]' "the vault's own version is kept, not replaced"
+check 'git -C "$BOOT/CloneA" status --porcelain | grep -q "^ M Notes/note.md"' "…and shows in the panel as an ordinary local change"
+check '[ -f "$BOOT/CloneA/mine.md" ]' "a file that exists only in the vault is left alone"
+check 'git -C "$BOOT/CloneA" status --porcelain | grep -q "^?? mine.md"' "…and is simply untracked"
+check '[ -f "$BOOT/CloneA/Notes/unicode nøte.md" ]' "the repository's OTHER files are checked out (unicode and spaces included)"
+check '[ -z "$(git -C "$BOOT/CloneA" status --porcelain -- "Notes/unicode nøte.md")" ]' "…and are clean, not reported as changes"
+check '! git -C "$BOOT/CloneA" status --porcelain | grep -q "^ D "' "nothing is left looking deleted"
+check '[ ! -e "$BOOT/CloneA/.trash" ]' "nothing is moved into the vault trash"
+check '[ ! -e "$CA_RT/clone-tmp" ]' "no temporary clone directory is left behind"
+check '[ "$(git -C "$BOOT/CloneA" rev-parse --abbrev-ref "@{upstream}" 2>/dev/null)" = "origin/$MAIN_BRANCH" ]' "the branch tracks the remote, so pull and push work"
+check 'grep -q "native-git-bridge/runtime/" "$BOOT/CloneA/.git/info/exclude"' "the clone writes the runtime exclude"
+# Taking the repository's version afterwards is the per-file discard the panel
+# already has — with the diff visible first, instead of a blind choice.
+breq "$CA_RT" "r-20260806T104002Z-cln02" "$CA_TOKEN" discard-file "$CA_PID" '{"path":"Notes/note.md","protectedPaths":[]}'
+brun >/dev/null
+check '[ "$(cat "$BOOT/CloneA/Notes/note.md")" != "local version" ]' "discarding one file takes the repository's version for it"
+
+newvault "$BOOT/CloneC"
+CC_RT="$BOOT/CloneC/.obsidian/plugins/native-git-bridge/runtime"
+echo "only here" > "$BOOT/CloneC/mine.md"
+brun >/dev/null
+CC_TOKEN="$(jq -r .token "$CC_RT/pairing.json")"; CC_PID="$(jq -r .profileId "$CC_RT/pairing.json")"
+breq "$CC_RT" "r-20260806T106000Z-cln04" "$CC_TOKEN" clone-into-vault "$CC_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+RES="$CC_RT/results/r-20260806T106000Z-cln04.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "with nothing in the way the clone just works"
+check '[ -z "$(jq -r .data.collisions "$RES")" ]' "…and reports no overlap"
+check '[ -f "$BOOT/CloneC/Notes/note.md" ]' "the repository's files are checked out"
+check '[ -f "$BOOT/CloneC/mine.md" ]' "the vault's own file is still there"
+check '[ -z "$(git -C "$BOOT/CloneC" status --porcelain -- Notes)" ]' "the checked-out files are clean"
+breq "$CC_RT" "r-20260806T106001Z-cln05" "$CC_TOKEN" clone-into-vault "$CC_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+check 'jq -e ".error.code == \"REPO_EXISTS\"" "$CC_RT/results/r-20260806T106001Z-cln05.json" >/dev/null' "cloning over an existing repository is refused"
+breq "$CC_RT" "r-20260806T106002Z-cln06" "$CC_TOKEN" clone-into-vault "$CC_PID" '{"url":"file:///nonexistent/nope.git"}'
+brun >/dev/null
+check 'jq -e ".error.code == \"REPO_EXISTS\"" "$CC_RT/results/r-20260806T106002Z-cln06.json" >/dev/null' "…before the URL is even used"
+
+echo "# phase 7: init + set-remote ends up exactly where a clone would"
+# The question a user actually asks: if I create a repository here and then
+# point it at my existing remote, do I get the same thing as cloning? Only if
+# the local side has no history of its own — and the two paths must then be
+# indistinguishable.
+newvault "$BOOT/PathClone"
+newvault "$BOOT/PathInit"
+for V in PathClone PathInit; do
+  mkdir -p "$BOOT/$V/Notes"
+  echo "local version" > "$BOOT/$V/Notes/note.md"   # exists in the repository too
+  echo "only here" > "$BOOT/$V/mine.md"
+done
+brun >/dev/null
+PC_RT="$BOOT/PathClone/.obsidian/plugins/native-git-bridge/runtime"
+PI_RT="$BOOT/PathInit/.obsidian/plugins/native-git-bridge/runtime"
+PC_TOKEN="$(jq -r .token "$PC_RT/pairing.json")"; PC_PID="$(jq -r .profileId "$PC_RT/pairing.json")"
+PI_TOKEN="$(jq -r .token "$PI_RT/pairing.json")"; PI_PID="$(jq -r .profileId "$PI_RT/pairing.json")"
+breq "$PC_RT" "r-20260806T108000Z-pc01" "$PC_TOKEN" clone-into-vault "$PC_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+breq "$PI_RT" "r-20260806T108001Z-pi01" "$PI_TOKEN" init-repo "$PI_PID" '{"branch":"scratch","initialCommit":false}'
+brun >/dev/null
+breq "$PI_RT" "r-20260806T108002Z-pi02" "$PI_TOKEN" set-remote "$PI_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+RES="$PI_RT/results/r-20260806T108002Z-pi02.json"
+check '[ "$(jq -r .data.remoteReachable "$RES")" = "true" ]' "set-remote reports whether the remote could be reached"
+check 'jq -er ".data.remoteBranches" "$RES" | grep -q .' "…and which branches it already has"
+check '[ "$(jq -r .data.localCommits "$RES")" = "false" ]' "…and that this side has no history yet"
+breq "$PI_RT" "r-20260806T108003Z-pi03" "$PI_TOKEN" adopt-remote "$PI_PID" '{}'
+brun >/dev/null
+check 'jq -e ".ok == true" "$PI_RT/results/r-20260806T108003Z-pi03.json" >/dev/null' "adopt-remote takes the remote's history"
+# Now compare the two vaults in every way that matters.
+check '[ "$(git -C "$BOOT/PathClone" rev-parse HEAD)" = "$(git -C "$BOOT/PathInit" rev-parse HEAD)" ]' "same commit"
+check '[ "$(git -C "$BOOT/PathClone" symbolic-ref --short HEAD)" = "$(git -C "$BOOT/PathInit" symbolic-ref --short HEAD)" ]' "same branch (the init branch name is replaced by the remote's)"
+check '[ "$(git -C "$BOOT/PathClone" rev-parse --abbrev-ref "@{upstream}")" = "$(git -C "$BOOT/PathInit" rev-parse --abbrev-ref "@{upstream}")" ]' "same upstream, so pull and push work in both"
+check '[ "$(git -C "$BOOT/PathClone" status --porcelain | sort)" = "$(git -C "$BOOT/PathInit" status --porcelain | sort)" ]' "same status: the local version kept as a change, the local-only file untracked"
+check '[ "$(cd "$BOOT/PathClone" && find . -path ./.git -prune -o -path ./.obsidian -prune -o -type f -print | sort)" = "$(cd "$BOOT/PathInit" && find . -path ./.git -prune -o -path ./.obsidian -prune -o -type f -print | sort)" ]' "same files on disk"
+
+echo "# phase 7: a repository that already has its own commits cannot just take a remote's"
+newvault "$BOOT/PathOwn"
+echo "mine" > "$BOOT/PathOwn/note.md"
+brun >/dev/null
+PO_RT="$BOOT/PathOwn/.obsidian/plugins/native-git-bridge/runtime"
+PO_TOKEN="$(jq -r .token "$PO_RT/pairing.json")"; PO_PID="$(jq -r .profileId "$PO_RT/pairing.json")"
+breq "$PO_RT" "r-20260806T109000Z-po01" "$PO_TOKEN" init-repo "$PO_PID" '{"branch":"main","initialCommit":true,"message":"e2e: own history"}'
+brun >/dev/null
+breq "$PO_RT" "r-20260806T109001Z-po02" "$PO_TOKEN" set-remote "$PO_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+check '[ "$(jq -r .data.localCommits "$PO_RT/results/r-20260806T109001Z-po02.json")" = "true" ]' "set-remote reports that this side has its own history"
+breq "$PO_RT" "r-20260806T109002Z-po03" "$PO_TOKEN" adopt-remote "$PO_PID" '{}'
+brun >/dev/null
+RES="$PO_RT/results/r-20260806T109002Z-po03.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "adopt-remote refuses rather than creating unrelated histories"
+check 'jq -er ".error.message" "$RES" | grep -qi "unrelated"' "…and names the problem"
+check '[ "$(git -C "$BOOT/PathOwn" rev-list --count HEAD)" = "1" ]' "…and changes nothing"
+
+echo "# phase 7: the vault ends up shaped exactly like the remote"
+# The requirement in plain terms: after attaching a repository, the top level of
+# the vault is what the remote has plus .git — no scratch folder, no leftovers,
+# nothing hidden away — and it does not matter which of the two ways was used.
+git init -q --bare "$ROOT/shape.git"
+git clone -q "$ROOT/shape.git" "$ROOT/shape-seed" 2>/dev/null
+git -C "$ROOT/shape-seed" config user.email e2e@example.com
+git -C "$ROOT/shape-seed" config user.name E2E
+git -C "$ROOT/shape-seed" checkout -qb main
+mkdir -p "$ROOT/shape-seed/.obsidian" "$ROOT/shape-seed/.trash" \
+         "$ROOT/shape-seed/Private/Hidden" "$ROOT/shape-seed/Projects/Archive"
+echo '{"remote":1}' > "$ROOT/shape-seed/.obsidian/app.json"
+echo '["git"]'      > "$ROOT/shape-seed/.obsidian/community-plugins.json"
+echo trashed        > "$ROOT/shape-seed/.trash/old-note.md"
+echo secret         > "$ROOT/shape-seed/Private/Hidden/mem.md"
+echo spec           > "$ROOT/shape-seed/Projects/Archive/spec.md"
+printf '.obsidian/workspace*\n' > "$ROOT/shape-seed/.gitignore"
+git -C "$ROOT/shape-seed" add -A
+git -C "$ROOT/shape-seed" commit -qm "vault shape"
+git -C "$ROOT/shape-seed" push -q origin main
+WANT=".git .gitignore .obsidian .trash Private Projects"
+
+# A vault as Obsidian really leaves it: config files, a workspace, plugin files.
+realvault() { # $1 dir
+  mkdir -p "$1/.obsidian/plugins/native-git-bridge/runtime" "$1/Projects"
+  echo '{"local":1}'    > "$1/.obsidian/app.json"
+  echo '["a","b"]'      > "$1/.obsidian/community-plugins.json"
+  echo '{"main":"..."}' > "$1/.obsidian/workspace.json"
+  echo "local build"    > "$1/.obsidian/plugins/native-git-bridge/main.js"
+  echo "my new note"    > "$1/Projects/today.md"
+  printf '{"createdAt":"%s","bootstrap":true}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    > "$1/.obsidian/plugins/native-git-bridge/runtime/claim.json"
+}
+toplevel() { (cd "$1" && ls -a | grep -v '^\.$' | grep -v '^\.\.$' | sort | tr '\n' ' ' | sed 's/ $//'); }
+
+realvault "$BOOT/ShapeClone"
+realvault "$BOOT/ShapeInit"
+brun >/dev/null
+SC_RT="$BOOT/ShapeClone/.obsidian/plugins/native-git-bridge/runtime"
+SI_RT="$BOOT/ShapeInit/.obsidian/plugins/native-git-bridge/runtime"
+SC_TOKEN="$(jq -r .token "$SC_RT/pairing.json")"; SC_PID="$(jq -r .profileId "$SC_RT/pairing.json")"
+SI_TOKEN="$(jq -r .token "$SI_RT/pairing.json")"; SI_PID="$(jq -r .profileId "$SI_RT/pairing.json")"
+breq "$SC_RT" "r-20260806T111000Z-sc01" "$SC_TOKEN" clone-into-vault "$SC_PID" "{\"url\":\"file://$ROOT/shape.git\"}"
+brun >/dev/null
+breq "$SI_RT" "r-20260806T111001Z-si01" "$SI_TOKEN" init-repo "$SI_PID" '{"branch":"whatever","initialCommit":false}'
+brun >/dev/null
+breq "$SI_RT" "r-20260806T111002Z-si02" "$SI_TOKEN" set-remote "$SI_PID" "{\"url\":\"file://$ROOT/shape.git\"}"
+brun >/dev/null
+breq "$SI_RT" "r-20260806T111003Z-si03" "$SI_TOKEN" adopt-remote "$SI_PID" '{}'
+brun >/dev/null
+check '[ "$(toplevel "$BOOT/ShapeClone")" = "$WANT" ]' "after cloning, the vault top level is exactly the remote's plus .git"
+check '[ "$(toplevel "$BOOT/ShapeInit")" = "$WANT" ]' "after init + set-remote + adopt, the same"
+check '[ "$(toplevel "$BOOT/ShapeClone")" = "$(toplevel "$BOOT/ShapeInit")" ]' "the two ways are indistinguishable"
+check '[ ! -e "$BOOT/ShapeClone/.tmp" ] && [ ! -e "$BOOT/ShapeClone/.trash/clone-"* ] 2>/dev/null || [ -z "$(ls -d "$BOOT/ShapeClone/.trash/clone-"* 2>/dev/null)" ]' "no scratch folder and nothing dropped into the trash"
+check '[ "$(cat "$BOOT/ShapeClone/.trash/old-note.md")" = "trashed" ]' "the trash holds what the REMOTE tracked there, nothing else"
+# The vault's own files survive; only what exists on both sides is a change.
+check 'git -C "$BOOT/ShapeClone" status --porcelain | grep -q "^ M .obsidian/app.json"' "a config file that exists on both sides is a local change"
+check 'git -C "$BOOT/ShapeClone" status --porcelain | grep -q "^?? Projects/today.md"' "a note written before the clone is kept, untracked"
+check '[ -f "$BOOT/ShapeClone/.obsidian/workspace.json" ]' "a file the remote gitignores is left alone"
+check '[ -f "$BOOT/ShapeClone/Private/Hidden/mem.md" ] && [ -f "$BOOT/ShapeClone/Projects/Archive/spec.md" ]' "the repository's own folders are all checked out"
+check '[ "$(git -C "$BOOT/ShapeClone" rev-parse HEAD)" = "$(git -C "$BOOT/ShapeInit" rev-parse HEAD)" ]' "…on the same commit either way"
+
+echo "# phase 7: a remote whose HEAD points at a branch it does not have"
+# `git init --bare` writes HEAD -> master; pushing only `main` leaves that HEAD
+# dangling. Plain `git clone` gives up here and leaves an unusable repository.
+git init -q --bare "$ROOT/stale.git"
+git clone -q "$ROOT/stale.git" "$ROOT/stale-seed" 2>/dev/null
+git -C "$ROOT/stale-seed" config user.email e2e@example.com
+git -C "$ROOT/stale-seed" config user.name E2E
+git -C "$ROOT/stale-seed" checkout -qb only-this
+echo content > "$ROOT/stale-seed/file.md"
+git -C "$ROOT/stale-seed" add -A
+git -C "$ROOT/stale-seed" commit -qm "stale head"
+git -C "$ROOT/stale-seed" push -q origin only-this
+newvault "$BOOT/StaleHead"
+SH_RT="$BOOT/StaleHead/.obsidian/plugins/native-git-bridge/runtime"
+brun >/dev/null
+SH_TOKEN="$(jq -r .token "$SH_RT/pairing.json")"; SH_PID="$(jq -r .profileId "$SH_RT/pairing.json")"
+breq "$SH_RT" "r-20260806T110000Z-sh01" "$SH_TOKEN" clone-into-vault "$SH_PID" "{\"url\":\"file://$ROOT/stale.git\"}"
+brun >/dev/null
+RES="$SH_RT/results/r-20260806T110000Z-sh01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the clone picks the only branch there is"
+check '[ "$(jq -r .data.branch "$RES")" = "only-this" ]' "…and reports it"
+check '[ -f "$BOOT/StaleHead/file.md" ]' "…and the files are actually checked out"
+check '[ "$(git -C "$BOOT/StaleHead" rev-parse --abbrev-ref "@{upstream}")" = "origin/only-this" ]' "…with an upstream, so pull and push work"
+
+echo "# phase 7: a repository created inside another paired vault"
+# VaultA from phase 6 is a repository; a vault inside it bootstraps its own.
+newvault "$MULTI/VaultA/Inner"
+IN_RT="$MULTI/VaultA/Inner/.obsidian/plugins/native-git-bridge/runtime"
+echo inner > "$MULTI/VaultA/Inner/note.md"
+NGB_CONFIG="$MCONF/config" NGB_SCAN_ROOTS="$MULTI" bash "$RUNNER" >/dev/null
+IN_TOKEN="$(jq -r .token "$IN_RT/pairing.json" 2>/dev/null || true)"
+IN_PID="$(jq -r .profileId "$IN_RT/pairing.json" 2>/dev/null || true)"
+check '[ -n "$IN_TOKEN" ]' "a vault inside another vault's repository can pair for bootstrap"
+breq "$IN_RT" "r-20260806T107000Z-nst01" "$IN_TOKEN" init-repo "$IN_PID" '{"branch":"main"}'
+NGB_CONFIG="$MCONF/config" NGB_SCAN_ROOTS="$MULTI" bash "$RUNNER" >/dev/null
+check 'jq -e ".ok == true" "$IN_RT/results/r-20260806T107000Z-nst01.json" >/dev/null' "init-repo works inside another repository"
+check 'grep -qxF "/Inner/" "$MULTI/VaultA/.git/info/exclude"' "the new repository is excluded from the outer one immediately"
+check '! git -C "$MULTI/VaultA" status --porcelain | grep -q "Inner"' "…so the outer repository never offers its files"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=10
+RUNNER_VERSION=11
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -73,6 +73,47 @@ valid_profile_id() { printf '%s' "$1" | grep -Eq '^p-[0-9a-f]{8,32}$'; }
 # Tokens are compared verbatim; the charset only has to keep the profile file
 # (KEY="value" lines) parsable and unambiguous.
 valid_token() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]{8,128}$'; }
+
+# A remote URL is user input, so it is validated on both sides and never
+# interpolated into a shell string (git is called with argv arrays).
+#
+# Refused on purpose:
+#   - anything starting with "-", which git would read as an option;
+#   - credentials in the URL (`https://user:pass@host/…`). They would be
+#     written into the request file inside the vault and into .git/config,
+#     and this plugin's rule is that no secret ever reaches the plugin side.
+#     Authentication belongs to a credential helper or an SSH key, in Termux.
+#   - plain http, control characters, whitespace, anything non-ASCII.
+NGB_MAX_URL_LEN="${NGB_MAX_URL_LEN:-512}"
+valid_remote_url() {
+  local u="$1"
+  [ -n "$u" ] || return 1
+  [ "${#u}" -le "$NGB_MAX_URL_LEN" ] || return 1
+  case "$u" in -*) return 1 ;; esac
+  printf '%s' "$u" | LC_ALL=C grep -Eq '^[!-~]+$' || return 1
+  printf '%s' "$u" | grep -Eq '^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*:[^/@]*@' && return 1
+  case "$u" in
+    https://*|ssh://*) return 0 ;;
+    # A local repository, e.g. a copy on the SD card. It carries no protocol
+    # and cannot execute anything; the dangerous git URL forms (ext::, git::)
+    # are not in this list and their arguments contain spaces anyway.
+    file:///*) return 0 ;;
+  esac
+  # scp-like form: user@host:path
+  printf '%s' "$u" | grep -Eq '^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^ ]+$' && return 0
+  return 1
+}
+
+# Branch names: a safe subset of git's rules (no leading '-', no "..", no
+# trailing ".lock", no control characters, no refspec punctuation).
+valid_branch_name() {
+  local b="$1"
+  [ -n "$b" ] || return 1
+  [ "${#b}" -le 100 ] || return 1
+  printf '%s' "$b" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || return 1
+  case "$b" in *..*|*.lock|*/|*//*) return 1 ;; esac
+  return 0
+}
 
 # Values stored in a profile file: absolute path, no quotes, no control chars.
 valid_abs_path() {
@@ -295,8 +336,18 @@ pin_git_to_repo() {
   export GIT_DISCOVERY_ACROSS_FILESYSTEM=0
 }
 
+# A profile is in one of three states:
+#   ready      - a git work tree of its own; every action is allowed
+#   bootstrap  - the directory is there but holds no repository of its own yet;
+#                only the actions that CREATE one are allowed (v11)
+#   unusable   - the directory is gone, unreadable, or git refuses it
+# The middle state exists because a vault can be paired before it is a
+# repository: "make this vault a repository" has to be answerable through the
+# same protocol as everything else.
+PROFILE_STATE="unusable"
 PROFILE_UNHEALTHY_REASON=""
 repo_is_usable() {
+  PROFILE_STATE="unusable"
   PROFILE_UNHEALTHY_REASON=""
   if [ ! -d "$NGB_REPO_DIR" ]; then
     PROFILE_UNHEALTHY_REASON="The repository directory no longer exists ($NGB_REPO_DIR)."
@@ -309,22 +360,32 @@ repo_is_usable() {
   local top err
   err="$(git rev-parse --show-toplevel 2>&1 >/dev/null)"
   top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -z "$top" ]; then
+  if [ -z "$top" ] || [ "$(realpath "$top" 2>/dev/null || printf '%s' "$top")" != \
+       "$(realpath "$NGB_REPO_DIR" 2>/dev/null || printf '%s' "$NGB_REPO_DIR")" ]; then
+    # No repository of its own. Either it never had one (bootstrap) or it lost
+    # it while sitting inside another repository — and the ceiling above makes
+    # both look the same, which is what keeps a nested pair apart: git here can
+    # never resolve to the repository above.
     case "$err" in
       *"dubious ownership"*)
-        PROFILE_UNHEALTHY_REASON="Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory \"$NGB_REPO_DIR\"" ;;
-      *) PROFILE_UNHEALTHY_REASON="Not a git work tree: $NGB_REPO_DIR" ;;
+        PROFILE_UNHEALTHY_REASON="Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory \"$NGB_REPO_DIR\""
+        return 1 ;;
     esac
-    return 1
+    PROFILE_STATE="bootstrap"
+    PROFILE_UNHEALTHY_REASON="$NGB_REPO_DIR is not a git repository of its own yet."
+    return 0
   fi
-  if [ "$(realpath "$top" 2>/dev/null || printf '%s' "$top")" != \
-       "$(realpath "$NGB_REPO_DIR" 2>/dev/null || printf '%s' "$NGB_REPO_DIR")" ]; then
-    # Only possible when the repository directory lost its own .git and sits
-    # inside another repository. Refusing here is what keeps a nested pair apart.
-    PROFILE_UNHEALTHY_REASON="$NGB_REPO_DIR is inside another repository ($top), not a repository of its own."
-    return 1
-  fi
+  PROFILE_STATE="ready"
   return 0
+}
+
+# Actions allowed while a profile is in the bootstrap state. Everything else
+# needs a repository and is answered with REPO_MISSING.
+bootstrap_action_allowed() {
+  case "$1" in
+    ping|diagnostics|init-repo|clone-into-vault) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASON set)
@@ -477,9 +538,22 @@ adopt_claims() { # $1..$n = marker files
       rm -f "$cf" 2>/dev/null || true
       continue
     fi
+    # Normally a claim is only honoured for a directory that is already a git
+    # work tree. A vault that asks to be BOOTSTRAPPED has none yet by
+    # definition, so it may pair without one — the claim file's own location
+    # proves it is an Obsidian vault (it lies in this plugin's runtime folder),
+    # and until a repository exists the profile can answer nothing but the two
+    # actions that create one.
     if ! dir_is_own_worktree "$vault"; then
-      log "CLAIM $vault is not a git repository of its own; not pairing it"
-      continue
+      if [ "$(jq -r '.bootstrap // false' "$cf" 2>/dev/null || echo false)" != "true" ]; then
+        log "CLAIM $vault is not a git repository of its own; not pairing it"
+        continue
+      fi
+      if [ ! -d "$vault" ] || [ ! -w "$vault" ]; then
+        log "CLAIM $vault is not a writable directory; not pairing it"
+        continue
+      fi
+      log "CLAIM $vault has no repository yet; pairing it for bootstrap"
     fi
     id="$(new_profile_id)"
     token="$(new_token)"
@@ -661,6 +735,7 @@ action_diagnostics() {
     authMethod "$auth_method" \
     runtimeDir "$NGB_RUNTIME_DIR" \
     profileId "$PROFILE_ID" \
+    profileState "$PROFILE_STATE" \
     profileCount "$(list_profile_files | grep -c . || true)" \
     runnerVersion "$RUNNER_VERSION")
 }
@@ -1379,6 +1454,394 @@ action_exclude_remove() {
   emit_exclude_list
 }
 
+# ---- repository bootstrap (v11) ------------------------------------------------
+# The missing beginning of the story: a vault that is not a repository yet, or
+# one without a remote. Everything interactive (a PAT, a passphrase) stays in
+# Termux — these actions only do the parts that carry no secret.
+
+NGB_CLONE_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+
+# The runtime directory must be excluded from the repository the moment one
+# exists, or the request/result files show up as untracked changes.
+write_runtime_exclude() {
+  local xf line=".obsidian/plugins/native-git-bridge/runtime/"
+  # Derive the line from the profile's own runtime dir when it lives inside the
+  # repository (a custom Obsidian config directory is not always ".obsidian").
+  case "$NGB_RUNTIME_DIR" in
+    "$NGB_REPO_DIR"/*) line="${NGB_RUNTIME_DIR#"$NGB_REPO_DIR"/}/" ;;
+  esac
+  xf="$(git rev-parse --git-path info/exclude 2>/dev/null || true)"
+  [ -n "$xf" ] || return 0
+  case "$xf" in /*) : ;; *) xf="$NGB_REPO_DIR/$xf" ;; esac
+  mkdir -p "$(dirname "$xf")" 2>/dev/null || return 0
+  grep -qxF "$line" "$xf" 2>/dev/null && return 0
+  ensure_trailing_newline "$xf"
+  printf '%s\n' "$line" >> "$xf" || true
+}
+
+# A freshly created repository inside another paired vault has to be excluded
+# from that outer repository right away, not on the next run.
+exclude_from_outer_profiles() {
+  local conf outer
+  while IFS= read -r conf; do
+    [ -n "$conf" ] || continue
+    outer="$(sed -n 's/^NGB_REPO_DIR="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$conf" | head -1)"
+    [ -n "$outer" ] || continue
+    [ "$outer" = "$NGB_REPO_DIR" ] && continue
+    case "$NGB_REPO_DIR" in
+      "$outer"/*) ensure_nested_exclusion "$outer" "$NGB_REPO_DIR" ;;
+    esac
+  done < <(list_profile_files)
+}
+
+# Bring the working tree up to the index without overwriting anything the vault
+# already holds. Used by both ways of attaching a repository to a vault that
+# already has files, so the two end in exactly the same state.
+#
+#   reset <ref>  -> the repository's tree lands in the INDEX; the working tree
+#                   is untouched, so files that exist here become "modified"
+#   checkout-index of the deleted paths -> everything the vault does NOT have
+#                   is written out of the index, and only those paths
+materialize_from_ref() { # $1 = ref to take the tree from
+  if ! run_git reset -q "$1"; then
+    ERROR=$(err_json GIT_FAILED "Linking the working tree to the repository failed." "$GIT_OUT" "$GIT_ERR")
+    return 1
+  fi
+  local missing_err
+  missing_err="$(git ls-files -z --deleted 2>/dev/null | git checkout-index -z --stdin -u 2>&1 >/dev/null)"
+  if [ -n "$missing_err" ]; then
+    MATERIALIZE_ERR="$missing_err"
+    return 2
+  fi
+  MATERIALIZE_ERR=""
+  return 0
+}
+
+# Which branch to adopt when the remote does not say (or says something that
+# does not exist): the requested one, then main, then master, then the only one
+# there is. Prints nothing when the choice is not obvious.
+pick_remote_branch() { # $1 = requested branch or empty
+  local want="$1" b count
+  if [ -n "$want" ]; then
+    git show-ref --verify -q "refs/remotes/origin/$want" && { printf '%s' "$want"; return 0; }
+    return 1
+  fi
+  for b in main master; do
+    git show-ref --verify -q "refs/remotes/origin/$b" && { printf '%s' "$b"; return 0; }
+  done
+  count="$(git for-each-ref --format='%(refname:short)' refs/remotes/origin 2>/dev/null | grep -cv '^origin/HEAD$' || true)"
+  if [ "$count" = "1" ]; then
+    git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin/HEAD$' | sed 's|^origin/||'
+    return 0
+  fi
+  return 1
+}
+
+action_init_repo() {
+  local req_file="$1" branch msg initial
+  branch=$(jq -r '.args.branch // "main"' "$req_file")
+  initial=$(jq -r '.args.initialCommit // false' "$req_file")
+  msg=$(jq -r '.args.message // empty' "$req_file")
+  valid_branch_name "$branch" || {
+    ERROR=$(err_json BAD_REQUEST "Invalid branch name." "" ""); return 1; }
+  if [ "$PROFILE_STATE" = "ready" ]; then
+    ERROR=$(err_json REPO_EXISTS "This vault is already a git repository; refusing to re-initialise it." "" "")
+    return 1
+  fi
+  if ! run_git init -b "$branch"; then
+    # git < 2.28 has no -b; fall back to setting HEAD afterwards.
+    if ! run_git init; then
+      ERROR=$(err_json GIT_FAILED "git init failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+    run_git symbolic-ref HEAD "refs/heads/$branch" || true
+  fi
+  PROFILE_STATE="ready"
+  write_runtime_exclude
+  exclude_from_outer_profiles
+  # From here the repository EXISTS. Anything that fails after this point must
+  # say so, or the user is told "init failed" while looking at a new .git.
+  local committed=false
+  init_partial() { # $1 message
+    collect_status_fields
+    DATA=$(merge_data "$DATA" "$(obj_from_fields initialised "true" branch "$branch" committed "false")")
+    ERROR=$(err_json GIT_FAILED "The repository was created ($branch). $1" "$GIT_OUT" "$GIT_ERR")
+  }
+  if [ "$initial" = "true" ]; then
+    if ! require_identity; then
+      init_partial "The first commit was not made: git user.name / user.email are not configured in Termux. Run: git config --global user.name '...' && git config --global user.email '...'  then commit from the plugin."
+      return 1
+    fi
+    [ -n "$msg" ] || msg="Initial commit (native git bridge)"
+    if [ "${#msg}" -gt 1000 ]; then
+      init_partial "The commit message is longer than 1000 characters."
+      return 1
+    fi
+    if ! run_git add -A -- .; then
+      init_partial "Staging the vault's files failed."
+      return 1
+    fi
+    if ! git diff --cached --quiet 2>/dev/null; then
+      if ! run_git commit -m "$msg"; then
+        init_partial "The first commit failed."
+        return 1
+      fi
+      committed=true
+    fi
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields initialised "true" branch "$branch" committed "$committed")")
+}
+
+action_set_remote() {
+  local req_file="$1" url existing
+  url=$(jq -r '.args.url // empty' "$req_file")
+  if ! valid_remote_url "$url"; then
+    ERROR=$(err_json BAD_REQUEST \
+      "Invalid remote URL. Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git or file:///absolute/path. A URL with a password in it is refused: keep credentials in Termux (credential helper or SSH key)." "" "")
+    return 1
+  fi
+  if [ "$PROFILE_STATE" != "ready" ]; then
+    ERROR=$(err_json REPO_MISSING "This vault is not a git repository yet; create or clone one first." "" "")
+    return 1
+  fi
+  existing="$(git remote get-url origin 2>/dev/null || true)"
+  if [ -n "$existing" ]; then
+    if ! run_git remote set-url origin "$url"; then
+      ERROR=$(err_json GIT_FAILED "git remote set-url failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  else
+    if ! run_git remote add origin "$url"; then
+      ERROR=$(err_json GIT_FAILED "git remote add failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
+  # Whether the two sides can ever meet is decided by what each already
+  # contains, and getting that wrong is the classic "refusing to merge
+  # unrelated histories" dead end. Ask now, while the answer is still useful.
+  # A remote that cannot be reached (no credentials yet) is reported as
+  # unknown rather than as a failure: setting the URL still succeeded.
+  local remote_branches="" local_commits=false reachable=false
+  local saved="$NGB_NET_TIMEOUT"
+  NGB_NET_TIMEOUT=30
+  if run_git_net ls-remote --heads origin; then
+    reachable=true
+    remote_branches="$(printf '%s' "$GIT_OUT" | sed -n 's|.*refs/heads/||p')"
+  fi
+  NGB_NET_TIMEOUT="$saved"
+  git rev-parse --verify -q HEAD >/dev/null 2>&1 && local_commits=true
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    remoteSet "true" \
+    previousRemote "$(printf '%s' "$existing" | redact_url)" \
+    remoteReachable "$reachable" \
+    remoteBranches "$remote_branches" \
+    localCommits "$local_commits")")
+}
+
+# Take the content of an already configured remote into a repository that has
+# no commits of its own yet. This is what makes "create a repository, then
+# point it at my existing remote" end up in the SAME state as cloning would:
+# same history, same upstream, the vault's own files kept as local changes.
+#
+# It refuses the moment the local side has a history, because then the two are
+# unrelated and no automatic answer is honest — that decision belongs to the
+# user, in Termux, with the options spelled out.
+action_adopt_remote() {
+  local req_file="$1" branch picked
+  branch=$(jq -r '.args.branch // empty' "$req_file")
+  if [ -n "$branch" ] && ! valid_branch_name "$branch"; then
+    ERROR=$(err_json BAD_REQUEST "Invalid branch name." "" ""); return 1
+  fi
+  if [ "$PROFILE_STATE" != "ready" ]; then
+    ERROR=$(err_json REPO_MISSING "This vault is not a git repository yet." "" ""); return 1
+  fi
+  if [ -z "$(git remote get-url origin 2>/dev/null || true)" ]; then
+    ERROR=$(err_json GIT_FAILED "This repository has no 'origin' remote yet; set one first." "" ""); return 1
+  fi
+  if git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    ERROR=$(err_json GIT_FAILED \
+      "This repository already has commits of its own, so it cannot simply take the remote's history: the two are unrelated. Either start again in an empty vault and clone, or resolve it deliberately in Termux (git pull --allow-unrelated-histories, or reset onto the remote branch and lose the local commits)." "" "")
+    return 1
+  fi
+  if ! run_git_net fetch --prune origin; then
+    ERROR=$(err_json GIT_FAILED "git fetch failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  if [ -z "$(git for-each-ref refs/remotes/origin 2>/dev/null)" ]; then
+    collect_status_fields
+    DATA=$(merge_data "$DATA" "$(obj_from_fields adopted "false" empty "true")")
+    return 0
+  fi
+  picked="$(pick_remote_branch "$branch")" || {
+    ERROR=$(err_json BAD_REQUEST \
+      "Which branch? The remote has: $(git for-each-ref --format='%(refname:short)' refs/remotes/origin | grep -v '^origin/HEAD$' | sed 's|^origin/||' | tr '\n' ' ')" "" "")
+    return 1; }
+  local collisions="" f
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -e "$NGB_REPO_DIR/$f" ] && collisions="$collisions$f
+"
+  done < <(git ls-tree -r --name-only "refs/remotes/origin/$picked")
+  git symbolic-ref HEAD "refs/heads/$picked"
+  local mrc=0
+  materialize_from_ref "refs/remotes/origin/$picked" || mrc=$?
+  [ "$mrc" = "1" ] && return 1
+  git branch --set-upstream-to="origin/$picked" "$picked" >/dev/null 2>&1 || true
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields adopted "true" branch "$picked" collisions "$collisions")")
+  if [ "$mrc" = "2" ]; then
+    ERROR=$(err_json GIT_FAILED \
+      "The history is in place, but some files could not be written into the working tree. They are listed as deleted in the panel; 'discard' restores them." \
+      "" "$(printf '%s' "$MATERIALIZE_ERR" | redact_url)")
+    return 1
+  fi
+}
+
+# Clone INTO a directory that already holds files (every vault holds at least
+# .obsidian/). A plain `git clone` refuses that, so: clone without a checkout
+# into a temporary directory inside the runtime folder (same filesystem, so the
+# move is a rename), move the .git in, then decide what to do about files that
+# exist on both sides. Nothing is overwritten without being asked.
+action_clone_into_vault() {
+  local req_file="$1" url branch tmp head_branch
+  url=$(jq -r '.args.url // empty' "$req_file")
+  branch=$(jq -r '.args.branch // empty' "$req_file")
+  if ! valid_remote_url "$url"; then
+    ERROR=$(err_json BAD_REQUEST \
+      "Invalid remote URL. Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git or file:///absolute/path. A URL with a password in it is refused: keep credentials in Termux (credential helper or SSH key)." "" "")
+    return 1
+  fi
+  if [ -n "$branch" ] && ! valid_branch_name "$branch"; then
+    ERROR=$(err_json BAD_REQUEST "Invalid branch name." "" ""); return 1
+  fi
+  if [ "$PROFILE_STATE" = "ready" ]; then
+    ERROR=$(err_json REPO_EXISTS "This vault is already a git repository; refusing to clone over it." "" "")
+    return 1
+  fi
+  tmp="$NGB_RUNTIME_DIR/clone-tmp"
+  rm -rf "$tmp"
+  mkdir -p "$tmp" || { ERROR=$(err_json GIT_FAILED "Could not create a working directory for the clone." "" ""); return 1; }
+  local -a cargs=(clone --no-checkout --origin origin)
+  [ -n "$branch" ] && cargs+=(--branch "$branch")
+  cargs+=(-- "$url" "$tmp/repo")
+  local saved_timeout="$NGB_NET_TIMEOUT"
+  NGB_NET_TIMEOUT="$NGB_CLONE_TIMEOUT"
+  local ok=0
+  run_git_net "${cargs[@]}" || ok=1
+  NGB_NET_TIMEOUT="$saved_timeout"
+  if [ "$ok" != 0 ]; then
+    rm -rf "$tmp"
+    ERROR=$(err_json GIT_FAILED "git clone failed. Nothing was written into the vault." "$GIT_OUT" "$GIT_ERR")
+    return 1
+  fi
+  if [ ! -d "$tmp/repo/.git" ]; then
+    rm -rf "$tmp"
+    ERROR=$(err_json GIT_FAILED "The clone produced no repository." "" ""); return 1
+  fi
+  # Move into place. Same filesystem, so this is a rename: the vault is either
+  # without a repository or with a complete one, never half way.
+  #
+  # The guard matters: `mv src dst` where dst is an existing DIRECTORY moves
+  # src inside it, producing .git/.git. A repository appearing between the
+  # state check above and this line is unlikely, but the failure would be
+  # bizarre and hard to diagnose.
+  if [ -e "$NGB_REPO_DIR/.git" ]; then
+    rm -rf "$tmp"
+    ERROR=$(err_json REPO_EXISTS "A repository appeared in this vault while the clone was running; nothing was changed." "" "")
+    return 1
+  fi
+  if ! mv "$tmp/repo/.git" "$NGB_REPO_DIR/.git"; then
+    rm -rf "$tmp"
+    ERROR=$(err_json GIT_FAILED "Could not move the cloned repository into the vault." "" ""); return 1
+  fi
+  rm -rf "$tmp"
+  run_git config core.bare false || true
+  PROFILE_STATE="ready"
+  write_runtime_exclude
+  exclude_from_outer_profiles
+  head_branch="$(git symbolic-ref --short -q HEAD || true)"
+  local from_ref="HEAD"
+
+  if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+    # HEAD points at a branch that does not exist on the remote. Two very
+    # different reasons: the remote is empty (nothing to do), or the remote's
+    # HEAD is stale — a bare repository created as `master` that only ever
+    # received `main`, which is common and which plain `git clone` also leaves
+    # in this half-state. Pick the branch instead of leaving the vault with a
+    # repository it cannot use.
+    if [ -z "$(git for-each-ref refs/remotes/origin 2>/dev/null)" ]; then
+      collect_status_fields
+      DATA=$(merge_data "$DATA" "$(obj_from_fields cloned "true" branch "$head_branch" empty "true" collisions "")")
+      return 0
+    fi
+    local picked
+    picked="$(pick_remote_branch "$branch")" || {
+      collect_status_fields
+      DATA=$(merge_data "$DATA" "$(obj_from_fields cloned "true" branch "" collisions "")")
+      ERROR=$(err_json GIT_FAILED \
+        "The repository is in the vault, but its default branch could not be determined: $(git for-each-ref --format='%(refname:short)' refs/remotes/origin | tr '\n' ' '). Choose one and set it in Termux with: git -C \"$NGB_REPO_DIR\" switch <branch>" "" "")
+      return 1; }
+    head_branch="$picked"
+    git symbolic-ref HEAD "refs/heads/$head_branch"
+    from_ref="refs/remotes/origin/$head_branch"
+  fi
+
+  # Which tracked paths already exist here? Those are the only ones a checkout
+  # could destroy, and the user decides what happens to them.
+  #
+  # Whether the repository tracks Obsidian's own configuration directory is
+  # reported too: writing into it while Obsidian is running means the app is
+  # holding an older copy in memory, which is a restart, not a repair.
+  local collisions="" f config_dir="" config_tracked=false
+  case "$NGB_RUNTIME_DIR" in
+    "$NGB_REPO_DIR"/*)
+      config_dir="${NGB_RUNTIME_DIR#"$NGB_REPO_DIR"/}"
+      config_dir="${config_dir%%/*}" ;;
+  esac
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -e "$NGB_REPO_DIR/$f" ] && collisions="$collisions$f
+"
+    if [ -n "$config_dir" ]; then
+      case "$f" in "$config_dir"/*) config_tracked=true ;; esac
+    fi
+  done < <(git ls-tree -r --name-only "$from_ref")
+
+  # Two git commands, no file moves, and the vault's own files are never
+  # written over:
+  #
+  #   1. `git reset HEAD` puts the repository's tree into the INDEX and leaves
+  #      the working tree exactly as it is. Files the vault already had now
+  #      differ from the index, which is precisely "a local change".
+  #   2. Everything the vault does NOT have shows up as deleted-in-worktree;
+  #      writing only those paths out of the index materializes the rest of the
+  #      repository without touching a single existing file.
+  #
+  # What the user ends up with is a complete checkout plus their own versions
+  # of the overlapping files, listed in the panel as ordinary modifications —
+  # with a diff to look at, and per-file discard to take the repository's
+  # version instead. No blind up-front choice, and nothing moved anywhere it
+  # would have to be fished back out of.
+  local mrc=0
+  materialize_from_ref "$from_ref" || mrc=$?
+  if [ "$mrc" = "1" ]; then return 1; fi
+  # Whatever the clone configured, make sure the branch tracks its remote: a
+  # branch adopted after a dangling HEAD has no upstream yet, and without one
+  # pull and push have nothing to talk to.
+  git rev-parse --abbrev-ref "@{upstream}" >/dev/null 2>&1 || \
+    git branch --set-upstream-to="origin/$head_branch" "$head_branch" >/dev/null 2>&1 || true
+  if [ "$mrc" = "2" ]; then
+    collect_status_fields
+    DATA=$(merge_data "$DATA" "$(obj_from_fields cloned "true" branch "$head_branch" collisions "$collisions")")
+    ERROR=$(err_json GIT_FAILED \
+      "The repository is in the vault, but some of its files could not be written into the working tree. They are listed as deleted in the panel; 'discard' restores them." \
+      "" "$(printf '%s' "$MATERIALIZE_ERR" | redact_url)")
+    return 1
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    cloned "true" branch "$head_branch" collisions "$collisions" \
+    configDirTracked "$config_tracked")")
+}
+
 # ---- request processing ------------------------------------------------------
 
 process_request() {
@@ -1449,6 +1912,18 @@ process_request() {
     fi
   fi
 
+  # A vault that is paired but not a repository yet answers only the actions
+  # that create one; everything else would operate on nothing.
+  if [ "$PROFILE_STATE" = "bootstrap" ] && ! bootstrap_action_allowed "$action"; then
+    write_result "$id" "$action" false 1 'null' \
+      "$(err_json REPO_MISSING "$PROFILE_UNHEALTHY_REASON Create a repository here, or clone one into it, first." "" "")" \
+      "$started"
+    log "SKIP $id ($action): profile $PROFILE_ID has no repository yet"
+    mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
+    json_cleanup
+    return
+  fi
+
   DATA='null'; ERROR='null'
   local ok=true ec=0
   case "$action" in
@@ -1481,6 +1956,10 @@ process_request() {
     exclude-add)           action_exclude_add "$req_file" || { ok=false; ec=1; } ;;
     exclude-remove)        action_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
     exclude-list)          action_exclude_list || { ok=false; ec=1; } ;;
+    init-repo)             action_init_repo "$req_file" || { ok=false; ec=1; } ;;
+    set-remote)            action_set_remote "$req_file" || { ok=false; ec=1; } ;;
+    clone-into-vault)      action_clone_into_vault "$req_file" || { ok=false; ec=1; } ;;
+    adopt-remote)          action_adopt_remote "$req_file" || { ok=false; ec=1; } ;;
     *)
       ok=false; ec=1
       ERROR=$(err_json "BAD_REQUEST" "Action not allowed: $action" "" "")
@@ -1494,7 +1973,7 @@ process_request() {
   # error payload (e.g. data.conflicts) is preserved by merging.
   if [ "$ok" = false ]; then
     case "$action" in
-      pull|commit|push|sync|sparse-reapply|restore-file|abort-merge|stage-file|unstage-file|discard-file|stage-all|unstage-all|resolve-conflict)
+      pull|commit|push|sync|sparse-reapply|restore-file|abort-merge|stage-file|unstage-file|discard-file|stage-all|unstage-all|resolve-conflict|set-remote|adopt-remote)
         error_data="$DATA"
         collect_status_fields
         [ "$error_data" != "null" ] && [ -n "$error_data" ] && DATA=$(merge_data "$error_data" "$DATA")
@@ -1512,6 +1991,15 @@ process_request() {
 
 cleanup_old() {
   find "$DONE_DIR" "$RES_DIR" "$CAN_DIR" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
+  # A clone that was killed mid-flight (Android stopping Termux) leaves its
+  # working directory behind. Nothing records that a clone finished — the
+  # repository being in place IS the record — so a leftover here is by
+  # definition unfinished and can go. Only after a day, so a clone still
+  # running in another invocation is never pulled out from under it.
+  if [ -n "$NGB_RUNTIME_DIR" ] && [ -n "$(find "$NGB_RUNTIME_DIR/clone-tmp" -maxdepth 0 -mmin +1440 2>/dev/null)" ]; then
+    log "CLEANUP removing an abandoned clone working directory"
+    rm -rf "$NGB_RUNTIME_DIR/clone-tmp"
+  fi
   # Backstop for orphaned retry markers (their request is long gone). Live
   # *.json in processing/ never accumulates: the recovery loop drains it on
   # every run (requeue once, then give up with a result).
@@ -1615,7 +2103,10 @@ fi
 for conf in "${PROFILE_FILES[@]}"; do
   if activate_profile "$conf"; then
     HEALTHY_FILES+=("$conf")
-    HEALTHY_REPOS+=("$NGB_REPO_DIR")
+    # Only a real repository takes part in the nested-vault exclusion: a vault
+    # that is merely paired must not disappear from the outer repository's
+    # status before it becomes a repository of its own.
+    [ "$PROFILE_STATE" = "ready" ] && HEALTHY_REPOS+=("$NGB_REPO_DIR")
     recover_interrupted
     pending=("$REQ_DIR"/*.json)
     TOTAL_PENDING=$((TOTAL_PENDING + ${#pending[@]}))
@@ -1647,7 +2138,7 @@ if [ "${NGB_DISCOVER:-}" = "1" ] || [ "$UNHEALTHY" = 1 ] || [ "$TOTAL_PENDING" -
   for conf in "${PROFILE_FILES[@]}"; do
     if activate_profile "$conf"; then
       HEALTHY_FILES+=("$conf")
-      HEALTHY_REPOS+=("$NGB_REPO_DIR")
+      [ "$PROFILE_STATE" = "ready" ] && HEALTHY_REPOS+=("$NGB_REPO_DIR")
       recover_interrupted
     fi
   done

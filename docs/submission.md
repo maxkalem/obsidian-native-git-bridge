@@ -80,6 +80,14 @@ Since runner v10 the Termux side keeps one profile per paired vault (`~/.config/
 
 Rationale and the rejected alternatives: [ADR-002](ADR-002-multiple-repositories.md).
 
+## "Install or update themselves or their dependencies"
+
+Worth addressing head-on, because this plugin syncs vaults and many such vaults track `.obsidian/`.
+
+The plugin never updates itself. It downloads nothing, contacts no server of ours, and has no auto-update path: a new `main.js` can only arrive the way any other file in the user's repository arrives — because the user ran pull, sync or clone against **their own remote**. The plugin treats its own files exactly like any other tracked path; it does not detect, prefer or reload them. That is the same behaviour any Git client has in a vault whose configuration directory is tracked, including [obsidian-git](https://github.com/Vinzent03/obsidian-git), and it is the user's data rather than a distribution channel.
+
+Where it could surprise someone, we say so rather than hide it: after a clone that brings in the configuration directory, the plugin tells the user to restart Obsidian, because the app read that configuration at startup and holds it in memory. The README discloses this under *What this plugin accesses*.
+
 ## Security posture
 
 - The runner receives **JSON** and calls `git` with **argv arrays** only, never a concatenated shell string, behind an action allow-list.
@@ -93,7 +101,7 @@ Full model, including accepted residual risks and a dated review log: [threat-mo
 
 ## Testing
 
-`npm test` runs 262 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 272 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches, an expired PAT, and (v10) several profiles on one device: migration of a single-repo config, sibling and nested vaults, token and profile isolation, a moved repository, a deleted one, and a corrupt profile file.
+`npm test` runs 280 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 317 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches, an expired PAT, and (v10) several profiles on one device: migration of a single-repo config, sibling and nested vaults, token and profile isolation, a moved repository, a deleted one, a corrupt profile file, and (v11) repository bootstrap: init, set-remote, and cloning into a vault that already holds files.
 
 What is **not** machine-verified: there is no Android device or emulator in CI. The APK builds are verified; RUN_COMMAND forwarding, storage permissions and the Termux round trip are verified by hand on a device. That is also why the companion ships a three-step verified checklist.
 
