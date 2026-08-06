@@ -52,6 +52,11 @@
 .ngb-sv-file:hover { background: var(--background-modifier-hover); }
 .ngb-sv-file-main { display: flex; align-items: center; gap: var(--size-4-1); min-width: 0; flex: 1; cursor: pointer; }
 .ngb-sv-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* "moved from" hint on a rename/copy row: secondary, truncates before the name. */
+.ngb-sv-file-from {
+  color: var(--text-faint); font-size: var(--font-smaller);
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ngb-sv-file-kind {
   color: var(--text-faint); font-size: var(--font-smaller);
   flex: 0 0 auto; margin-left: var(--size-4-1);
@@ -70,7 +75,7 @@
    for two digits; longer values shrink rather than widen the column, so rows
    stay aligned whatever the repository size. */
 .ngb-sv-count {
-  flex: 0 0 auto; min-width: 2.2ch; text-align: right; margin-left: 2px;
+  flex: 0 0 auto; min-width: 2.2ch; text-align: center; margin-left: 2px;
   font-family: var(--font-monospace); font-size: var(--font-smaller);
   color: var(--text-muted); font-variant-numeric: tabular-nums;
 }
@@ -90,6 +95,8 @@
 }
 /* The group header uses the same right-hand column, so the title takes the slack. */
 .ngb-sv-group-title { flex: 1 1 auto; min-width: 0; }
+/* Group headers carry the same action slots as folder rows. */
+.ngb-sv-group-header .ngb-sv-file-actions { flex: 0 0 auto; }
 /* Nested rows (untracked children in list layout; folders/files in tree
    layout). One class per depth level, capped at 6. */
 .ngb-ind-1 { padding-left: var(--size-4-6); }
@@ -143,40 +150,41 @@
 /* pull/fetch and push use an SVG gradient sweep instead of a CSS keyframe */
 .ngb-anim-spin svg     { animation: ngb-rotate 1.2s linear infinite; transform-origin: 50% 50%; }
 .ngb-anim-pulse svg    { animation: ngb-pulse 1s ease-in-out infinite; transform-origin: 50% 50%; }
-/* Directional thirds animation for pull/fetch (down) and push (up):
-   a bright accent layer is clipped to one third of the glyph and steps along. */
+/* Highlight band for fetch / pull / push: a quarter-height slice of the SAME
+   glyph, drawn in the accent colour, gliding along the icon. Because the lit
+   layer is the icon itself (strokes, no fill), the band only shows where there
+   is a stroke, so it reads as a highlight travelling along the glyph and never
+   as a rectangle over the button.
+
+   Two synchronised movements are needed: the window slides down while the copy
+   inside slides up by the same distance. The previous version moved only the
+   window, so the same top slice was dragged downwards instead of the band
+   scanning the glyph, and it stepped in thirds (`steps(1, end)`) instead of
+   gliding. Percentages on the inner icon resolve against the window height, so
+   -100% there equals one window height, i.e. 25% of the icon. */
 .ngb-sweep { position: relative; display: inline-flex; width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
-.ngb-sweep-base { position: absolute; inset: 0; display: inline-flex; }
-.ngb-sweep-lit  { position: absolute; left: 0; right: 0; display: inline-flex; }
-.ngb-sweep-base { color: var(--text-faint); }
-.ngb-sweep .ngb-sweep-base > svg, .ngb-sweep .ngb-sweep-lit > svg { width: 100%; height: 100%; }
-.ngb-sweep-base, .ngb-sweep-lit { align-items: center; justify-content: center; }
+.ngb-sweep-base { position: absolute; inset: 0; display: inline-flex; color: var(--text-muted); }
+.ngb-sweep-base > svg { width: 100%; height: 100%; }
 .ngb-sweep-lit {
+  position: absolute; left: 0; right: 0; height: 25%; overflow: hidden;
   color: var(--interactive-accent);
-  filter: drop-shadow(0 0 3px var(--interactive-accent));
-  animation-duration: 0.66s;
-  animation-timing-function: steps(1, end);
-  animation-iteration-count: infinite;
 }
-/* The lit layer lives inside a one-third-tall window that steps along the
-   glyph; the icon inside is offset so the visible slice changes. `overflow`
-   and `transform` are supported everywhere, unlike clip-path. */
-.ngb-sweep-lit { overflow: hidden; height: 33.34%; }
-.ngb-sweep-lit > svg { height: 300%; }
-.ngb-sweep-down { animation-name: ngb-thirds-down; }
-@keyframes ngb-thirds-down {
-  0%,   32.9%  { top: 0;      }
-  33.3%, 65.9% { top: 33.33%; }
-  66.6%, 100%  { top: 66.66%; }
-}
-.ngb-sweep-up   { animation-name: ngb-thirds-up; }
-@keyframes ngb-thirds-up {
-  0%,   32.9%  { top: 66.66%; }
-  33.3%, 65.9% { top: 33.33%; }
-  66.6%, 100%  { top: 0;      }
-}
+.ngb-sweep-lit > svg { position: absolute; left: 0; width: 100%; height: 400%; }
+
+.ngb-sweep-down { animation: ngb-band-down 1s linear infinite; }
+.ngb-sweep-down > svg { animation: ngb-band-glyph-down 1s linear infinite; }
+.ngb-sweep-up { animation: ngb-band-up 1s linear infinite; }
+.ngb-sweep-up > svg { animation: ngb-band-glyph-up 1s linear infinite; }
+
+@keyframes ngb-band-down      { from { top: 0; }     to { top: 75%; } }
+@keyframes ngb-band-glyph-down { from { top: 0; }     to { top: -300%; } }
+@keyframes ngb-band-up        { from { top: 75%; }   to { top: 0; } }
+@keyframes ngb-band-glyph-up  { from { top: -300%; } to { top: 0; } }
+
 @media (prefers-reduced-motion: reduce) {
-  .ngb-sweep-lit { animation-duration: 1.8s; }
+  .ngb-sweep-down, .ngb-sweep-down > svg,
+  .ngb-sweep-up, .ngb-sweep-up > svg { animation-duration: 2.4s; }
+}
 }
 @media (prefers-reduced-motion: reduce) {
   .ngb-anim-spin svg, .ngb-anim-pulse svg { animation-duration: 2.4s; }
@@ -488,3 +496,47 @@
 /* Keep the title clear of the top-left action on mobile. */
 .ngb-modal-has-top-action .modal-title { padding-left: var(--size-4-16, 4em); }
 .ngb-modal-action-bottom { justify-content: center; }
+
+/* ------------------------------------------------ file history view */
+
+/* The path identifies the whole view, so it stays on one line and truncates. */
+.ngb-filehist-path {
+  font-size: var(--font-smaller); color: var(--text-muted);
+  padding-bottom: var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ngb-filehist-change {
+  font-size: var(--font-smaller); color: var(--text-accent);
+  font-family: var(--font-monospace);
+}
+.ngb-filehist-waiting { display: flex; align-items: center; gap: var(--size-4-2); padding: var(--size-4-2); }
+.ngb-filehist-waiting svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
+
+/* Whole-file restore: the label may be clipped on a narrow screen, the icon
+   never is (separate element, fixed size, outside the truncating span). */
+.ngb-filehist-restore {
+  flex: 0 1 auto; min-width: 0; display: inline-flex; align-items: center;
+  gap: var(--size-2-2); font-size: var(--font-ui-smaller);
+  padding: var(--size-2-2) var(--size-4-2);
+}
+.ngb-filehist-restore-icon { flex: 0 0 auto; display: inline-flex; }
+.ngb-filehist-restore-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
+.ngb-filehist-restore-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.ngb-filehist-body:empty { display: none; }
+.ngb-filehist-diff { padding: 0; }
+
+/* Per-block restore sits in a bar of its own ABOVE the hunk: interface font,
+   own background, full width. Nothing about it reads as diff content. */
+.ngb-hunk-bar-row > td { padding: 0; }
+.ngb-hunk-bar {
+  display: flex; justify-content: flex-end;
+  background: var(--background-secondary-alt);
+  border-top: 1px solid var(--background-modifier-border);
+  padding: 2px var(--size-4-2);
+}
+.ngb-hunk-restore {
+  display: inline-flex; align-items: center; gap: var(--size-2-2);
+  font-family: var(--font-interface); font-size: var(--font-ui-smaller);
+  padding: 0 var(--size-4-2);
+}

@@ -12,7 +12,7 @@ check(){ if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="$SCRIPT_DIR/native-git-bridge/termux/native-git-bridge-runner.sh"
+RUNNER="$SCRIPT_DIR/termux/native-git-bridge-runner.sh"
 
 echo "# setup: bare remote + working clone with protected dirs"
 git init -q --bare "$ROOT/remote.git"
@@ -278,6 +278,8 @@ bash "$RUNNER"
 RES="$RUNTIME/results/r-20260804T100000Z-log001.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "file-log ok"
 check '[ "$(jq -r ".data.log" "$RES" | grep -c "hist:")" = "3" ]' "file-log follows across the rename (3 commits)"
+check 'jq -r ".data.log" "$RES" | grep -qE "^:[0-9]{6} [0-9]{6} .* R[0-9]+"' "file-log carries the raw change letter (runner v9)"
+check 'jq -r ".data.log" "$RES" | grep -qE "^[0-9]+[[:space:]][0-9]+[[:space:]]"' "file-log carries numstat counts"
 check 'jq -r ".data.log" "$RES" | grep -q "hist note.md"' "historical name present in log"
 
 echo "# phase 4: show file at old commit (pre-rename path)"
@@ -387,6 +389,20 @@ check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T100003Z-anc004.json" >/d
 check '[ ! -e "Private/plain.md" ]' "untracked files in the folder are gone"
 check '[ -e "Private/Hidden/leak.md" ]' "files inside the protected subdirectory are untouched"
 rm -rf Private/Hidden
+git sparse-checkout reapply 2>/dev/null || true
+
+echo "# phase 4: the group-wide stage button sends '.' and must still exclude protected paths"
+printf 'v1\nv2\ngroup edit\n' > "Notes/hist renamed.md"
+mkdir -p Private/Hidden && echo "protected new" > Private/Hidden/leak.md
+req "r-20260804T100003Z-grp001" stage-file "$TOKEN" '{"path":".","mode":"update","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-grp001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "stage-file '.' mode=update ok"
+check 'git diff --cached --name-only | grep -q "hist renamed.md"' "tracked change at the repo root is staged"
+check '! git diff --cached --name-only | grep -q "Private/Hidden"' "protected paths are excluded for a '.' base"
+git restore --staged . 2>/dev/null || git reset -q
+rm -f Private/Hidden/leak.md
+git checkout -- "Notes/hist renamed.md" 2>/dev/null || true
 git sparse-checkout reapply 2>/dev/null || true
 
 echo "# phase 4: discard-all drops unstaged work, keeps staged and untracked"
@@ -539,8 +555,8 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "8" ]' "runnerVersion = 8 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=8"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "9" ]' "runnerVersion = 9 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=9"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"

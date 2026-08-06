@@ -39,7 +39,12 @@ export class CommitMessageModal extends Modal {
     // No Cancel button — the X closes and resolves null. The action button
     // carries the same check icon as the panel's commit button; top-left on
     // mobile, bottom-center on desktop.
-    placeModalAction(this, { label: this.opts.submitLabel, icon: "check", onClick: doSubmit });
+    placeModalAction(this, {
+      label: this.opts.submitLabel,
+      icon: "check",
+      hasInput: true,
+      onClick: doSubmit,
+    });
     ta.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "Enter") doSubmit();
     });

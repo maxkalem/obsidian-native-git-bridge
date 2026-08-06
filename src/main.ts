@@ -62,9 +62,11 @@ import {
 } from "./git/historyParsers";
 import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
+import { buildMenuEntries, type MenuAction, type MenuScope } from "./ui/gitMenu";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
 import { DiffView, NGB_DIFF_VIEW, type DiffViewState } from "./ui/DiffView";
 import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
+import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { registerIcons } from "./ui/icons";
 import {
@@ -182,7 +184,17 @@ export default class NativeGitBridgePlugin extends Plugin {
           stage: (p) => void this.cmdStageFile(p),
           unstage: (p) => void this.cmdUnstageFile(p),
           discard: (p) => this.cmdDiscardFile(p),
-          fileMenu: (menu, p) => this.buildGitMenu(menu, p),
+          fileMenu: (p, group, pos) => {
+            const menu = new Menu();
+            this.buildGitMenu(menu, p, group);
+            menu.showAtPosition(pos);
+          },
+          groupAction: (group, kind) => this.groupAction(group, kind),
+          groupMenu: (group, pos) => {
+            const menu = new Menu();
+            this.buildGroupMenu(menu, group);
+            menu.showAtPosition(pos);
+          },
         })
     );
 
@@ -203,6 +215,24 @@ export default class NativeGitBridgePlugin extends Plugin {
       (leaf: WorkspaceLeaf) =>
         new DiffView(leaf, {
           loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
+          wrapLines: () => this.sharedPrefs.wrapDiffLines,
+          showInvisibles: () => this.sharedPrefs.showInvisibles,
+        })
+    );
+
+    this.registerView(
+      NGB_FILE_HISTORY_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new FileHistoryView(leaf, {
+          loadPage: (path, skip, limit) => this.loadFileLogPage(path, skip, limit),
+          loadCommitDiff: (e) =>
+            this.loadDiffText(e.pathAtCommit, `${e.hash}^`, e.hash),
+          readFile: (p) => this.readVaultTextFile(p),
+          writeFile: async (p, text) => {
+            await this.app.vault.adapter.write(p, text);
+          },
+          restoreWholeFile: (p, e) => this.confirmRestore(p, e),
+          progressText: () => this.progressText ?? "",
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
         })
@@ -250,104 +280,166 @@ export default class NativeGitBridgePlugin extends Plugin {
    * file-menu and the long-press / right-click menu on rows in the status
    * panel, so the two can never drift apart.
    */
-  buildGitMenu(menu: Menu, path: string): void {
-    {
-        if (!Platform.isAndroidApp) return;
-        if (!this.deviceSettings.enabledOnThisDevice) return;
-        const v = validateRepoRelativePath(path);
-        if (!v.ok) return;
-        const p = v.normalized;
+  buildGitMenu(menu: Menu, path: string, known?: Group, kind: "file" | "folder" = "file"): void {
+    if (!Platform.isAndroidApp) return;
+    if (!this.deviceSettings.enabledOnThisDevice) return;
+    const v = validateRepoRelativePath(path);
+    if (!v.ok) return;
+    const p = v.normalized;
+    // The panel knows which state a row represents; the file explorer does not
+    // and falls back to inference from the last status it saw.
+    const group = known ?? this.inferGroup(p);
+    const scope: MenuScope =
+      kind === "folder"
+        ? { kind: "folder", path: p, group, count: this.pathsUnder(p, group).length }
+        : { kind: "file", path: p, group };
+    this.addMenuEntries(menu, scope);
+  }
 
-        const st = this.lastStatus?.status;
-        const staged = st?.staged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false;
-        const unstaged =
-          (st?.unstaged.some((e) => e.path === p || e.path.startsWith(p + "/")) ?? false) ||
-          (st?.untracked.some((u) => u === p || u.startsWith(p + "/")) ?? false);
-        const conflicted = st?.conflicted.some((e) => e.path === p) ?? false;
+  /** Which panel group a path belongs to, from the last status the panel saw. */
+  private inferGroup(p: string): Group {
+    const st = this.lastStatus?.status;
+    const under = (path: string) => path === p || path.startsWith(p + "/");
+    if (st?.conflicted.some((e) => under(e.path))) return "conflicted";
+    if (st?.unstaged.some((e) => under(e.path))) return "unstaged";
+    if (st?.untracked.some(under)) return "untracked";
+    if (st?.staged.some((e) => under(e.path))) return "staged";
+    // Nothing known yet: treat it as stageable, which is what the file
+    // explorer entry has always been for.
+    return "unstaged";
+  }
 
-        // Conflict entries first: they are the only sensible actions while a
-        // file is unmerged, and the tap-on-binary-conflict path lands here.
-        if (conflicted) {
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Resolve — keep local version (yours)")
-              .setIcon("check")
-              .onClick(() => this.cmdResolveConflict(p, "ours"))
-          );
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Resolve — keep remote version")
-              .setIcon("check-check")
-              .onClick(() => this.cmdResolveConflict(p, "theirs"))
-          );
-          menu.addItem((i) =>
-            i
-              .setTitle("Open in default app")
-              .setIcon("external-link")
-              .onClick(() => this.openWithDefaultApp(p))
-          );
-        }
+  /** Paths of a group at or under `base` (empty base = the whole group). */
+  private pathsUnder(base: string, group: Group): string[] {
+    return this.groupPaths(group).filter(
+      (f) => base === "" || f === base || f.startsWith(base + "/")
+    );
+  }
 
-        if (unstaged || !st) {
-          menu.addItem((i) =>
-            i.setTitle("Git: Stage").setIcon("plus-circle").onClick(() => void this.cmdStageFile(p))
-          );
-        }
-        if (staged) {
-          menu.addItem((i) =>
-            i.setTitle("Git: Unstage").setIcon("minus-circle").onClick(() => void this.cmdUnstageFile(p))
-          );
-        }
-
-        if (this.deviceSettings.menuGitignore) {
-          if (this.isGitignored(p)) {
-            menu.addItem((i) =>
-              i.setTitle("Git: Remove from .gitignore").setIcon("eye").onClick(() => void this.gitignoreRemove(`/${p}`))
-            );
-          } else {
-            menu.addItem((i) =>
-              i.setTitle("Git: Add to .gitignore").setIcon("eye-off").onClick(() => void this.gitignoreAdd(`/${p}`))
-            );
-          }
-        }
-
-        if (!this.deviceSettings.menuSparse) {
-          /* sparse entries hidden by settings */
-        } else if (this.isSparseExcluded(p)) {
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Show again (remove sparse exclusion)")
-              .setIcon("eye")
-              .onClick(() => void this.cmdSparseExclude(p, false))
-          );
-        } else {
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Hide on this device (sparse)")
-              .setIcon("eye-off")
-              .onClick(() => void this.cmdSparseExclude(p, true))
-          );
-        }
-
-        if (!this.deviceSettings.menuExclude) {
-          /* exclude entries hidden by settings */
-        } else if (this.isExcluded(p)) {
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Remove from .git exclude")
-              .setIcon("eye")
-              .onClick(() => void this.cmdExcludeChange(p, false))
-          );
-        } else {
-          menu.addItem((i) =>
-            i
-              .setTitle("Git: Add to .git exclude (local ignore)")
-              .setIcon("eye-off")
-              .onClick(() => void this.cmdExcludeChange(p, true))
-          );
-        }
+  /** Turn the shared menu description into real Obsidian menu items. */
+  private addMenuEntries(menu: Menu, scope: MenuScope): void {
+    const single = scope.kind === "file";
+    const path = scope.kind === "group" ? "" : scope.path;
+    const targets = () => (single ? [path] : this.pathsUnder(path, scope.group));
+    const entries = buildMenuEntries(scope, {
+      menuGitignore: this.deviceSettings.menuGitignore,
+      menuSparse: this.deviceSettings.menuSparse,
+      menuExclude: this.deviceSettings.menuExclude,
+      ignored: single && this.isGitignored(path),
+      sparseExcluded: single && this.isSparseExcluded(path),
+      excluded: single && this.isExcluded(path),
+    });
+    for (const e of entries) {
+      menu.addItem((i) => {
+        i.setTitle(e.title).setIcon(e.icon);
+        i.onClick(() => this.runMenuAction(e.action, scope, targets));
+      });
     }
   }
+
+  private runMenuAction(action: MenuAction, scope: MenuScope, targets: () => string[]): void {
+    const path = scope.kind === "group" ? "." : scope.path;
+    const group = scope.group;
+    switch (action) {
+      case "stage":
+        if (scope.kind === "group") this.groupAction(group, "stage");
+        else void this.cmdStageFile(path, group === "unstaged" ? "update" : "all");
+        return;
+      case "unstage":
+        if (scope.kind === "group") void this.cmdUnstageAll();
+        else void this.cmdUnstageFile(path);
+        return;
+      case "discard":
+        if (scope.kind === "group") this.groupAction(group, "discard");
+        else this.folderAction(group, path, "discard");
+        return;
+      case "resolve-local":
+      case "resolve-remote": {
+        const side = action === "resolve-local" ? "ours" : "theirs";
+        if (scope.kind === "file") this.cmdResolveConflict(path, side);
+        else this.confirmResolveMany(targets(), side);
+        return;
+      }
+      case "open-diff":
+        void this.openStatusDiff(path, group);
+        return;
+      case "open-conflict":
+        void this.openConflict(path, { x: 0, y: 0 });
+        return;
+      case "open-history":
+        void this.openFileHistoryPanel(path);
+        return;
+      case "open-external":
+        this.openWithDefaultApp(path);
+        return;
+      case "copy-path":
+        void navigator.clipboard.writeText(path);
+        new Notice("Path copied.");
+        return;
+      case "abort-merge":
+        void this.cmdAbortMerge();
+        return;
+      case "gitignore-add":
+        if (scope.kind === "file") void this.gitignoreAdd(`/${path}`);
+        else this.confirmBulkIgnore(targets());
+        return;
+      case "gitignore-remove":
+        void this.gitignoreRemove(`/${path}`);
+        return;
+      case "sparse-add":
+        if (scope.kind === "file") void this.cmdSparseExclude(path, true);
+        else this.confirmBulkPerPath(targets(), "sparse");
+        return;
+      case "sparse-remove":
+        void this.cmdSparseExclude(path, false);
+        return;
+      case "exclude-add":
+        if (scope.kind === "file") void this.cmdExcludeChange(path, true);
+        else this.confirmBulkPerPath(targets(), "exclude");
+        return;
+      case "exclude-remove":
+        void this.cmdExcludeChange(path, false);
+        return;
+    }
+  }
+
+  /** Resolve several conflicted files the same way, after one confirmation. */
+  private confirmResolveMany(paths: string[], side: "ours" | "theirs"): void {
+    if (paths.length === 0) return;
+    new ConfirmModal(
+      this.app,
+      {
+        title:
+          side === "ours"
+            ? "Keep the LOCAL version of these files?"
+            : "Keep the REMOTE version of these files?",
+        body: [
+          ...paths.slice(0, 10),
+          paths.length > 10 ? `…and ${paths.length - 10} more` : "",
+          side === "ours"
+            ? "The incoming remote changes to these files are discarded."
+            : "Your local changes to these files are discarded.",
+          `This runs one Termux round trip per file (${paths.length} in total).`,
+        ].filter((l) => l !== ""),
+        confirmLabel: side === "ours" ? "Keep local" : "Keep remote",
+        danger: true,
+      },
+      async (ok) => {
+        if (!ok) return;
+        for (const p of paths) {
+          const result = await this.runOperation("resolve-conflict", {
+            path: p,
+            side,
+            protectedPaths: this.effectiveProtectedPaths(),
+          });
+          if (!result?.ok) break;
+          this.absorbStatusData(result.data ?? {});
+        }
+        await this.cmdStatus(true);
+      }
+    ).open();
+  }
+
 
   private lastAutoSyncMs = 0;
 
@@ -755,6 +847,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "open-operation-log", name: "Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
       { id: "open-status-panel", name: "Open status panel", cb: () => void this.openStatusPanel() },
       { id: "open-history-panel", name: "Open history panel", cb: () => void this.openHistoryPanel() },
+      { id: "open-file-history-panel", name: "Open history panel for the current file", cb: () => {
+        const p = this.activeFilePath();
+        if (p !== null) void this.openFileHistoryPanel(p);
+      } },
       { id: "bridge-self-check", name: "Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
       { id: "open-companion-setup", name: "Open companion app setup", cb: () => void this.openCompanionSetup() },
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
@@ -1293,7 +1389,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   private excludeLines: string[] = [];
 
   /** Hide (exclude=true) or materialize a path via non-cone sparse patterns. */
-  async cmdSparseExclude(path: string, exclude: boolean): Promise<void> {
+  async cmdSparseExclude(path: string, exclude: boolean, skipConfirm = false): Promise<void> {
     const go = async () => {
       const result = await this.runOperation(exclude ? "sparse-exclude-add" : "sparse-exclude-remove", { path });
       if (!result) return;
@@ -1308,7 +1404,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.absorbStatusData(result.data ?? {});
       new Notice(exclude ? `Hidden via sparse checkout: ${path}` : `Materialized again: ${path}`);
     };
-    if (exclude) {
+    if (exclude && !skipConfirm) {
       new ConfirmModal(
         this.app,
         {
@@ -1843,6 +1939,28 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
+  /** Open (or retarget) the history panel of ONE file. */
+  async openFileHistoryPanel(path: string): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW);
+    const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: NGB_FILE_HISTORY_VIEW, active: true, state: { path } });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  private async loadFileLogPage(
+    path: string,
+    skip: number,
+    limit: number
+  ): Promise<FileLogEntry[] | null> {
+    const result = await this.runOperation("file-log", { path, skip, limit });
+    if (!result) return null;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: history failed", result);
+      return null;
+    }
+    return parseFileLog(result.data?.log ?? "", path);
+  }
+
   private async loadRepoLogPage(skip: number, limit: number): Promise<RepoLogEntry[] | null> {
     const result = await this.runOperation("repo-log", { skip, limit });
     if (!result) return null;
@@ -2306,6 +2424,109 @@ export default class NativeGitBridgePlugin extends Plugin {
       return;
     }
     this.cmdDiscardFile(folderPath);
+  }
+
+  /**
+   * Group-header buttons. "Stage" in the tracked-changes group must not sweep
+   * in untracked files, so it stages the repository root in `update` mode; the
+   * untracked group uses a plain add. Discard maps to the repository-wide
+   * discard command, which keeps staged content and untracked files.
+   */
+  groupAction(group: Group, kind: "stage" | "unstage" | "discard"): void {
+    if (kind === "unstage") {
+      void this.cmdUnstageAll();
+      return;
+    }
+    if (kind === "discard") {
+      this.cmdDiscardAll();
+      return;
+    }
+    if (group === "unstaged") void this.cmdStageFile(".", "update");
+    else void this.cmdStageAll();
+  }
+
+  /**
+   * The group's own context menu: the bulk versions of the per-file entries,
+   * gated by the same three settings toggles. Every bulk entry states how many
+   * paths it will touch before doing anything.
+   */
+  buildGroupMenu(menu: Menu, group: Group): void {
+    if (!Platform.isAndroidApp) return;
+    if (!this.deviceSettings.enabledOnThisDevice) return;
+    this.addMenuEntries(menu, { kind: "group", group, count: this.groupPaths(group).length });
+  }
+
+
+  /** Paths currently listed in a panel group (as the panel last saw them). */
+  private groupPaths(group: Group): string[] {
+    const st = this.lastStatus?.status;
+    if (!st) return [];
+    const raw =
+      group === "staged"
+        ? st.staged.map((e) => e.path)
+        : group === "unstaged"
+          ? st.unstaged.map((e) => e.path)
+          : group === "conflicted"
+            ? st.conflicted.map((e) => e.path)
+            : st.untracked;
+    return [...new Set(raw.map((p) => (p.endsWith("/") ? p.slice(0, -1) : p)))];
+  }
+
+  /** .gitignore is a tracked vault file, so a bulk add is ONE write. */
+  private confirmBulkIgnore(paths: string[]): void {
+    new ConfirmModal(
+      this.app,
+      {
+        title: `Add ${paths.length} paths to .gitignore?`,
+        body: [
+          ...paths.slice(0, 10),
+          paths.length > 10 ? `…and ${paths.length - 10} more` : "",
+          ".gitignore is a tracked file, so this change reaches every device and every collaborator once committed.",
+        ].filter((l) => l !== ""),
+        confirmLabel: "Add to .gitignore",
+        icon: "eye-off",
+      },
+      async (ok) => {
+        if (!ok) return;
+        for (const p of paths) await this.gitignoreAdd(`/${p}`);
+        this.notify(`Added ${paths.length} paths to .gitignore.`);
+      }
+    ).open();
+  }
+
+  /**
+   * Sparse exclusions and .git/info/exclude are runner actions, so a bulk
+   * apply is one round trip per path. The count is stated up front because on
+   * a large group this is slow, and every round trip wakes Termux.
+   */
+  private confirmBulkPerPath(paths: string[], kind: "sparse" | "exclude"): void {
+    const label = kind === "sparse" ? "sparse exclusions" : ".git/info/exclude";
+    new ConfirmModal(
+      this.app,
+      {
+        title: `Add ${paths.length} paths to ${label}?`,
+        body: [
+          ...paths.slice(0, 10),
+          paths.length > 10 ? `…and ${paths.length - 10} more` : "",
+          `This runs one Termux round trip per path (${paths.length} in total) and cannot be cancelled halfway without leaving part of the list applied.`,
+          kind === "sparse"
+            ? "Hidden paths are removed from THIS device's working tree and automatically join the protected set."
+            : "The exclude file is device-local and never synced.",
+        ].filter((l) => l !== ""),
+        confirmLabel: `Apply to ${paths.length} paths`,
+        icon: "eye-off",
+        danger: kind === "sparse",
+      },
+      async (ok) => {
+        if (!ok) return;
+        for (const p of paths) {
+          if (kind === "sparse") await this.cmdSparseExclude(p, true, true);
+          else await this.cmdExcludeChange(p, true);
+        }
+        this.notify(`Applied to ${paths.length} paths.`);
+        await this.cmdStatus(true);
+      }
+    ).open();
   }
 
   /** Move every untracked entry under a folder to Obsidian's trash, confirmed. */

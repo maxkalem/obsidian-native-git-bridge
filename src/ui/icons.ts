@@ -7,6 +7,7 @@ import { addIcon } from "obsidian";
  */
 export const NGB_ICON_PUSH = "ngb-push";
 export const NGB_ICON_PULL = "ngb-pull";
+export const NGB_ICON_FETCH = "ngb-fetch";
 export const NGB_ICON_STAGE_ALL = "ngb-stage-all";
 export const NGB_ICON_UNSTAGE_ALL = "ngb-unstage-all";
 export const NGB_ICON_SYNC = "ngb-sync";
@@ -20,9 +21,30 @@ function scaled(path: string, strokeWidth = 2): string {
   );
 }
 
+/**
+ * The three network operations share one cloud body so they read as a family,
+ * and differ only in what happens under it: an arrow down for pull (the shape
+ * users already recognise as "download"), an arrow up for push, a question
+ * mark for fetch (it asks the remote what is there and changes nothing).
+ * The cloud is Lucide's `cloud` outline, redrawn open at the bottom so the
+ * three glyphs have room.
+ */
+const CLOUD = "M17.5 15a4.5 4.5 0 0 0-.9-8.9A6 6 0 0 0 5.2 8.4A3.8 3.8 0 0 0 6 15";
+
 export function registerIcons(): void {
-  addIcon(NGB_ICON_PUSH, scaled('<path d="M12 15V3M7 8l5-5 5 5M5 21h14"/>'));
-  addIcon(NGB_ICON_PULL, scaled('<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>'));
+  // Down into the cloud's mouth: what the standard download icon looks like,
+  // which is what people expect from "pull".
+  addIcon(NGB_ICON_PULL, scaled(`<path d="${CLOUD}"/><path d="M12 11v8M8.5 15.5 12 19l3.5-3.5"/>`));
+  addIcon(NGB_ICON_PUSH, scaled(`<path d="${CLOUD}"/><path d="M12 19v-8M8.5 14.5 12 11l3.5 3.5"/>`));
+  // Fetch asks and reports; nothing moves into the working tree.
+  addIcon(
+    NGB_ICON_FETCH,
+    scaled(
+      `<path d="${CLOUD}"/>` +
+        '<path d="M10.4 13.2a1.8 1.8 0 0 1 3.5.6c0 1.2-1.8 1.8-1.8 3"/>' +
+        '<path d="M12.1 19.6h.01"/>'
+    )
+  );
   // Stage all / unstage all: a file stack with a plus / minus badge.
   addIcon(
     NGB_ICON_STAGE_ALL,

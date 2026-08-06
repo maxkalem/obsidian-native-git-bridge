@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   bytesToTextIfNotBinary,
   decodeBase64ToBytes,
+  describeFileChange,
   parseFileLog,
   parseRepoLog,
 } from "../src/git/historyParsers";
@@ -90,5 +91,65 @@ describe("parseRepoLog", () => {
     const es = parseRepoLog(raw);
     expect(es).toHaveLength(1);
     expect(es[0]!.files).toEqual([]);
+  });
+});
+
+describe("parseFileLog with raw + numstat (runner v9)", () => {
+  const RS = "\x1e";
+  const FS = "\x1f";
+  const rec = (hash: string, subject: string, body: string) =>
+    `${RS}${hash}${FS}2026-08-01T10:00:00Z${FS}Ann${FS}${subject}\n\n${body}`;
+
+  it("reads the change letter from raw and the counts from numstat", () => {
+    const raw = rec(
+      "aaaa111122223333aaaa111122223333aaaa1111",
+      "edit",
+      ":100644 100644 de98044 a7bc997 M\tNotes/n.md\n2\t1\tNotes/n.md\n"
+    );
+    const [e] = parseFileLog(raw, "Notes/n.md");
+    expect(e).toMatchObject({ code: "M", added: 2, deleted: 1, pathAtCommit: "Notes/n.md" });
+    expect(describeFileChange(e!)).toBe("+2 −1");
+  });
+
+  it("keeps both sides of a rename and describes it", () => {
+    const raw = rec(
+      "bbbb111122223333aaaa111122223333aaaa1111",
+      "move",
+      ":100644 100644 a7bc997 a7bc997 R100\tA/f.md\tB/g.md\n0\t0\tA/f.md => B/g.md\n"
+    );
+    const [e] = parseFileLog(raw, "B/g.md");
+    expect(e).toMatchObject({ code: "R", origPath: "A/f.md", pathAtCommit: "B/g.md" });
+    expect(describeFileChange(e!)).toBe("renamed from A/f.md");
+  });
+
+  it("describes an addition and a deletion", () => {
+    const add = parseFileLog(
+      rec("cccc111122223333aaaa111122223333aaaa1111", "add", ":000000 100644 0000000 de98044 A\tn.md\n3\t0\tn.md\n"),
+      "n.md"
+    )[0]!;
+    expect(describeFileChange(add)).toBe("added, +3 −0");
+    const del = parseFileLog(
+      rec("dddd111122223333aaaa111122223333aaaa1111", "rm", ":100644 000000 de98044 0000000 D\tn.md\n0\t3\tn.md\n"),
+      "n.md"
+    )[0]!;
+    expect(describeFileChange(del)).toBe("deleted");
+  });
+
+  it("survives a binary file, where numstat prints dashes", () => {
+    const e = parseFileLog(
+      rec("eeee111122223333aaaa111122223333aaaa1111", "img", ":100644 100644 aaa bbb M\ti.png\n-\t-\ti.png\n"),
+      "i.png"
+    )[0]!;
+    expect(e.added).toBeUndefined();
+    expect(describeFileChange(e)).toBe("changed (M)");
+  });
+
+  it("still parses the old name-status output of a v8 runner", () => {
+    const e = parseFileLog(
+      rec("ffff111122223333aaaa111122223333aaaa1111", "old runner", "M\tNotes/n.md\n"),
+      "Notes/n.md"
+    )[0]!;
+    expect(e).toMatchObject({ code: "M", pathAtCommit: "Notes/n.md" });
+    expect(e.added).toBeUndefined();
   });
 });

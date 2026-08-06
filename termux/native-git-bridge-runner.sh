@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=8
+RUNNER_VERSION=9
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -632,7 +632,11 @@ action_file_log() {
   [ "$limit" -gt 100 ] && limit=100
   [ "$limit" -lt 1 ] && limit=1
   printf '%s' "$skip" | grep -Eq '^[0-9]{1,6}$' || skip=0
-  if ! run_git log --follow --name-status --max-count="$limit" --skip="$skip" \
+  # --raw AND --numstat together: the raw line carries the change letter (and
+  # both paths of a rename), the numstat line the added/deleted counts, which
+  # is what the file-history view shows per commit. Requesting only
+  # --name-status loses the counts; only --numstat loses added-vs-modified.
+  if ! run_git log --follow --raw --numstat --max-count="$limit" --skip="$skip" \
       --format='%x1e%H%x1f%cI%x1f%an%x1f%s' -- "$path"; then
     ERROR=$(err_json GIT_FAILED "git log failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
@@ -764,6 +768,12 @@ protected_excludes_under() { # $1 base path
   PSPECS=()
   local p
   for p in "${PPATHS[@]}"; do
+    # "." is the repository root (the group-wide stage button sends it), so
+    # every protected path lies under it.
+    if [ "$1" = "." ]; then
+      PSPECS+=(":(exclude)$p")
+      continue
+    fi
     case "$p" in
       "$1"/*) PSPECS+=(":(exclude)$p") ;;
     esac

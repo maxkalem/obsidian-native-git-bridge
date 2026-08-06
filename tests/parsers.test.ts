@@ -174,3 +174,31 @@ describe("groupUntrackedChildren", () => {
     expect(groupUntrackedChildren("whatever.md", ["loose.md"])).toEqual({});
   });
 });
+
+describe("renames are one entry, not a delete plus an add", () => {
+  it("keeps both paths for a staged rename (porcelain v2 '2' record)", () => {
+    const raw =
+      "# branch.head main\n" +
+      "2 R. N... 100644 100644 100644 aaaa bbbb R100 B/moved.md\tA/note.md\n";
+    const s = parseStatusPorcelainV2(raw);
+    expect(s.staged).toHaveLength(1);
+    expect(s.staged[0]).toMatchObject({ path: "B/moved.md", origPath: "A/note.md", index: "R" });
+    // The old path must NOT surface as a separate deletion anywhere.
+    expect(s.unstaged).toEqual([]);
+    expect(s.untracked).toEqual([]);
+  });
+
+  it("carries the old path for a rename that was edited afterwards (RM)", () => {
+    const raw = "2 RM N... 100644 100644 100644 aaaa bbbb R096 new.md\told.md\n";
+    const s = parseStatusPorcelainV2(raw);
+    expect(s.staged[0]).toMatchObject({ path: "new.md", origPath: "old.md", index: "R" });
+    expect(s.unstaged[0]).toMatchObject({ path: "new.md", worktree: "M" });
+  });
+
+  it("unquotes both sides of a rename with spaces", () => {
+    const raw = '2 R. N... 100644 100644 100644 aaaa bbbb R100 "new name.md"\t"old name.md"\n';
+    const s = parseStatusPorcelainV2(raw);
+    expect(s.staged[0]!.path).toBe("new name.md");
+    expect(s.staged[0]!.origPath).toBe("old name.md");
+  });
+});

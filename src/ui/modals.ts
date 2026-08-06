@@ -11,7 +11,19 @@ import type { GitStatusSummary, SparseSafetyReport, SparseStateSummary } from ".
  */
 export function placeModalAction(
   modal: Modal,
-  opts: { label: string; icon: string; danger?: boolean; onClick: () => void }
+  opts: {
+    label: string;
+    icon: string;
+    danger?: boolean;
+    /**
+     * The modal has a text field. Only then does the action move to the
+     * top-left corner on mobile: with the keyboard open a button at the bottom
+     * is unreachable. A modal that is only a question keeps its action at the
+     * bottom centre, where it does not collide with the title.
+     */
+    hasInput?: boolean;
+    onClick: () => void;
+  }
 ): HTMLButtonElement {
   const b = document.createElement("button");
   b.className = `ngb-modal-action ${opts.danger ? "mod-warning" : "mod-cta"}`;
@@ -20,7 +32,7 @@ export function placeModalAction(
   b.createSpan({ text: opts.label });
   b.setAttribute("aria-label", opts.label);
   b.addEventListener("click", opts.onClick);
-  if (Platform.isMobile) {
+  if (Platform.isMobile && opts.hasInput === true) {
     modal.modalEl.addClass("ngb-modal-has-top-action");
     b.addClass("ngb-modal-action-top");
     modal.modalEl.insertBefore(b, modal.modalEl.firstChild);

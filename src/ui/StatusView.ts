@@ -3,6 +3,7 @@ import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../type
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
 import {
+  NGB_ICON_FETCH,
   NGB_ICON_PULL,
   NGB_ICON_PUSH,
   NGB_ICON_STAGE_ALL,
@@ -70,6 +71,10 @@ export interface StatusViewActions {
    * Untracked moves the new files to Obsidian's trash).
    */
   folderAction: (group: Group, folderPath: string, kind: "stage" | "unstage" | "discard") => void;
+  /** The same, scoped to a whole group (buttons on the group header). */
+  groupAction: (group: Group, kind: "stage" | "unstage" | "discard") => void;
+  /** Group-wide context menu (bulk unstage, .gitignore, sparse, exclude). */
+  groupMenu: (group: Group, pos: { x: number; y: number }) => void;
   cancel: () => void;
   openFile: (path: string) => void;
   /** Open the diff for a changed file in an Obsidian pane (HEAD → worktree). */
@@ -83,8 +88,12 @@ export interface StatusViewActions {
   stage: (path: string) => void;
   unstage: (path: string) => void;
   discard: (path: string) => void;
-  /** Fill a context menu with the Git entries for this path (long press / right click). */
-  fileMenu: (menu: Menu, path: string) => void;
+  /**
+   * Open the Git menu for a path (long press / right click). `group` is the
+   * panel group the row belongs to, so the entries reflect the state the
+   * panel is showing instead of re-deriving it.
+   */
+  fileMenu: (path: string, group: Group, pos: { x: number; y: number }) => void;
 }
 
 export type Group = "conflicted" | "staged" | "unstaged" | "untracked";
@@ -227,7 +236,7 @@ export class StatusView extends ItemView {
     iconBtn("check", "Commit", this.actions.commit, "commit", "pulse");
     iconBtn(NGB_ICON_STAGE_ALL, "Stage all", this.actions.stageAll, "stage-all", "pulse");
     iconBtn(NGB_ICON_UNSTAGE_ALL, "Unstage all", this.actions.unstageAll, "unstage-all", "pulse");
-    iconBtn("cloud-download", "Fetch", this.actions.fetch, "fetch", "sweep-down");
+    iconBtn(NGB_ICON_FETCH, "Fetch", this.actions.fetch, "fetch", "sweep-down");
     iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
     iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
     iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
@@ -327,7 +336,7 @@ export class StatusView extends ItemView {
     parent: HTMLElement,
     group: Group,
     title: string,
-    items: { path: string; code: string }[],
+    items: { path: string; code: string; origPath?: string }[],
     danger: boolean,
     showWhenEmpty = false
   ): void {
@@ -340,12 +349,37 @@ export class StatusView extends ItemView {
       cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
       text: title,
     });
+    // Group-wide actions, in the same slots (and with the same glyphs) the
+    // folder rows use, so a group reads as the outermost folder of its state.
+    const acts = header.createDiv({ cls: "ngb-sv-file-actions" });
+    const gact = (icon: string, tooltip: string, cb: () => void, warn = false) => {
+      const b = acts.createEl("button", {
+        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`,
+      });
+      b.setAttribute("aria-label", tooltip);
+      setIcon(b, icon);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        cb();
+      });
+    };
+    if (group === "staged" && items.length > 0) {
+      gact("minus", "Unstage everything", () => this.actions.groupAction(group, "unstage"));
+    } else if (group === "unstaged" && items.length > 0) {
+      gact("plus", "Stage all changed files", () => this.actions.groupAction(group, "stage"));
+      gact("undo-2", "Discard all local changes", () => this.actions.groupAction(group, "discard"), true);
+    } else if (group === "untracked" && items.length > 0) {
+      gact("plus", "Stage all new files", () => this.actions.groupAction(group, "stage"));
+    }
     // Same right-hand column as the rows below it.
     renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
     });
+    // Long press / right click on the header: the group's own menu (bulk
+    // unstage, .gitignore, sparse, exclude), gated by the settings toggles.
+    this.attachContextMenu(header, (pos) => this.actions.groupMenu(group, pos));
     if (this.collapsed[group]) return;
 
     const list = wrap.createDiv({ cls: "ngb-sv-list" });
@@ -369,15 +403,54 @@ export class StatusView extends ItemView {
     }
   }
 
+  /**
+   * Right click (desktop) and long press (touch) on any row or header. The
+   * touch timer backs up `contextmenu`, which Android's WebView delivers
+   * inconsistently, and is cancelled by movement so scrolling never opens a
+   * menu. The caller receives the anchor position and opens the menu itself.
+   */
+  private attachContextMenu(el: HTMLElement, open: (pos: { x: number; y: number }) => void): void {
+    const anchor = (ev: MouseEvent | TouchEvent): { x: number; y: number } => {
+      if (ev instanceof MouseEvent && ev.clientX) return { x: ev.clientX, y: ev.clientY };
+      const r = el.getBoundingClientRect();
+      return { x: r.left, y: r.bottom };
+    };
+    el.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      open(anchor(ev));
+    });
+    let longPress: number | null = null;
+    const clearLongPress = () => {
+      if (longPress !== null) {
+        window.clearTimeout(longPress);
+        longPress = null;
+      }
+    };
+    el.addEventListener(
+      "touchstart",
+      (ev) => {
+        clearLongPress();
+        longPress = window.setTimeout(() => {
+          longPress = null;
+          open(anchor(ev));
+        }, 500);
+      },
+      { passive: true }
+    );
+    for (const e of ["touchend", "touchmove", "touchcancel"]) {
+      el.addEventListener(e, clearLongPress, { passive: true });
+    }
+  }
+
   /** Tree layout: group items nested under collapsible folder rows. */
   private renderTreeItems(
     list: HTMLElement,
     group: Group,
-    items: { path: string; code: string }[]
+    items: { path: string; code: string; origPath?: string }[]
   ): void {
     // Untracked "dir/" entries expand into their enumerated files so the tree
     // shows real rows; the entry stays a leaf when nothing enumerated it.
-    let expanded = items;
+    let expanded: { path: string; code: string; origPath?: string }[] = items;
     if (group === "untracked") {
       expanded = [];
       for (const it of items) {
@@ -397,7 +470,7 @@ export class StatusView extends ItemView {
   private renderFolderNode(
     list: HTMLElement,
     group: Group,
-    node: PathTreeNode<{ path: string; code: string }>,
+    node: PathTreeNode<{ path: string; code: string; origPath?: string }>,
     depth: number
   ): void {
     const rowEl = list.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
@@ -417,6 +490,9 @@ export class StatusView extends ItemView {
     if (hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file")) {
       rowEl.addClass("ngb-sv-file-busy");
     }
+    // The folder's own menu: the same entries a file gets, applied to every
+    // child in this group's state (the runner takes a directory path).
+    this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
     // Folder actions apply to every file under the folder IN THIS GROUP's
     // state; main.ts scopes the git invocation accordingly. The action area
     // mirrors the FILE row slot for slot ([open] [stage/unstage] [discard]
@@ -483,7 +559,7 @@ export class StatusView extends ItemView {
   private renderRow(
     list: HTMLElement,
     group: Group,
-    it: { path: string; code: string },
+    it: { path: string; code: string; origPath?: string },
     depth: number
   ): void {
     {
@@ -514,6 +590,12 @@ export class StatusView extends ItemView {
       }
       const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(it.path) });
       name.setAttribute("aria-label", `${it.path} - ${kind}`);
+      // A rename/copy shows where the file came from, so a move reads as a
+      // move instead of a deletion plus an addition.
+      if (it.origPath !== undefined && it.origPath !== it.path) {
+        const from = main.createSpan({ cls: "ngb-sv-file-from", text: `← ${displayName(it.origPath)}` });
+        from.setAttribute("aria-label", `moved from ${it.origPath}`);
+      }
       // Tap behaviour per group: conflicts open resolution (pane for text
       // files, context menu for the rest); tracked changes open their diff in
       // a pane (obsidian-git convention); untracked files and folders have no
@@ -530,42 +612,10 @@ export class StatusView extends ItemView {
         main.addEventListener("click", () => this.actions.openDiff(it.path, group));
       }
 
-      // Same Git menu as the file explorer, on the whole row: right click on
-      // desktop, long press on touch (Obsidian maps contextmenu for both, but
-      // WebViews are inconsistent about it, so a touch timer backs it up).
-      const openMenu = (ev: MouseEvent | TouchEvent) => {
-        const menu = new Menu();
-        this.actions.fileMenu(menu, it.path);
-        // showAtMouseEvent needs a MouseEvent; for touch, anchor the menu to
-        // the row itself (MenuPositionDef takes x/y, not a DOMRect).
-        if (ev instanceof MouseEvent) {
-          menu.showAtMouseEvent(ev);
-        } else {
-          const r = rowEl.getBoundingClientRect();
-          menu.showAtPosition({ x: r.left, y: r.bottom });
-        }
-      };
-      rowEl.addEventListener("contextmenu", (ev) => {
-        ev.preventDefault();
-        openMenu(ev);
-      });
-      let longPress: number | null = null;
-      const clearLongPress = () => {
-        if (longPress !== null) {
-          window.clearTimeout(longPress);
-          longPress = null;
-        }
-      };
-      rowEl.addEventListener("touchstart", (ev) => {
-        clearLongPress();
-        longPress = window.setTimeout(() => {
-          longPress = null;
-          openMenu(ev);
-        }, 500);
-      }, { passive: true });
-      for (const e of ["touchend", "touchmove", "touchcancel"]) {
-        rowEl.addEventListener(e, clearLongPress, { passive: true });
-      }
+      // Same Git menu as the file explorer, on the whole row. The menu is told
+      // WHICH GROUP the row came from, so its entries match the state the
+      // panel is showing rather than being re-inferred.
+      this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
       // Tooltips are unavailable on touch, so the change is spelled out there.
       if (Platform.isMobile) {
         main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
@@ -616,8 +666,11 @@ export class StatusView extends ItemView {
   }
 }
 
-function entry(e: GitFileEntry, code: string): { path: string; code: string } {
-  return { path: e.path, code: code === "." ? "M" : code };
+function entry(e: GitFileEntry, code: string): { path: string; code: string; origPath?: string } {
+  // git reports a rename or copy as ONE entry with both paths; the old path is
+  // carried through so the row can say "moved from where" instead of looking
+  // like an unrelated addition.
+  return { path: e.path, code: code === "." ? "M" : code, origPath: e.origPath };
 }
 
 /**

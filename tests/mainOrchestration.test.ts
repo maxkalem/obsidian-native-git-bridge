@@ -611,7 +611,7 @@ describe("file context menu", () => {
     // Not in .gitignore / exclude -> only the Add variants:
     expect(titles).toContain("Git: Add to .gitignore");
     expect(titles).not.toContain("Git: Remove from .gitignore");
-    expect(titles).toContain("Git: Add to .git exclude (local ignore)");
+    expect(titles).toContain("Git: Add to .git exclude");
     expect(titles).not.toContain("Git: Remove from .git exclude");
   });
 
@@ -678,8 +678,11 @@ describe("file context menu", () => {
       },
     };
     h.plugin.buildGitMenu(menu, "Notes/a.md");
-    // Only Stage/Unstage remain.
-    expect(titles.every((t) => t.startsWith("Git: Stage") || t.startsWith("Git: Unstage"))).toBe(true);
+    // The three config families disappear; the state and "open" entries stay.
+    expect(titles.some((t) => t.includes(".gitignore"))).toBe(false);
+    expect(titles.some((t) => t.includes("sparse"))).toBe(false);
+    expect(titles.some((t) => t.includes("exclude"))).toBe(false);
+    expect(titles.some((t) => t.startsWith("Git: Stage"))).toBe(true);
   });
 });
 
@@ -731,5 +734,90 @@ describe("companion update advice", () => {
     h.plugin.onCompanionAck("run", "1", "9.9.9");
     expect(h.plugin.companionOutdated()).toBe(false);
     expect(h.plugin.versionAdvice().map((a) => a.part)).toContain("plugin");
+  });
+});
+
+describe("panel context menus reflect the row's own group", () => {
+  const collect = () => {
+    const titles: string[] = [];
+    const menu: Any = {
+      addItem: (fn: (i: Any) => void) => {
+        const item: Any = {
+          setTitle: (t: string) => {
+            titles.push(t);
+            return item;
+          },
+          setIcon: () => item,
+          onClick: () => item,
+        };
+        fn(item);
+        return menu;
+      },
+    };
+    return { titles, menu };
+  };
+
+  /** A file that is staged AND edited again afterwards (the "MM" case). */
+  const stagedAndModified = (h: Harness) => {
+    (h.plugin as Any).lastStatus = {
+      status: {
+        ahead: 0,
+        behind: 0,
+        detached: false,
+        staged: [{ path: "Notes/a.md", index: "M", worktree: "." }],
+        unstaged: [{ path: "Notes/a.md", index: ".", worktree: "M" }],
+        untracked: [],
+        conflicted: [],
+      },
+      sparse: { enabled: false, coneMode: undefined, patterns: [], skipWorktreeCount: 0 },
+      fetchedAt: "now",
+    };
+  };
+
+  it("a staged row offers Unstage only, even when the file has newer edits", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    stagedAndModified(h);
+    const { titles, menu } = collect();
+    h.plugin.buildGitMenu(menu, "Notes/a.md", "staged");
+    expect(titles.some((t) => t.startsWith("Git: Unstage"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("Git: Stage"))).toBe(false);
+  });
+
+  it("an unstaged row offers Stage only for the same file", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    stagedAndModified(h);
+    const { titles, menu } = collect();
+    h.plugin.buildGitMenu(menu, "Notes/a.md", "unstaged");
+    expect(titles.some((t) => t.startsWith("Git: Stage"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("Git: Unstage"))).toBe(false);
+  });
+
+  it("without a group it infers ONE state, worktree changes first", async () => {
+    // The file explorer has no row context. Precedence is conflicted >
+    // unstaged > untracked > staged, so the entry offered is the one that
+    // acts on what is not yet staged.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    stagedAndModified(h);
+    const { titles, menu } = collect();
+    h.plugin.buildGitMenu(menu, "Notes/a.md");
+    expect(titles.some((t) => t.startsWith("Git: Stage"))).toBe(true);
+    expect(titles.some((t) => t.startsWith("Git: Unstage"))).toBe(false);
+  });
+
+  it("the group menu offers bulk entries only while the toggles allow them", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    stagedAndModified(h);
+    const on = collect();
+    h.plugin.buildGroupMenu(on.menu, "staged");
+    expect(on.titles.some((t) => t.includes(".gitignore"))).toBe(true);
+    expect(on.titles.some((t) => t.includes("sparse"))).toBe(true);
+    await h.plugin.updateDeviceSettings({ menuGitignore: false, menuSparse: false, menuExclude: false });
+    const off = collect();
+    h.plugin.buildGroupMenu(off.menu, "staged");
+    expect(off.titles).toEqual(["Git: Unstage in group (1)"]);
   });
 });

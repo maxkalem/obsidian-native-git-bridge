@@ -7,16 +7,54 @@ export interface FileLogEntry {
   subject: string;
   /** The file's path AT this commit (differs from the current path across renames). */
   pathAtCommit: string;
+  /** Change letter for this file in this commit (A, M, D, R, C, T). */
+  code?: string;
+  /** The path the file had BEFORE a rename or copy in this commit. */
+  origPath?: string;
+  /** Lines added / deleted (runner v9+, from --numstat; absent for binaries). */
+  added?: number;
+  deleted?: number;
+}
+
+/**
+ * One-line description of what happened to the file in a commit, for the
+ * file-history rows: "added", "+25 −12", "renamed from old.md", "deleted".
+ * Falls back to the bare change letter when a v8 runner gave us no numbers.
+ */
+export function describeFileChange(e: FileLogEntry): string {
+  const counts =
+    e.added !== undefined && e.deleted !== undefined ? `+${e.added} −${e.deleted}` : "";
+  switch (e.code) {
+    case "A":
+      return counts === "" ? "added" : `added, ${counts}`;
+    case "D":
+      return "deleted";
+    case "R":
+      return e.origPath ? `renamed from ${e.origPath}` : "renamed";
+    case "C":
+      return e.origPath ? `copied from ${e.origPath}` : "copied";
+    case "T":
+      return "type changed";
+    case "M":
+    default:
+      return counts === "" ? (e.code ? `changed (${e.code})` : "changed") : counts;
+  }
 }
 
 const RS = String.fromCharCode(0x1e); // record separator
 const FS = String.fromCharCode(0x1f); // field separator
 
 /**
- * Parse `git log --follow --name-status --format='%x1e%H%x1f%cI%x1f%an%x1f%s'`.
- * The name-status block under each record tells us the file's name at that
- * commit (rename records carry old\tnew; the file's name AT the commit is the
- * NEW one, since git log walks history backwards).
+ * Parse `git log --follow --raw --numstat --format='%x1e%H%x1f%cI%x1f%an%x1f%s'`.
+ *
+ * Each record carries up to two body lines for the file:
+ *   `:100644 100644 aaa bbb R100\told.md\tnew.md`  (raw: change letter, paths)
+ *   `3\t1\told.md => new.md`                        (numstat: added, deleted)
+ * The raw line is authoritative for the file's name AT the commit (git log
+ * walks backwards, so the NEW side is the name at that point) and for
+ * telling an addition from a modification; numstat supplies the counts.
+ * Output from an older runner had neither, so both are optional and the
+ * name-status form (`M\tpath`) is still understood.
  */
 export function parseFileLog(raw: string, currentPath: string): FileLogEntry[] {
   const out: FileLogEntry[] = [];
@@ -28,17 +66,53 @@ export function parseFileLog(raw: string, currentPath: string): FileLogEntry[] {
     const [hash, date, author, ...subj] = header.split(FS);
     if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) continue;
     let pathAtCommit: string | undefined;
+    let code: string | undefined;
+    let origPath: string | undefined;
+    let added: number | undefined;
+    let deleted: number | undefined;
     for (const rawLine of lines.slice(1)) {
       const line = rawLine.replace(/\r$/, "");
       if (line.trim() === "") continue;
       const parts = line.split("\t");
-      const code = parts[0] ?? "";
-      if ((code.startsWith("R") || code.startsWith("C")) && parts.length >= 3) {
-        pathAtCommit = unquoteGitPath(parts[2]!);
-      } else if (parts.length >= 2) {
-        pathAtCommit = unquoteGitPath(parts[1]!);
+      if (line.startsWith(":")) {
+        // raw: ":<modes> <shas> <STATUS>\t<path>[\t<path2>]"
+        const status = (parts[0] ?? "").split(" ").pop() ?? "";
+        code = status[0];
+        if ((code === "R" || code === "C") && parts.length >= 3) {
+          origPath = unquoteGitPath(parts[1]!);
+          pathAtCommit = unquoteGitPath(parts[2]!);
+        } else if (parts.length >= 2) {
+          pathAtCommit = unquoteGitPath(parts[1]!);
+        }
+        continue;
       }
-      if (pathAtCommit !== undefined) break;
+      if (/^(\d+|-)\t(\d+|-)\t/.test(line)) {
+        // numstat: "<added>\t<deleted>\t<path>"; "-" marks a binary file.
+        const a = parts[0] ?? "";
+        const d = parts[1] ?? "";
+        if (a !== "-" && d !== "-") {
+          added = Number(a);
+          deleted = Number(d);
+        }
+        if (pathAtCommit === undefined && parts.length >= 3) {
+          // Rename form in numstat is "old => new"; take the new side.
+          const p = parts[2]!;
+          const arrow = p.indexOf(" => ");
+          pathAtCommit = unquoteGitPath(arrow >= 0 ? p.slice(arrow + 4) : p);
+        }
+        continue;
+      }
+      // name-status fallback (runner v8 and older).
+      if (code === undefined) {
+        const c = parts[0] ?? "";
+        code = c[0];
+        if ((c.startsWith("R") || c.startsWith("C")) && parts.length >= 3) {
+          origPath = unquoteGitPath(parts[1]!);
+          pathAtCommit = unquoteGitPath(parts[2]!);
+        } else if (parts.length >= 2) {
+          pathAtCommit = unquoteGitPath(parts[1]!);
+        }
+      }
     }
     if (pathAtCommit === undefined) pathAtCommit = lastKnownPath;
     lastKnownPath = pathAtCommit;
@@ -48,6 +122,10 @@ export function parseFileLog(raw: string, currentPath: string): FileLogEntry[] {
       author: author ?? "",
       subject: (subj ?? []).join(FS),
       pathAtCommit,
+      code,
+      origPath,
+      added,
+      deleted,
     });
   }
   return out;

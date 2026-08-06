@@ -27,6 +27,24 @@ export interface PathTree<T> {
  * untracked-directory entries) are treated as items OF their parent folder,
  * keeping them visible as a leaf when nothing lists their contents.
  */
+/**
+ * Collapse chains of folders that hold nothing but one another into a single
+ * row: `Private` → `Inbox` → files becomes `Private/Inbox`. Nesting a folder
+ * that contains only a folder wastes a row and an indent level, which matters
+ * on a phone. The surviving node keeps the DEEPEST path, so folder actions
+ * still address the directory whose files are listed under it.
+ */
+function compressChains<T>(nodes: PathTreeNode<T>[]): PathTreeNode<T>[] {
+  return nodes.map((n) => {
+    let node = n;
+    while (node.items.length === 0 && node.children.length === 1) {
+      const only = node.children[0]!;
+      node = { ...only, name: `${node.name}/${only.name}` };
+    }
+    return { ...node, children: compressChains(node.children) };
+  });
+}
+
 export function buildPathTree<T>(items: readonly T[], getPath: (t: T) => string): PathTree<T> {
   interface MutNode {
     name: string;
@@ -69,6 +87,8 @@ export function buildPathTree<T>(items: readonly T[], getPath: (t: T) => string)
   };
   return {
     rootItems,
-    folders: [...top.values()].map(freeze).sort((a, b) => a.name.localeCompare(b.name)),
+    folders: compressChains(
+      [...top.values()].map(freeze).sort((a, b) => a.name.localeCompare(b.name))
+    ),
   };
 }
