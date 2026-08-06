@@ -2105,6 +2105,18 @@ export default class NativeGitBridgePlugin extends Plugin {
    * itself offers the update (this plugin is not in the community catalogue
    * yet), a mismatch can only be reported — never auto-fixed.
    */
+  /**
+   * True only when the companion actually reported a version older than this
+   * plugin. "It answered at all" is not evidence of being outdated, and the
+   * bridge check used to offer an update on that basis alone, which on a
+   * matched pair reads like something is wrong when nothing is.
+   */
+  companionOutdated(): boolean {
+    const companion = this.lastCompanionVersion;
+    if (companion === "") return false;
+    return compareVersions(this.manifest.version, companion) > 0;
+  }
+
   versionAdvice(): Array<{ text: string; part: "plugin" | "companion" | "runner" }> {
     const out: Array<{ text: string; part: "plugin" | "companion" | "runner" }> = [];
     const plugin = this.manifest.version;
@@ -2216,9 +2228,10 @@ export default class NativeGitBridgePlugin extends Plugin {
             new Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
           },
         });
-      } else {
-        // Companion is alive: let IT open the download in the real default
-        // browser (an in-app Custom Tab download is often discarded).
+      } else if (this.companionOutdated()) {
+        // The companion answered AND reported an older version: let IT open
+        // the download in the real default browser (an in-app Custom Tab
+        // download is often discarded). A matching companion gets no button.
         actions.push({
           label: "Update companion app",
           keepOpen: true,

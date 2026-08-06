@@ -974,8 +974,6 @@ var ResultModal = class extends import_obsidian2.Modal {
     outputSection(c, "stderr", this.opts.stderr);
     const btns = c.createDiv({ cls: "ngb-buttons" });
     addCopyButton(btns, () => this.fullText(), "Copy details", "Details copied.");
-    const ok = btns.createEl("button", { text: "Close", cls: "mod-cta" });
-    ok.addEventListener("click", () => this.close());
   }
   fullText() {
     const parts = [this.title, ...this.lines];
@@ -7613,6 +7611,17 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
    * itself offers the update (this plugin is not in the community catalogue
    * yet), a mismatch can only be reported — never auto-fixed.
    */
+  /**
+   * True only when the companion actually reported a version older than this
+   * plugin. "It answered at all" is not evidence of being outdated, and the
+   * bridge check used to offer an update on that basis alone, which on a
+   * matched pair reads like something is wrong when nothing is.
+   */
+  companionOutdated() {
+    const companion = this.lastCompanionVersion;
+    if (companion === "") return false;
+    return compareVersions(this.manifest.version, companion) > 0;
+  }
   versionAdvice() {
     const out = [];
     const plugin = this.manifest.version;
@@ -7706,7 +7715,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
             new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox and download the APK there.");
           }
         });
-      } else {
+      } else if (this.companionOutdated()) {
         actions.push({
           label: "Update companion app",
           keepOpen: true,

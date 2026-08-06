@@ -705,3 +705,31 @@ describe("sync on close (fire and forget)", () => {
     expect(requestFiles(h.adapter)).toHaveLength(1); // second one suppressed
   });
 });
+
+describe("companion update advice", () => {
+  it("does not call a companion outdated just because it answered", async () => {
+    const h = await loadPlugin();
+    // Harness manifest is 0.4.0; an ack with the SAME version is a healthy pair.
+    h.plugin.onCompanionAck("run", "1", "0.4.0");
+    expect(h.plugin.companionOutdated()).toBe(false);
+    expect(h.plugin.versionAdvice().map((a) => a.part)).not.toContain("companion");
+  });
+
+  it("flags a companion that reported an older version", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "1", "0.3.0");
+    expect(h.plugin.companionOutdated()).toBe(true);
+  });
+
+  it("says nothing while no companion version is known", async () => {
+    const h = await loadPlugin();
+    expect(h.plugin.companionOutdated()).toBe(false);
+  });
+
+  it("treats a NEWER companion as a plugin problem, not a companion one", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "1", "9.9.9");
+    expect(h.plugin.companionOutdated()).toBe(false);
+    expect(h.plugin.versionAdvice().map((a) => a.part)).toContain("plugin");
+  });
+});

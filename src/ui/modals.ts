@@ -106,10 +106,10 @@ export class ResultModal extends Modal {
     }
     outputSection(c, "stdout", this.opts.stdout);
     outputSection(c, "stderr", this.opts.stderr);
+    // No Close button: the window's own ✕ closes it, and a second control
+    // doing the same thing next to the real actions only competed with them.
     const btns = c.createDiv({ cls: "ngb-buttons" });
     addCopyButton(btns, () => this.fullText(), "Copy details", "Details copied.");
-    const ok = btns.createEl("button", { text: "Close", cls: "mod-cta" });
-    ok.addEventListener("click", () => this.close());
   }
 
   private fullText(): string {
