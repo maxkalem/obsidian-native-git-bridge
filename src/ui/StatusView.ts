@@ -1,6 +1,7 @@
 import { ItemView, Menu, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
+import { renderCountBadge } from "./countBadge";
 import {
   NGB_ICON_PULL,
   NGB_ICON_PUSH,
@@ -339,7 +340,8 @@ export class StatusView extends ItemView {
       cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
       text: title,
     });
-    header.createSpan({ cls: "ngb-badge", text: String(items.length) });
+    // Same right-hand column as the rows below it.
+    renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
@@ -405,8 +407,6 @@ export class StatusView extends ItemView {
     const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
     setIcon(chev, collapsed ? "chevron-right" : "chevron-down");
     main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
-    // A collapsed folder still tells how many files in THIS state it holds.
-    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
     main.addEventListener("click", () => {
       if (collapsed) this.collapsedDirs.delete(key);
       else this.collapsedDirs.add(key);
@@ -471,8 +471,10 @@ export class StatusView extends ItemView {
       slot(null);
       slot(null);
     }
-    // Placeholder for the change-letter column of file rows.
-    rowEl.createSpan({ cls: "ngb-sv-file-code" });
+    // The count lives in the change-letter column, right-aligned with the
+    // file rows' status letters. A collapsed folder still tells how many
+    // files in THIS state it holds.
+    renderCountBadge(rowEl, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
     for (const it of node.items) this.renderRow(list, group, it, depth + 1);
     for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);

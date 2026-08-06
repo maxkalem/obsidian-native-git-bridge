@@ -2652,6 +2652,64 @@ function buildPathTree(items, getPath) {
   };
 }
 
+// src/ui/countBadge.ts
+function formatCount(count) {
+  const n = Math.max(0, Math.floor(count));
+  if (n > 9999) return { text: "9999+", small: true, clamped: true };
+  return { text: String(n), small: n > 99, clamped: n > 99 };
+}
+function renderCountBadge(parent, count, describe) {
+  const fmt = formatCount(count);
+  const el = parent.createSpan({
+    cls: `ngb-sv-count${fmt.small ? " ngb-sv-count-sm" : ""}`,
+    text: fmt.text
+  });
+  el.setAttribute("aria-label", describe(count));
+  if (!fmt.clamped) return el;
+  el.addClass("ngb-sv-count-more");
+  let pop = null;
+  let timer = null;
+  const clearTimer = () => {
+    if (timer !== null) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+  };
+  const hide = () => {
+    clearTimer();
+    pop?.remove();
+    pop = null;
+  };
+  const show = () => {
+    clearTimer();
+    if (pop === null) {
+      pop = el.doc.body.createDiv({ cls: "ngb-count-pop", text: describe(count) });
+      const r = el.getBoundingClientRect();
+      pop.style.top = `${Math.max(4, r.top - 4)}px`;
+      pop.style.right = `${Math.max(4, el.win.innerWidth - r.right)}px`;
+    }
+  };
+  const arm = () => {
+    clearTimer();
+    timer = el.win.setTimeout(hide, 3e3);
+  };
+  el.addEventListener("click", (e) => {
+    e.stopPropagation();
+    show();
+    arm();
+  });
+  el.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();
+    show();
+  });
+  for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
+    el.addEventListener(ev, () => {
+      if (pop !== null) arm();
+    });
+  }
+  return el;
+}
+
 // src/ui/icons.ts
 var import_obsidian9 = require("obsidian");
 var NGB_ICON_PUSH = "ngb-push";
@@ -2885,7 +2943,7 @@ var StatusView = class extends import_obsidian11.ItemView {
       cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
       text: title
     });
-    header.createSpan({ cls: "ngb-badge", text: String(items.length) });
+    renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
@@ -2934,7 +2992,6 @@ var StatusView = class extends import_obsidian11.ItemView {
     const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
     (0, import_obsidian11.setIcon)(chev, collapsed ? "chevron-right" : "chevron-down");
     main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
-    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
     main.addEventListener("click", () => {
       if (collapsed) this.collapsedDirs.delete(key2);
       else this.collapsedDirs.add(key2);
@@ -2989,7 +3046,7 @@ var StatusView = class extends import_obsidian11.ItemView {
       slot(null);
       slot(null);
     }
-    rowEl.createSpan({ cls: "ngb-sv-file-code" });
+    renderCountBadge(rowEl, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
     for (const it of node.items) this.renderRow(list, group, it, depth + 1);
     for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);
@@ -3262,7 +3319,7 @@ var HistoryView = class extends import_obsidian12.ItemView {
       cls: "ngb-settings-note ngb-hist-meta",
       text: `${e.hash.slice(0, 8)} \xB7 ${e.date.slice(0, 16).replace("T", " ")} \xB7 ${e.author}`
     });
-    header.createSpan({ cls: "ngb-badge", text: String(e.files.length) });
+    renderCountBadge(header, e.files.length, (n) => `${n} files changed in ${e.hash.slice(0, 8)}`);
     const body = wrap.createDiv({ cls: "ngb-sv-list" });
     const renderBody = () => {
       body.empty();
@@ -3292,7 +3349,6 @@ var HistoryView = class extends import_obsidian12.ItemView {
     const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
     (0, import_obsidian12.setIcon)(chev, collapsed ? "chevron-right" : "chevron-down");
     main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
-    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
     main.addEventListener("click", () => {
       if (collapsed) this.collapsedDirs.delete(key2);
       else this.collapsedDirs.add(key2);
@@ -3303,7 +3359,7 @@ var HistoryView = class extends import_obsidian12.ItemView {
     (0, import_obsidian12.setIcon)(spacer, "circle");
     spacer.setAttribute("aria-hidden", "true");
     spacer.tabIndex = -1;
-    row.createSpan({ cls: "ngb-sv-file-code" });
+    renderCountBadge(row, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
     for (const f of node.items) this.renderFile(body, f, e, depth + 1);
     for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);

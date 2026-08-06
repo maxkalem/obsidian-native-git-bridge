@@ -66,6 +66,30 @@
   color: var(--text-muted); margin-left: 2px;
 }
 .ngb-sv-file-actions { display: flex; gap: 0; flex: 0 0 auto; }
+/* File counts share the change-letter column on the right. Room is reserved
+   for two digits; longer values shrink rather than widen the column, so rows
+   stay aligned whatever the repository size. */
+.ngb-sv-count {
+  flex: 0 0 auto; min-width: 2.2ch; text-align: right; margin-left: 2px;
+  font-family: var(--font-monospace); font-size: var(--font-smaller);
+  color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.ngb-sv-count-sm { font-size: var(--font-ui-smaller); letter-spacing: -0.02em; }
+.ngb-sv-count-more { cursor: pointer; text-decoration: underline dotted; }
+/* Exact-value popup for clamped counts (tap to show, hold to keep). */
+.ngb-count-pop {
+  position: fixed; transform: translateY(-100%);
+  z-index: var(--layer-popover, 30);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-s);
+  padding: var(--size-2-2) var(--size-4-2);
+  font-size: var(--font-ui-small); color: var(--text-normal);
+  max-width: 80vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The group header uses the same right-hand column, so the title takes the slack. */
+.ngb-sv-group-title { flex: 1 1 auto; min-width: 0; }
 /* Nested rows (untracked children in list layout; folders/files in tree
    layout). One class per depth level, capped at 6. */
 .ngb-ind-1 { padding-left: var(--size-4-6); }

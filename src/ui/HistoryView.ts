@@ -1,6 +1,7 @@
 import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
 import type { RepoLogEntry, RepoLogFile } from "../git/historyParsers";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
+import { renderCountBadge } from "./countBadge";
 
 export const NGB_HISTORY_VIEW = "native-git-bridge-history";
 /** One icon for the panel AND the strip button that opens it. */
@@ -140,7 +141,7 @@ export class HistoryView extends ItemView {
       cls: "ngb-settings-note ngb-hist-meta",
       text: `${e.hash.slice(0, 8)} · ${e.date.slice(0, 16).replace("T", " ")} · ${e.author}`,
     });
-    header.createSpan({ cls: "ngb-badge", text: String(e.files.length) });
+    renderCountBadge(header, e.files.length, (n) => `${n} files changed in ${e.hash.slice(0, 8)}`);
     const body = wrap.createDiv({ cls: "ngb-sv-list" });
     const renderBody = () => {
       body.empty();
@@ -177,7 +178,6 @@ export class HistoryView extends ItemView {
     const chev = main.createSpan({ cls: "ngb-sv-chevron ngb-sv-row-chevron" });
     setIcon(chev, collapsed ? "chevron-right" : "chevron-down");
     main.createSpan({ cls: "ngb-sv-file-name ngb-sv-folder-name", text: `${node.name}/` });
-    main.createSpan({ cls: "ngb-badge", text: String(node.count) });
     main.addEventListener("click", () => {
       if (collapsed) this.collapsedDirs.delete(key);
       else this.collapsedDirs.add(key);
@@ -190,7 +190,7 @@ export class HistoryView extends ItemView {
     setIcon(spacer, "circle");
     spacer.setAttribute("aria-hidden", "true");
     spacer.tabIndex = -1;
-    row.createSpan({ cls: "ngb-sv-file-code" });
+    renderCountBadge(row, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
     for (const f of node.items) this.renderFile(body, f, e, depth + 1);
     for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);
