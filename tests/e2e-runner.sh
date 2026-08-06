@@ -389,6 +389,36 @@ check '[ -e "Private/Hidden/leak.md" ]' "files inside the protected subdirectory
 rm -rf Private/Hidden
 git sparse-checkout reapply 2>/dev/null || true
 
+echo "# phase 4: discard-all drops unstaged work, keeps staged and untracked"
+printf 'v1\nv2\nstaged edit\n' > "Notes/hist renamed.md"
+git add "Notes/hist renamed.md"
+printf 'v1\nv2\nstaged edit\nlocal edit\n' > "Notes/hist renamed.md"
+printf 'changed\n' > Notes/note.md
+echo "keep me" > Notes/untracked-keep.md
+mkdir -p Private/Hidden && echo "protected new" > Private/Hidden/leak.md
+req "r-20260804T100003Z-dall01" discard-all "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-dall01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "discard-all ok"
+check 'grep -q "staged edit" "Notes/hist renamed.md"' "staged content is kept"
+check '! grep -q "local edit" "Notes/hist renamed.md"' "the unstaged edit on top of it is gone"
+check '[ "$(cat Notes/note.md)" != "changed" ]' "another unstaged file is restored"
+check '[ -e Notes/untracked-keep.md ]' "untracked files are NOT deleted"
+check '[ -e Private/Hidden/leak.md ]' "protected paths are untouched"
+
+echo "# phase 4: reset-all clears index and worktree, still excluding protected paths"
+req "r-20260804T100003Z-rall01" reset-all "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-rall01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "reset-all ok"
+check 'git diff --cached --quiet' "index is empty again"
+check 'git diff --quiet' "worktree matches HEAD"
+check '! grep -q "staged edit" "Notes/hist renamed.md"' "the staged edit is gone too"
+check '[ -e Notes/untracked-keep.md ]' "untracked files survive a reset"
+check '[ -e Private/Hidden/leak.md ]' "protected paths survive a reset"
+rm -f Notes/untracked-keep.md Private/Hidden/leak.md
+git sparse-checkout reapply 2>/dev/null || true
+
 echo "# phase 4: FAILED mutating actions still carry fresh status fields"
 req "r-20260804T100003Z-err001" restore-file "$TOKEN" "{\"path\":\"Notes/never-existed.md\",\"commit\":\"$OLD_HASH\",\"protectedPaths\":[]}"
 bash "$RUNNER"

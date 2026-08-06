@@ -685,7 +685,9 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["exclude-remove", 4],
   ["exclude-list", 4],
   ["repo-log", 5],
-  ["resolve-conflict", 6]
+  ["resolve-conflict", 6],
+  ["discard-all", 8],
+  ["reset-all", 8]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -700,7 +702,9 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "discard-file",
   "stage-all",
   "unstage-all",
-  "resolve-conflict"
+  "resolve-conflict",
+  "discard-all",
+  "reset-all"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -6409,29 +6413,34 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   // -------------------------------------------------------------- commands
   registerCommands() {
     const cmds = [
-      { id: "status", name: "Native Git: Status", cb: () => void this.cmdStatus() },
-      { id: "pull", name: "Native Git: Pull", cb: () => void this.cmdPull() },
-      { id: "push", name: "Native Git: Push", cb: () => void this.cmdPush() },
-      { id: "commit", name: "Native Git: Commit", cb: () => void this.cmdCommit() },
-      { id: "sync", name: "Native Git: Sync", cb: () => void this.cmdSync() },
-      { id: "fetch", name: "Native Git: Fetch", cb: () => void this.cmdFetch() },
-      { id: "stage-all", name: "Native Git: Stage all changes", cb: () => void this.cmdStageAll() },
-      { id: "unstage-all", name: "Native Git: Unstage all changes", cb: () => void this.cmdUnstageAll() },
-      { id: "show-history-current-file", name: "Native Git: Show history for current file", cb: () => this.cmdFileHistory() },
-      { id: "show-diff-current-file", name: "Native Git: Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
-      { id: "show-file-at-commit", name: "Native Git: Show selected file at commit", cb: () => this.cmdFileHistory() },
-      { id: "restore-file-from-commit", name: "Native Git: Restore selected file from commit", cb: () => this.cmdFileHistory() },
-      { id: "show-changed-files", name: "Native Git: Show changed files", cb: () => void this.cmdShowChangedFiles() },
-      { id: "verify-sparse-safety", name: "Native Git: Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
-      { id: "reapply-sparse", name: "Native Git: Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
-      { id: "diagnostics", name: "Native Git: Run diagnostics", cb: () => void this.cmdDiagnostics() },
-      { id: "open-operation-log", name: "Native Git: Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
-      { id: "open-status-panel", name: "Native Git: Open status panel", cb: () => void this.openStatusPanel() },
-      { id: "open-history-panel", name: "Native Git: Open history panel", cb: () => void this.openHistoryPanel() },
-      { id: "bridge-self-check", name: "Native Git: Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
-      { id: "open-companion-setup", name: "Native Git: Open companion app setup", cb: () => void this.openCompanionSetup() },
-      { id: "setup-guide", name: "Native Git: Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
-      { id: "cancel-operation", name: "Native Git: Cancel current operation when possible", cb: () => void this.cmdCancel() }
+      // Obsidian already prefixes every entry with the plugin name, so a
+      // "Native Git: " here produced "Native Git Bridge: Native Git: Fetch".
+      // Ids stay untouched: they are what user hotkeys are bound to.
+      { id: "status", name: "Status", cb: () => void this.cmdStatus() },
+      { id: "pull", name: "Pull", cb: () => void this.cmdPull() },
+      { id: "push", name: "Push", cb: () => void this.cmdPush() },
+      { id: "commit", name: "Commit", cb: () => void this.cmdCommit() },
+      { id: "sync", name: "Sync", cb: () => void this.cmdSync() },
+      { id: "fetch", name: "Fetch", cb: () => void this.cmdFetch() },
+      { id: "stage-all", name: "Stage all changes", cb: () => void this.cmdStageAll() },
+      { id: "unstage-all", name: "Unstage all changes", cb: () => void this.cmdUnstageAll() },
+      { id: "discard-all", name: "Discard all local changes (keep staged)", cb: () => this.cmdDiscardAll() },
+      { id: "reset-all", name: "Reset everything to HEAD (staged and local changes)", cb: () => this.cmdResetAll() },
+      { id: "show-history-current-file", name: "Show history for current file", cb: () => this.cmdFileHistory() },
+      { id: "show-diff-current-file", name: "Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
+      { id: "show-file-at-commit", name: "Show selected file at commit", cb: () => this.cmdFileHistory() },
+      { id: "restore-file-from-commit", name: "Restore selected file from commit", cb: () => this.cmdFileHistory() },
+      { id: "show-changed-files", name: "Show changed files", cb: () => void this.cmdShowChangedFiles() },
+      { id: "verify-sparse-safety", name: "Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
+      { id: "reapply-sparse", name: "Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
+      { id: "diagnostics", name: "Run diagnostics", cb: () => void this.cmdDiagnostics() },
+      { id: "open-operation-log", name: "Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
+      { id: "open-status-panel", name: "Open status panel", cb: () => void this.openStatusPanel() },
+      { id: "open-history-panel", name: "Open history panel", cb: () => void this.openHistoryPanel() },
+      { id: "bridge-self-check", name: "Check bridge (no Termux round trip)", cb: () => void this.cmdSelfCheck() },
+      { id: "open-companion-setup", name: "Open companion app setup", cb: () => void this.openCompanionSetup() },
+      { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
+      { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
     this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
@@ -7822,6 +7831,72 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: unstage failed", result);
     this.absorbStatusData(result.data ?? {});
+  }
+  /**
+   * Discard every unstaged change at once (the Changes group as a whole).
+   * Staged work and untracked files survive: dropping those is `git clean`
+   * territory and needs its own explicit action, not a side effect here.
+   */
+  cmdDiscardAll() {
+    const st = this.lastStatus?.status;
+    const n = st?.unstaged.length ?? 0;
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Discard all local changes?",
+        body: [
+          n > 0 ? `${n} file${n === 1 ? "" : "s"} with unstaged changes will go back to the staged version (or to HEAD when nothing is staged for them).` : "All unstaged changes will go back to the staged version (or to HEAD).",
+          "Staged changes and untracked files are kept. Protected sparse paths are excluded.",
+          "This cannot be undone: the discarded edits are not in Git history."
+        ],
+        confirmLabel: "Discard local changes",
+        icon: "undo-2",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("discard-all", {
+          protectedPaths: this.effectiveProtectedPaths()
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: discard failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify("Discarded all unstaged changes.");
+      }
+    ).open();
+  }
+  /**
+   * The effect of `git reset --hard`, expressed as a pathspec restore so the
+   * protected sparse paths can be excluded. HEAD is not moved and untracked
+   * files are not deleted, both of which a literal --hard would do.
+   */
+  cmdResetAll() {
+    const st = this.lastStatus?.status;
+    const n = (st?.staged.length ?? 0) + (st?.unstaged.length ?? 0);
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Reset everything to HEAD?",
+        body: [
+          n > 0 ? `${n} staged and unstaged change${n === 1 ? "" : "s"} will be thrown away; the working tree and the index go back to the last commit.` : "The working tree and the index go back to the last commit.",
+          "Untracked files are kept, and protected sparse paths are excluded. The branch itself is not moved: commits are untouched.",
+          "This cannot be undone: nothing being discarded here is in Git history."
+        ],
+        confirmLabel: "Reset to HEAD",
+        icon: "rotate-ccw",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("reset-all", {
+          protectedPaths: this.effectiveProtectedPaths()
+        });
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: reset failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify("Reset the working tree and index to HEAD.");
+      }
+    ).open();
   }
   cmdDiscardFile(path) {
     new ConfirmModal(

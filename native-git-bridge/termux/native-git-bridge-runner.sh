@@ -823,6 +823,40 @@ action_stage_all() {
   collect_status_fields
 }
 
+# Repository-wide discard of UNSTAGED work (the "Changes" group as a whole):
+# tracked files go back to what is staged (or to HEAD when nothing is staged).
+# Untracked files are deliberately left alone: deleting them would be a
+# `git clean`, which the user did not ask for and cannot undo from here.
+action_discard_all() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+  local -a specs=(".")
+  local p
+  for p in "${PPATHS[@]}"; do specs+=(":(exclude)$p"); done
+  if ! run_git restore --worktree -- "${specs[@]}"; then
+    ERROR=$(err_json GIT_FAILED "git restore --worktree failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
+# Everything back to HEAD: index AND worktree, the effect of `git reset --hard`
+# expressed as a pathspec restore so protected paths can be excluded (a real
+# --hard takes no pathspec and would wipe them too). Untracked files survive.
+action_reset_all() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+  local -a specs=(".")
+  local p
+  for p in "${PPATHS[@]}"; do specs+=(":(exclude)$p"); done
+  if ! run_git restore --staged --worktree -- "${specs[@]}"; then
+    # No commit yet: restore has no source, so drop the index instead.
+    if ! run_git reset -q -- "${specs[@]}"; then
+      ERROR=$(err_json GIT_FAILED "Reset failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
+  collect_status_fields
+}
+
 action_unstage_all() {
   local req_file="$1"
   read_protected_paths "$req_file" || return 1
@@ -1060,6 +1094,8 @@ process_request() {
     discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
     stage-all)             action_stage_all "$req_file" || { ok=false; ec=1; } ;;
     unstage-all)           action_unstage_all "$req_file" || { ok=false; ec=1; } ;;
+    discard-all)           action_discard_all "$req_file" || { ok=false; ec=1; } ;;
+    reset-all)             action_reset_all "$req_file" || { ok=false; ec=1; } ;;
     sparse-exclude-add)    action_sparse_exclude_add "$req_file" || { ok=false; ec=1; } ;;
     sparse-exclude-remove) action_sparse_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
     exclude-add)           action_exclude_add "$req_file" || { ok=false; ec=1; } ;;

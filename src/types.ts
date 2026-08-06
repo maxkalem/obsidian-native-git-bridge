@@ -27,7 +27,9 @@ export type BridgeAction =
   | "exclude-remove"
   | "exclude-list"
   | "repo-log"
-  | "resolve-conflict";
+  | "resolve-conflict"
+  | "discard-all"
+  | "reset-all";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -45,6 +47,8 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["exclude-list", 4],
   ["repo-log", 5],
   ["resolve-conflict", 6],
+  ["discard-all", 8],
+  ["reset-all", 8],
 ]);
 
 export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
@@ -70,6 +74,8 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "stage-all",
   "unstage-all",
   "resolve-conflict",
+  "discard-all",
+  "reset-all",
 ]);
 
 export interface BridgeRequest {
