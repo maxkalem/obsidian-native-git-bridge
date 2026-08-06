@@ -6,8 +6,8 @@
 
 Native Git for Obsidian on **Android**, executed by the real `git` binary inside **Termux**, with first-class **sparse checkout** support. No isomorphic-git, no HTTP server, no open ports, nothing running in the background.
 
-> [!info]
-> Status: Work in progress
+> [!note]
+> **Status: Work in progress**
 
 ## Implemented
 
