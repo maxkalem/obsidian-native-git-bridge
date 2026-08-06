@@ -360,6 +360,35 @@ bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T100003Z-upd002.json" >/dev/null' "unknown stage mode -> BAD_REQUEST"
 git restore --staged Notes && git checkout -- "Notes/hist renamed.md" && rm -f "Notes/brand-new.md"
 
+echo "# phase 4: a folder action must NOT sweep in a protected path below it"
+# The folder rows in the tree layout (and "Git: Stage" on a folder) send the
+# FOLDER path. refuse_if_protected only rejects the path itself or paths under
+# a protected one, so an ancestor folder used to stage its protected children.
+mkdir -p Private/Hidden
+echo "leaked note" > "Private/Hidden/leak.md"
+echo "ordinary" > "Private/plain.md"
+req "r-20260804T100003Z-anc001" stage-file "$TOKEN" '{"path":"Private","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260804T100003Z-anc001.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "staging an ancestor folder succeeds"
+check 'git diff --cached --name-only | grep -q "Private/plain.md"' "the folder's own files are staged"
+check '! git diff --cached --name-only | grep -q "Private/Hidden"' "the protected subdirectory is NOT staged"
+req "r-20260804T100003Z-anc002" stage-file "$TOKEN" '{"path":"Private","mode":"update","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T100003Z-anc002.json" >/dev/null' "mode=update on an ancestor folder ok"
+check '! git diff --cached --name-only | grep -q "Private/Hidden"' "mode=update leaves the protected subdirectory alone"
+req "r-20260804T100003Z-anc003" unstage-file "$TOKEN" '{"path":"Private","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T100003Z-anc003.json" >/dev/null' "unstaging an ancestor folder ok"
+check 'git diff --cached --quiet' "nothing staged remains"
+req "r-20260804T100003Z-anc004" discard-file "$TOKEN" '{"path":"Private","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260804T100003Z-anc004.json" >/dev/null' "discarding an untracked folder ok"
+check '[ ! -e "Private/plain.md" ]' "untracked files in the folder are gone"
+check '[ -e "Private/Hidden/leak.md" ]' "files inside the protected subdirectory are untouched"
+rm -rf Private/Hidden
+git sparse-checkout reapply 2>/dev/null || true
+
 echo "# phase 4: FAILED mutating actions still carry fresh status fields"
 req "r-20260804T100003Z-err001" restore-file "$TOKEN" "{\"path\":\"Notes/never-existed.md\",\"commit\":\"$OLD_HASH\",\"protectedPaths\":[]}"
 bash "$RUNNER"
@@ -480,8 +509,8 @@ check '[ -z "$(ls -A "$RUNTIME/processing" 2>/dev/null)" ]' "processing dir drai
 check '[ ! -d "$RUNTIME/.runner.lock" ]' "lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "7" ]' "runnerVersion = 7 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=7"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "8" ]' "runnerVersion = 8 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=8"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"

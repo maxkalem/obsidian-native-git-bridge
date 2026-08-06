@@ -5,7 +5,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=7
+RUNNER_VERSION=8
 CONFIG_FILE="${NGB_CONFIG:-$HOME/.config/native-git-bridge/config}"
 
 # Never let git block on an interactive credential prompt: with a missing or
@@ -751,6 +751,25 @@ refuse_if_protected() { # $1 path
   return 0
 }
 
+# Pathspec excludes for every protected path that lies UNDER $1.
+#
+# refuse_if_protected only rejects a path that IS protected or sits inside a
+# protected directory. A path can also be an ANCESTOR of one: staging the
+# folder row "Private" (or picking "Git: Stage" on a folder) would otherwise
+# run `git add -- Private` and sweep in `Private/AgentsMemory/…`, which is
+# exactly what the sparse gate then blocks at commit time. Per-path actions
+# therefore carry the same `:(exclude)` specs that stage-all already uses.
+PSPECS=()
+protected_excludes_under() { # $1 base path
+  PSPECS=()
+  local p
+  for p in "${PPATHS[@]}"; do
+    case "$p" in
+      "$1"/*) PSPECS+=(":(exclude)$p") ;;
+    esac
+  done
+}
+
 action_stage_file() {
   local req_file="$1" path mode
   path=$(jq -r '.args.path // empty' "$req_file")
@@ -758,16 +777,17 @@ action_stage_file() {
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
   read_protected_paths "$req_file" || return 1
   refuse_if_protected "$path" || return 1
+  protected_excludes_under "$path"
   case "$mode" in
     all)
       # Files and folders alike; on a folder this also picks up untracked files.
-      if ! run_git add -- "$path"; then
+      if ! run_git add -- "$path" "${PSPECS[@]}"; then
         ERROR=$(err_json GIT_FAILED "git add failed." "$GIT_OUT" "$GIT_ERR"); return 1
       fi ;;
     update)
       # Tracked changes only (folder rows in the "Changes" group): untracked
       # files under the folder must NOT be swept in by a tracked-group action.
-      if ! run_git add -u -- "$path"; then
+      if ! run_git add -u -- "$path" "${PSPECS[@]}"; then
         ERROR=$(err_json GIT_FAILED "git add -u failed." "$GIT_OUT" "$GIT_ERR"); return 1
       fi ;;
     *)
@@ -782,9 +802,10 @@ action_unstage_file() {
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
   read_protected_paths "$req_file" || return 1
   refuse_if_protected "$path" || return 1
+  protected_excludes_under "$path"
   # Works for both tracked and newly added files.
-  if ! run_git restore --staged -- "$path"; then
-    if ! run_git rm --cached -q -- "$path"; then
+  if ! run_git restore --staged -- "$path" "${PSPECS[@]}"; then
+    if ! run_git rm --cached -q -- "$path" "${PSPECS[@]}"; then
       ERROR=$(err_json GIT_FAILED "git restore --staged failed." "$GIT_OUT" "$GIT_ERR"); return 1
     fi
   fi
@@ -823,15 +844,29 @@ action_discard_file() {
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
   read_protected_paths "$req_file" || return 1
   refuse_if_protected "$path" || return 1
-  if git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+  protected_excludes_under "$path"
+  # "Tracked" must be decided with the protected paths already excluded: a
+  # folder whose only tracked content is a protected (sparse-hidden)
+  # subdirectory has nothing for `git restore` to act on, and asking anyway
+  # fails with "did not match any file(s)".
+  if [ -n "$(git ls-files -- "$path" "${PSPECS[@]}" 2>/dev/null)" ]; then
     tracked=true
   else
     tracked=false
   fi
   if [ "$tracked" = true ]; then
-    if ! run_git restore --staged --worktree -- "$path"; then
+    if ! run_git restore --staged --worktree -- "$path" "${PSPECS[@]}"; then
       ERROR=$(err_json GIT_FAILED "git restore failed." "$GIT_OUT" "$GIT_ERR"); return 1
     fi
+  elif [ -d "$NGB_REPO_DIR/$path" ]; then
+    # An untracked DIRECTORY (folder row): delete the files git reports as
+    # untracked inside it, honouring the same protected-path excludes, and
+    # never a blind `rm -rf` of the directory.
+    local f
+    while IFS= read -r -d '' f; do
+      rm -f -- "$NGB_REPO_DIR/$f" || {
+        ERROR=$(err_json GIT_FAILED "Could not delete untracked file." "" ""); return 1; }
+    done < <(git ls-files --others --exclude-standard -z -- "$path" "${PSPECS[@]}" 2>/dev/null)
   else
     # Untracked: delete the file itself (explicitly confirmed in the UI).
     rm -f -- "$NGB_REPO_DIR/$path" || {

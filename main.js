@@ -645,7 +645,7 @@ var import_obsidian15 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 7;
+var RUNNER_MIN_VERSION = 8;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
