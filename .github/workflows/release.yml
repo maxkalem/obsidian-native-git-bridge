@@ -6,6 +6,13 @@ name: Release
 on:
   push:
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  # Manual re-run. A tag push is a one-shot event: if the run never happened
+  # (Actions disabled at the time, a GitHub incident, a push that turned out to
+  # be a no-op), the only other way to get one used to be deleting and
+  # re-pushing the tag. Pick the TAG in the "Run workflow" ref dropdown — the
+  # version check below compares the ref name with manifest.json, so choosing a
+  # branch fails immediately and says why.
+  workflow_dispatch:
 
 permissions:
   contents: write
