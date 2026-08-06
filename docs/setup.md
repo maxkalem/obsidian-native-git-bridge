@@ -37,6 +37,25 @@ The installer requests storage access (accept the Android dialog), installs git/
 
 Authentication stays entirely in Termux and is configured **per repository**, so two vaults can use two different accounts: an existing PAT via credential helper, a token in the remote URL (the installer offers to move it into this repository's own credential file, mode 600), or an SSH key (generated automatically for SSH remotes; on a device that already has one, the installer offers a separate key for this vault and sets `core.sshCommand` locally). Add the printed public key to your git host. No credential ever reaches the plugin, a result file or any log.
 
+### GitHub OAuth instead of a PAT
+
+Termux has no OAuth of its own, but the **GitHub CLI** is packaged (`pkg install gh`) and its login is a real OAuth **device flow**: it prints a one-time code, you approve it at <https://github.com/login/device> in the phone's browser, and no local port is opened — which is the same "nothing listens, nothing runs in the background" property the bridge itself keeps.
+
+```
+pkg install gh
+gh auth login        # HTTPS, then "Login with a web browser"
+gh auth setup-git    # git now authenticates through `gh auth git-credential`
+```
+
+Afterwards the runner's `fetch` and `push` work non-interactively, which is what it needs (it never answers a prompt). The token is stored in `~/.config/gh/hosts.yml` — Termux has no keyring, so gh falls back to a plain file with restrictive permissions — and it stays in Termux like every other credential here. Revoke it at <https://github.com/settings/applications>; unlike a fine-grained PAT it has no expiry date to be surprised by.
+
+Two things to know before choosing this route:
+
+- `gh auth setup-git` writes a **global** credential helper, so it also applies to any repository that has no local one. If a second vault belongs to a different account, give that one its own credential file (the installer does this) rather than relying on gh.
+- gh answers for the **active** account on a host. With several GitHub accounts on one device, `gh auth switch` changes it for everything at once, so per-vault PATs (or per-vault SSH keys via `core.sshCommand`) remain the way to keep two accounts apart.
+
+Git Credential Manager, the usual OAuth helper on desktop, has no Android build and is not an option here.
+
 ## Step 3b: more than one vault on the device
 
 Each vault is a repository of its own and gets its own profile, its own token and its own runtime folder. One runner drains them all, so you never have to switch anything.

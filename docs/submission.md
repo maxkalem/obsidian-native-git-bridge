@@ -84,7 +84,7 @@ Rationale and the rejected alternatives: [ADR-002](ADR-002-multiple-repositories
 
 - The runner receives **JSON** and calls `git` with **argv arrays** only, never a concatenated shell string, behind an action allow-list.
 - Every path argument is validated on both sides: repository-relative, no `..`, no absolute or home paths, no control characters, no `.git` segment (case-insensitively, because Android shared storage is case-insensitive), and no Git pathspec magic (`:/`, `:(exclude)`).
-- Credentials never touch the plugin: authentication lives entirely in Termux (PAT via credential helper, or SSH). Remote URLs are redacted in logs and results; the pairing token is never logged.
+- Credentials never touch the plugin: authentication lives entirely in Termux (PAT via credential helper, SSH, or GitHub's OAuth device flow through `gh`). Remote URLs are redacted in logs and results; the pairing token is never logged.
 - No force push, no root, no destructive auto-repair. Restores, discards and merge aborts require explicit typed confirmation.
 - Before any commit or push, protected sparse paths must show no Git changes, or the operation is blocked. Staging uses pathspec excludes, so protected paths cannot enter the index through the bridge at all.
 - The diff pane renders git's unified diff through the bundled **diff2html** library (MIT, render-only: no JavaScript Git implementation is involved), and its HTML output is inserted exclusively via Obsidian's `sanitizeHTMLToDom`, never raw `innerHTML`.

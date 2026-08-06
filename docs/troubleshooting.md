@@ -35,6 +35,20 @@ The runner knows a profile for this vault, but the directory it points at no lon
 
 Each vault has its own token. A request file copied from one vault into another's runtime folder is rejected (`AUTH`), and a request naming another vault's profile is rejected (`BAD_REQUEST`). If a vault genuinely lost its token, re-pair it (*Pair this vault*) or re-run the installer for it.
 
+## GIT_FAILED on fetch/push: authentication
+
+The runner never answers a prompt (`GIT_TERMINAL_PROMPT=0`), so a credential problem fails fast instead of hanging. Check it in Termux, where the credentials live:
+
+```
+GIT_TERMINAL_PROMPT=0 git -C /path/to/vault ls-remote --heads origin
+```
+
+- **HTTPS with a PAT.** The token expired, or this repository has no credential helper of its own and the global one belongs to another account. `git -C <vault> config --get credential.helper` shows which one applies; the installer configures a per-repository file when you let it.
+- **GitHub OAuth via `gh`.** `gh auth status` says whether the token is still valid and which account is active. `gh auth switch` changes the active account for every repository at once, which is the usual reason one vault suddenly authenticates as the other.
+- **SSH.** `ssh -T git@github.com` proves the key. A vault with its own key uses `core.sshCommand`, visible with `git -C <vault> config --get core.sshCommand`.
+
+No credential is ever visible from the plugin side: remote URLs are redacted in results and in `runner.log`.
+
 ## SAFETY_BLOCKED: sparse checkout safety check failed
 
 The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*. When the entries are files that are only new here, **Delete files locally** moves all of them to Obsidian's trash — folders included, file by file — and immediately re-runs the check so you can see the state is clear; anything it could not move is named instead of silently skipped. If entries remain staged, unstage them in Termux (`git restore --staged -- <path>`), then verify again. The bridge never auto-repairs here by design.

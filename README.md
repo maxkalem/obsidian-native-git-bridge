@@ -32,6 +32,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 
 **Repository configuration** from the app: sparse exclusions, `.gitignore` and `.git/info/exclude`, per item or in bulk.
 
+**Authentication** never leaves Termux: a PAT through a credential helper, an SSH key, or GitHub's OAuth device flow through the GitHub CLI (`gh`), configured per repository so two vaults can use two accounts.
+
 **Several vaults on one device**: every vault is a repository of its own with its own Termux profile, its own token and its own credentials; one runner drains them all in one pass, oldest request first. A vault opened inside another vault's repository is kept out of it through the outer repository's `.git/info/exclude` (device-local, nothing tracked is edited), and each side's operations are pinned to its own repository. A second vault can pair itself from the plugin without re-running the installer; a moved vault is found again; a deleted one is reported, never silently replaced.
 
 **Operational**: device-local settings that never sync through the vault, a pairing token imported automatically from the installer, a version handshake between plugin, runner and companion app, a local bridge check that diagnoses without contacting Termux, a redacting operation log, and diagnostics.
