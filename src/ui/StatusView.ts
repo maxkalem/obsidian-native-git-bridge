@@ -98,6 +98,55 @@ export interface StatusViewActions {
 
 export type Group = "conflicted" | "staged" | "unstaged" | "untracked";
 
+/** One action column of a folder row or a group header; `icon: null` = placeholder. */
+export interface ActionSlot {
+  icon: string | null;
+  tooltip?: string;
+  action?: "stage" | "unstage" | "discard";
+  warn?: boolean;
+}
+
+/**
+ * The action columns of a folder row or a group header, ALWAYS three of them,
+ * in the file rows' order: [open] [stage/unstage] [discard]. Empty columns are
+ * placeholders, which is the whole point: a header that rendered only its one
+ * real button parked it in the "open file" column, so the group read as
+ * misaligned against every row beneath it.
+ *
+ * Pure and exported so the alignment is testable without a DOM.
+ */
+export function actionSlots(scope: "group" | "folder", group: Group, hasItems = true): ActionSlot[] {
+  const none: ActionSlot = { icon: null };
+  if (!hasItems) return [none, none, none];
+  const where = scope === "group" ? "" : " in this folder";
+  switch (group) {
+    case "staged":
+      return [
+        none,
+        { icon: "minus", tooltip: `Unstage everything staged${where || ""}`, action: "unstage" },
+        none, // files offer discard here; staged content does not
+      ];
+    case "unstaged":
+      return [
+        none,
+        { icon: "plus", tooltip: `Stage the changed (tracked) files${where}`, action: "stage" },
+        { icon: "undo-2", tooltip: `Discard the changes${where}`, action: "discard", warn: true },
+      ];
+    case "untracked":
+      return [
+        none,
+        { icon: "plus", tooltip: `Stage the new files${where}`, action: "stage" },
+        // Trashing every new file in the whole group in one tap is deliberately
+        // not offered; on a folder it is, because the blast radius is visible.
+        scope === "folder"
+          ? { icon: "trash", tooltip: "Move the new files in this folder to Obsidian's trash", action: "discard", warn: true }
+          : none,
+      ];
+    default:
+      return [none, none, none];
+  }
+}
+
 const CHANGE_LABEL: Record<string, string> = {
   M: "modified",
   A: "added",
@@ -351,25 +400,12 @@ export class StatusView extends ItemView {
     });
     // Group-wide actions, in the same slots (and with the same glyphs) the
     // folder rows use, so a group reads as the outermost folder of its state.
-    const acts = header.createDiv({ cls: "ngb-sv-file-actions" });
-    const gact = (icon: string, tooltip: string, cb: () => void, warn = false) => {
-      const b = acts.createEl("button", {
-        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`,
-      });
-      b.setAttribute("aria-label", tooltip);
-      setIcon(b, icon);
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        cb();
-      });
-    };
-    if (group === "staged" && items.length > 0) {
-      gact("minus", "Unstage everything", () => this.actions.groupAction(group, "unstage"));
-    } else if (group === "unstaged" && items.length > 0) {
-      gact("plus", "Stage all changed files", () => this.actions.groupAction(group, "stage"));
-      gact("undo-2", "Discard all local changes", () => this.actions.groupAction(group, "discard"), true);
-    } else if (group === "untracked" && items.length > 0) {
-      gact("plus", "Stage all new files", () => this.actions.groupAction(group, "stage"));
+    // Every slot is emitted, empty ones as invisible placeholders: without
+    // them a header with one button parked it in the file rows' "open file"
+    // column and the whole group read as misaligned.
+    const gslot = this.slotFactory(header.createDiv({ cls: "ngb-sv-file-actions" }));
+    for (const s of actionSlots("group", group, items.length > 0)) {
+      gslot(s.icon, s.tooltip, s.action ? () => this.actions.groupAction(group, s.action!) : undefined, s.warn);
     }
     // Same right-hand column as the rows below it.
     renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
@@ -442,6 +478,36 @@ export class StatusView extends ItemView {
     }
   }
 
+  /**
+   * One action column, used by folder rows AND group headers so both mirror
+   * the file rows slot for slot ([open] [stage/unstage] [discard] plus the
+   * count column). `null` renders an invisible placeholder that keeps the
+   * column width without being focusable or clickable.
+   */
+  private slotFactory(
+    acts: HTMLElement
+  ): (icon: string | null, tooltip?: string, cb?: () => void, warn?: boolean) => void {
+    return (icon, tooltip, cb, warn = false) => {
+      const b = acts.createEl("button", {
+        cls:
+          `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}` +
+          `${icon === null ? " ngb-slot-inactive" : ""}`,
+      });
+      if (icon === null) {
+        setIcon(b, "circle");
+        b.setAttribute("aria-hidden", "true");
+        b.tabIndex = -1;
+        return;
+      }
+      b.setAttribute("aria-label", tooltip ?? "");
+      setIcon(b, icon);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        cb?.();
+      });
+    };
+  }
+
   /** Tree layout: group items nested under collapsible folder rows. */
   private renderTreeItems(
     list: HTMLElement,
@@ -499,53 +565,14 @@ export class StatusView extends ItemView {
     // plus the change-letter column), with invisible placeholders where a
     // folder has no equivalent action, so every button sits in the same
     // column as the ones above and below it.
-    const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-    const slot = (
-      icon: string | null,
-      tooltip?: string,
-      cb?: () => void,
-      warn = false
-    ) => {
-      const b = acts.createEl("button", {
-        cls:
-          `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}` +
-          `${icon === null ? " ngb-slot-inactive" : ""}`,
-      });
-      if (icon === null) {
-        // Keeps the column width; never focusable or clickable.
-        setIcon(b, "circle");
-        b.setAttribute("aria-hidden", "true");
-        b.tabIndex = -1;
-        return;
-      }
-      b.setAttribute("aria-label", tooltip ?? "");
-      setIcon(b, icon);
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        cb?.();
-      });
-    };
-    slot(null); // aligns with the file rows' "open file" button
-    if (group === "staged") {
-      slot("minus", "Unstage everything staged in this folder", () =>
-        this.actions.folderAction(group, node.path, "unstage")
+    const slot = this.slotFactory(rowEl.createDiv({ cls: "ngb-sv-file-actions" }));
+    for (const s of actionSlots("folder", group)) {
+      slot(
+        s.icon,
+        s.tooltip,
+        s.action ? () => this.actions.folderAction(group, node.path, s.action!) : undefined,
+        s.warn
       );
-      slot(null); // files offer discard here; a staged folder does not
-    } else if (group === "unstaged") {
-      slot("plus", "Stage the changed (tracked) files in this folder", () =>
-        this.actions.folderAction(group, node.path, "stage")
-      );
-      slot("undo-2", "Discard the changes in this folder", () =>
-        this.actions.folderAction(group, node.path, "discard"), true);
-    } else if (group === "untracked") {
-      slot("plus", "Stage the new files in this folder", () =>
-        this.actions.folderAction(group, node.path, "stage")
-      );
-      slot("trash", "Move the new files in this folder to Obsidian's trash", () =>
-        this.actions.folderAction(group, node.path, "discard"), true);
-    } else {
-      slot(null);
-      slot(null);
     }
     // The count lives in the change-letter column, right-aligned with the
     // file rows' status letters. A collapsed folder still tells how many

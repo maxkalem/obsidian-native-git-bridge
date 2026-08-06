@@ -22,11 +22,11 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 - an operation strip with progress, a cancel slot, and directional activity animations on fetch, pull and push;
 - optional auto-refresh at a chosen interval.
 
-**Diff panes** rendered by diff2html with character-level, line-by-line highlighting: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. Optional line wrapping and whitespace glyphs.
+**Diff panes** rendered by diff2html with character-level, line-by-line highlighting: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. Optional line wrapping, whitespace glyphs, and optional custom colours for the diff and conflict panes (off by default, light and dark configured separately).
 
-**History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`) and can restore the whole file or a single block from that commit.
+**History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`), shows the file as it was at that commit, and can restore the whole file or a single block from it. Every route to a diff or a history — status panel, context menu, command palette — opens these panels; there is one surface per question.
 
-**Merge conflicts**, resolved manually and only on an explicit choice: a resolution pane with keep-local / keep-remote per block, whole-file resolution from the context menu for anything the pane cannot display, git's own merge message prefilled for the commit that follows.
+**Merge conflicts**, resolved manually and only on an explicit choice: a resolution pane (same display preferences as the diff panes) with keep-local / keep-remote per block, whole-file resolution from the context menu for anything the pane cannot display, git's own merge message prefilled for the commit that follows.
 
 **Sparse-checkout safety**: protected paths are derived from the repository's own sparse exclusions, every commit and push is blocked while any of them shows as a change, staging always excludes them, and the block window offers the two recoveries that apply (trash the new files, or drop the exclusion).
 

@@ -120,6 +120,23 @@ check 'jq -e ".ok == true" "$RES" >/dev/null' "safety action ok"
 check '[ -z "$(jq -r ".data.statusProtected" "$RES")" ]' "no worktree changes reported for protected paths"
 check '[ -z "$(jq -r ".data.stagedProtected" "$RES")" ]' "no staged changes reported for protected paths"
 
+echo "# test: verify-sparse-safety lists new files individually, never a collapsed folder"
+# git status collapses a fully untracked directory into one "dir/" line. The
+# plugin offers "move these files to the trash" from exactly this list, so one
+# collapsed line used to mean one entry deleted and the rest left behind.
+mkdir -p "Private/Hidden/New Notes"
+echo one > "Private/Hidden/New Notes/one.md"
+echo two > "Private/Hidden/New Notes/two.md"
+echo three > "Private/Hidden/loose new.md"
+req "r-20260803T100004Z-safe0u" verify-sparse-safety "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260803T100004Z-safe0u.json"
+check 'jq -er ".data.statusProtected" "$RES" | grep -qF "Private/Hidden/New Notes/one.md"' "first file inside a new folder is listed"
+check 'jq -er ".data.statusProtected" "$RES" | grep -qF "Private/Hidden/New Notes/two.md"' "second file inside the same folder is listed too"
+check 'jq -er ".data.statusProtected" "$RES" | grep -qF "Private/Hidden/loose new.md"' "a loose new file is listed"
+check '[ "$(jq -er ".data.statusProtected" "$RES" | grep -c .)" = "3" ]' "one line per file, no collapsed directory entry"
+rm -rf "Private/Hidden/New Notes" "Private/Hidden/loose new.md"
+
 echo "# test: verify-sparse-safety detects a real staged deletion of a protected path"
 # Use plumbing to stage a deletion of a protected path (porcelain git rm is
 # blocked by the sparse rules; a buggy tool or isomorphic-git would not be).

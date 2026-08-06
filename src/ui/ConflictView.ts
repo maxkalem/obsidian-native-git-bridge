@@ -1,4 +1,6 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { CONFLICT_COLOR_VARS } from "./colors";
+import { markInvisibles } from "./DiffView";
 import { parseConflictFile, resolveBlock, type ParsedConflictFile } from "../git/conflictParser";
 
 export const NGB_CONFLICT_VIEW = "native-git-bridge-conflict";
@@ -16,6 +18,13 @@ export interface ConflictViewActions {
    * chrome rows.
    */
   markersVisible(): boolean;
+  /** Shared preference: render whitespace glyphs (· → ␍), as in the diff pane. */
+  showInvisibles(): boolean;
+  /**
+   * Shared preference: custom colours as CSS variables, or null while the
+   * "custom colours" toggle is off (the theme's own values then apply).
+   */
+  colors(): Record<string, string> | null;
 }
 
 /**
@@ -67,6 +76,19 @@ export class ConflictView extends ItemView {
     return super.setState(state, result as never);
   }
 
+  /**
+   * Custom colours (shared preference, off by default) as inline CSS
+   * variables — the only way to beat the stylesheet's defaults on the same
+   * element. Removing them hands the pane back to the theme, no reload needed.
+   */
+  private applyColors(): void {
+    const c = this.actions.colors();
+    for (const name of CONFLICT_COLOR_VARS) {
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]!);
+      else this.contentEl.style.removeProperty(name);
+    }
+  }
+
   async reload(): Promise<void> {
     const path = this.path;
     if (path === null) return;
@@ -82,12 +104,14 @@ export class ConflictView extends ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-conflict-view");
+    this.applyColors();
     const path = this.path;
     if (path === null) {
       c.createEl("p", { cls: "ngb-settings-note", text: "No file selected." });
       return;
     }
-    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: path });
+    const head = c.createDiv({ cls: "ngb-pane-path", text: path });
+    head.setAttribute("aria-label", path);
     if (this.originalText === null || this.parsed === null) {
       c.createEl("p", {
         cls: "ngb-warning",
@@ -185,6 +209,10 @@ export class ConflictView extends ItemView {
         chromeRow(lineNo++, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
       }
     }
+    // Same preference, same glyphs as the diff pane. Whitespace-only
+    // differences are a common reason two sides of a conflict look identical,
+    // so hiding them here while showing them in the diff made no sense.
+    if (this.actions.showInvisibles()) markInvisibles(list, ".ngb-conf-text");
   }
 
   private async applyResolution(blockIndex: number, side: "ours" | "theirs"): Promise<void> {

@@ -1,6 +1,6 @@
 # ADR-002: More than one repository per device
 
-Status: Accepted · Date: 2026-08-06 · Runner v10, plugin 0.5.11
+Status: Accepted · Date: 2026-08-06 · Runner v10, plugin 0.6.0
 
 ## Context
 

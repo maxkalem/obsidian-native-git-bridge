@@ -60,7 +60,7 @@ import {
   type RepoLogEntry,
   type RepoLogFile,
 } from "./git/historyParsers";
-import { DiffModal, FileHistoryModal, TextPreviewModal } from "./ui/historyViews";
+import { TextPreviewModal } from "./ui/historyViews";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
 import { buildMenuEntries, type MenuAction, type MenuScope } from "./ui/gitMenu";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
@@ -86,6 +86,13 @@ import {
 } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
+import {
+  conflictColorVars,
+  DEFAULT_COLORS,
+  diffColorVars,
+  sanitizeColorSet,
+  type NgbColorSet,
+} from "./ui/colors";
 
 /** Non-device-specific, shareable UI preferences (safe to sync via data.json). */
 interface SharedUiPrefs {
@@ -99,6 +106,14 @@ interface SharedUiPrefs {
   showConflictMarkers: boolean;
   /** Render file lists as a folder tree (status + history panels). */
   treeView: boolean;
+  /**
+   * Use the colours below instead of the theme's own. Off by default: the
+   * pickers only appear (and the variables are only written) once it is on.
+   */
+  customColors: boolean;
+  /** Custom colours per theme; only read while customColors is on. */
+  colorsLight: NgbColorSet;
+  colorsDark: NgbColorSet;
 }
 const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showStatusBar: true,
@@ -107,6 +122,9 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showInvisibles: false,
   showConflictMarkers: false,
   treeView: false,
+  customColors: false,
+  colorsLight: { ...DEFAULT_COLORS.light },
+  colorsDark: { ...DEFAULT_COLORS.dark },
 };
 
 const MARKER_KEY = "active-op";
@@ -147,6 +165,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     // ---- shared, non-device-specific UI prefs only ----
     const data = (await this.loadData()) as Partial<SharedUiPrefs> | null;
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS, ...(data ?? {}) };
+    // Colours end up in a style attribute, so whatever data.json holds is
+    // merged over the defaults and anything that is not a hex value is dropped.
+    this.sharedPrefs.colorsLight = sanitizeColorSet(this.sharedPrefs.colorsLight, "light");
+    this.sharedPrefs.colorsDark = sanitizeColorSet(this.sharedPrefs.colorsDark, "dark");
 
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
@@ -207,6 +229,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
           openDiffAtCommit: (file, entry) => void this.openCommitDiff(file, entry),
           openFile: (p) => this.openVaultFile(p),
+          progressText: () => this.progressText ?? "",
           treeView: () => this.sharedPrefs.treeView,
           toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
         })
@@ -219,6 +242,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          colors: () => this.diffColorVars(),
+          progressText: () => this.progressText ?? "",
         })
     );
 
@@ -234,9 +259,11 @@ export default class NativeGitBridgePlugin extends Plugin {
             await this.app.vault.adapter.write(p, text);
           },
           restoreWholeFile: (p, e) => this.confirmRestore(p, e),
+          viewAtCommit: (e) => void this.showFileAtCommit(e),
           progressText: () => this.progressText ?? "",
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          colors: () => this.diffColorVars(),
         })
     );
 
@@ -250,8 +277,14 @@ export default class NativeGitBridgePlugin extends Plugin {
           },
           stageFile: (p) => this.cmdStageFile(p),
           markersVisible: () => this.sharedPrefs.showConflictMarkers,
+          showInvisibles: () => this.sharedPrefs.showInvisibles,
+          colors: () => this.conflictColorVars(),
         })
     );
+
+    // A theme switch changes which colour set applies; the open panes have the
+    // other theme's values written into their style attribute until told.
+    this.registerEvent(this.app.workspace.on("css-change", () => this.refreshDiffPanes()));
 
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
@@ -947,8 +980,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "reset-all", name: "Reset everything to HEAD (staged and local changes)", cb: () => this.cmdResetAll() },
       { id: "show-history-current-file", name: "Show history for current file", cb: () => this.cmdFileHistory() },
       { id: "show-diff-current-file", name: "Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
-      { id: "show-file-at-commit", name: "Show selected file at commit", cb: () => this.cmdFileHistory() },
-      { id: "restore-file-from-commit", name: "Restore selected file from commit", cb: () => this.cmdFileHistory() },
+      { id: "show-file-at-commit", name: "Show current file at a commit", cb: () => this.cmdFileHistory() },
+      { id: "restore-file-from-commit", name: "Restore current file from a commit", cb: () => this.cmdFileHistory() },
       { id: "show-changed-files", name: "Show changed files", cb: () => void this.cmdShowChangedFiles() },
       { id: "verify-sparse-safety", name: "Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
       { id: "reapply-sparse", name: "Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
@@ -1438,6 +1471,71 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /**
+   * Move every listed path to Obsidian's trash, expanding folders into their
+   * files first.
+   *
+   * Two reasons this is not a plain loop over `trashLocal`. git's porcelain
+   * output collapses a fully untracked directory into a single `dir/` entry,
+   * so one "file" in the list can be a folder holding many; and a path with
+   * the trailing slash git prints is not a path the adapter recognises. The
+   * old loop therefore trashed the first entry and quietly logged failures for
+   * the rest, which looked like "only one file was deleted".
+   */
+  private async trashAll(paths: string[]): Promise<{ moved: number; failed: string[] }> {
+    const adapter = this.app.vault.adapter;
+    let moved = 0;
+    const failed: string[] = [];
+    const expand = async (raw: string): Promise<string[]> => {
+      const p = raw.replace(/\/+$/, "");
+      if (p === "") return [];
+      let isFolder = false;
+      try {
+        const st = await adapter.stat(p);
+        isFolder = st?.type === "folder";
+      } catch {
+        isFolder = false;
+      }
+      if (!isFolder) return [p];
+      // Files first, then the (now empty) folder, so nothing is left behind
+      // and no child is trashed twice.
+      const out: string[] = [];
+      try {
+        const listing = await adapter.list(p);
+        for (const f of listing.files) out.push(f);
+        for (const d of listing.folders) out.push(...(await expand(d)));
+      } catch (e) {
+        this.log.add("warn", "sparse", `Could not list ${p}: ${String(e)}`);
+      }
+      out.push(p);
+      return out;
+    };
+    const targets: string[] = [];
+    for (const raw of paths) {
+      for (const t of await expand(raw)) if (!targets.includes(t)) targets.push(t);
+    }
+    for (const t of targets) {
+      try {
+        await adapter.trashLocal(t);
+        moved++;
+      } catch (e) {
+        // A folder that is already gone (its files were trashed with it) is
+        // not a failure; anything still on disk is.
+        let stillThere = true;
+        try {
+          stillThere = await adapter.exists(t);
+        } catch {
+          stillThere = true;
+        }
+        if (stillThere) {
+          failed.push(t);
+          this.log.add("error", "sparse", `Trash failed for ${t}: ${String(e)}`);
+        }
+      }
+    }
+    return { moved, failed };
+  }
+
+  /**
    * The two recoveries the safety modal offers. Both are explicit, confirmed
    * and reversible in the sense that matters: deleting goes to Obsidian's
    * trash rather than to `rm`, and unprotecting only edits sparse config, so
@@ -1461,17 +1559,31 @@ export default class NativeGitBridgePlugin extends Plugin {
           },
           async (confirmed) => {
             if (!confirmed) return;
-            let moved = 0;
-            for (const p of paths) {
-              try {
-                await this.app.vault.adapter.trashLocal(p);
-                moved++;
-              } catch (e) {
-                this.log.add("error", "sparse", `Trash failed for ${p}: ${String(e)}`);
-              }
+            const { moved, failed } = await this.trashAll(paths);
+            if (failed.length > 0) {
+              this.log.add(
+                "error",
+                "sparse",
+                `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
+              );
+              new ResultModal(
+                this.app,
+                "Some files could not be moved",
+                [
+                  `Moved ${moved} file${moved === 1 ? "" : "s"} to the trash; ${failed.length} could not be moved.`,
+                  ...failed.slice(0, 12),
+                  failed.length > 12 ? `…and ${failed.length - 12} more` : "",
+                  "The safety check below shows what is still there.",
+                ].filter((l) => l !== ""),
+                { isError: true }
+              ).open();
+            } else {
+              this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
             }
-            this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
-            await this.cmdStatus(true);
+            // Re-run the check rather than just refreshing: the point of the
+            // fix is that the blocked state is GONE, and only the runner can
+            // say so. The verdict modal reopens with the new answer.
+            await this.cmdVerifySparseSafety();
           }
         ).open();
       },
@@ -1668,6 +1780,50 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   // ---------------------------------------------------- phase 3 git commands
 
+  /**
+   * True when Obsidian is currently drawing a dark theme. `theme-dark` on the
+   * body is how Obsidian itself marks it; absent means light.
+   */
+  private isDarkTheme(): boolean {
+    try {
+      return activeDocument.body.classList.contains("theme-dark");
+    } catch {
+      return true;
+    }
+  }
+
+  /** The colour set in force, or null while custom colours are switched off. */
+  private activeColorSet(): NgbColorSet | null {
+    if (!this.sharedPrefs.customColors) return null;
+    return this.isDarkTheme() ? this.sharedPrefs.colorsDark : this.sharedPrefs.colorsLight;
+  }
+
+  diffColorVars(): Record<string, string> | null {
+    const set = this.activeColorSet();
+    return set ? diffColorVars(set) : null;
+  }
+
+  conflictColorVars(): Record<string, string> | null {
+    const set = this.activeColorSet();
+    return set ? conflictColorVars(set) : null;
+  }
+
+  /** Re-apply display preferences (and colours) to every open diff/conflict pane. */
+  refreshDiffPanes(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof DiffView) view.refreshDisplay();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) view.rerender();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof ConflictView) void view.reload();
+    }
+  }
+
   /** Merge and persist shareable UI preferences (data.json; cosmetic only). */
   async setSharedPref(patch: Partial<SharedUiPrefs>): Promise<void> {
     this.sharedPrefs = { ...this.sharedPrefs, ...patch };
@@ -1678,6 +1834,12 @@ export default class NativeGitBridgePlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
       const view = leaf.view;
       if (view instanceof DiffView) view.refreshDisplay();
+    }
+    // The file-history panel renders diffs with the same renderer, so the same
+    // preferences (wrap, invisibles, colours) have to reach it.
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) view.rerender();
     }
     this.pushStatusToView();
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW)) {
@@ -1915,26 +2077,18 @@ export default class NativeGitBridgePlugin extends Plugin {
     return f.path;
   }
 
-  /** Entry point for history / view-at-commit / restore commands. */
+  /**
+   * History / view-at-commit / restore for the active file. All three commands
+   * open the same PANEL the context menu and the status panel open: one file
+   * history surface, with the diff, the whole-file restore, the per-block
+   * restore and the display preferences that every other diff has. The modal
+   * this used to open rendered its own, plainer diff and was the last place in
+   * the plugin where the same question got a different-looking answer.
+   */
   cmdFileHistory(): void {
     const path = this.activeFilePath();
     if (path === null) return;
-    new FileHistoryModal(this.app, path, {
-      loadPage: async (skip, limit) => {
-        const result = await this.runOperation("file-log", { path, skip, limit });
-        if (!result) return null;
-        if (!result.ok) {
-          this.renderMutationError("Native Git: history failed", result);
-          return null;
-        }
-        return parseFileLog(result.data?.log ?? "", path);
-      },
-      viewAt: (e) => void this.showFileAtCommit(e),
-      diffVsCurrent: (e) => void this.showDiff(path, e.hash, "WORKTREE", `${e.hash.slice(0, 8)} → working tree`),
-      diffVsPrevious: (e, prev) =>
-        void this.showDiff(path, prev.hash, e.hash, `${prev.hash.slice(0, 8)} → ${e.hash.slice(0, 8)}`),
-      restore: (e) => this.confirmRestore(path, e),
-    }).open();
+    void this.openFileHistoryPanel(path);
   }
 
   private async showFileAtCommit(e: FileLogEntry): Promise<void> {
@@ -1957,23 +2111,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     new TextPreviewModal(this.app, "File at commit", meta, text).open();
   }
 
-  private async showDiff(path: string, from: string, to: string, label: string): Promise<void> {
-    const result = await this.runOperation("diff-file", { path, from, to });
-    if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: diff failed", result);
-    new DiffModal(
-      this.app,
-      "Diff",
-      `${path} · ${label}`,
-      result.data?.diff ?? "",
-      result.data?.truncated === "true"
-    ).open();
-  }
-
   async cmdDiffCurrentFile(): Promise<void> {
     const path = this.activeFilePath();
     if (path === null) return;
-    await this.showDiff(path, "HEAD", "WORKTREE", "HEAD → working tree");
+    await this.openDiffPane({ path, from: "HEAD", to: "WORKTREE", label: "HEAD → working tree" });
   }
 
   private confirmRestore(currentPath: string, e: FileLogEntry): void {

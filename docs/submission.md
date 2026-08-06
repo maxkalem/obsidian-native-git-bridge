@@ -36,7 +36,7 @@ Used in exactly one direction, **writing**, for three things the user asked for:
 
 ### `localStorage` instead of the plugin data API
 
-This is intentional. The plugin folder itself is synced through Git in this workflow, so `data.json` reaches every device. Anything device-specific (the enable flag, the pairing token, protected paths, timeouts, the last seen runner/companion versions) must **not** travel: a token or an absolute Termux path from another phone is at best useless and at worst dangerous. `data.json` therefore holds only cosmetic shared preferences: status-bar and ribbon visibility, diff line wrapping, invisible-character glyphs, raw conflict markers, and the list/tree layout choice. The status auto-refresh interval is device-local for the same reason: it decides how often a device wakes Termux. The store is scoped by vault identity, degrades to an in-memory map when storage is unavailable, and reports that state in diagnostics.
+This is intentional. The plugin folder itself is synced through Git in this workflow, so `data.json` reaches every device. Anything device-specific (the enable flag, the pairing token, protected paths, timeouts, the last seen runner/companion versions) must **not** travel: a token or an absolute Termux path from another phone is at best useless and at worst dangerous. `data.json` therefore holds only cosmetic shared preferences: status-bar and ribbon visibility, diff line wrapping, invisible-character glyphs, raw conflict markers, the list/tree layout choice, and the optional custom pane colours (a boolean plus two sets of hex values, validated as hex before they are ever written into a `style` attribute). The status auto-refresh interval is device-local for the same reason: it decides how often a device wakes Termux. The store is scoped by vault identity, degrades to an in-memory map when storage is unavailable, and reports that state in diagnostics.
 
 ### Extra files in the release
 
@@ -68,6 +68,18 @@ Each is optional, defensively typed (`as unknown as {...}` with `?.`), and degra
 
 The declarative settings API (`getSettingDefinitions`, 1.13.0+) is the intended direction and this tab has not migrated yet. Its four rule managers are per-item editors with live lists, and the version panel renders warnings with action buttons; porting them to definitions with `render` callbacks is a focused change that deserves its own release and on-device testing rather than being bundled with a lint pass. Internal refreshes already call `update()` where it exists, falling back to `display()` on older builds.
 
+## Several repositories on one device
+
+Since runner v10 the Termux side keeps one profile per paired vault (`~/.config/native-git-bridge/profiles/<id>.conf`, mode 600), each with its own token, and one runner run drains them all. Points a reviewer may want to check:
+
+- The plugin never sends a repository path. A request may carry an opaque `profileId`; the runner **looks it up** in files only Termux can write and rejects anything else. A token valid for one vault is rejected for another.
+- Profile files are parsed, never sourced, so a damaged or tampered file cannot execute anything.
+- Each profile is entered with `cd` plus `GIT_CEILING_DIRECTORIES` and a `--show-toplevel` check, so a vault nested inside another vault's repository can never operate on the outer one.
+- A vault nested inside another is excluded from the outer repository through the **outer repository's `.git/info/exclude`** — device-local, never synced, and no tracked file (such as `.gitignore`) is edited.
+- Pairing a second vault from the plugin writes a claim file that carries no secret; the token is generated in Termux and comes back in `pairing.json`. Nothing the claim contains is trusted. Residual risk and its bounds: [threat-model.md](threat-model.md) T12–T14.
+
+Rationale and the rejected alternatives: [ADR-002](ADR-002-multiple-repositories.md).
+
 ## Security posture
 
 - The runner receives **JSON** and calls `git` with **argv arrays** only, never a concatenated shell string, behind an action allow-list.
@@ -81,7 +93,7 @@ Full model, including accepted residual risks and a dated review log: [threat-mo
 
 ## Testing
 
-`npm test` runs 229 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 221 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches and an expired PAT.
+`npm test` runs 262 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 272 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches, an expired PAT, and (v10) several profiles on one device: migration of a single-repo config, sibling and nested vaults, token and profile isolation, a moved repository, a deleted one, and a corrupt profile file.
 
 What is **not** machine-verified: there is no Android device or emulator in CI. The APK builds are verified; RUN_COMMAND forwarding, storage permissions and the Termux round trip are verified by hand on a device. That is also why the companion ships a three-step verified checklist.
 

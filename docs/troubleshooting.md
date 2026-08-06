@@ -37,7 +37,7 @@ Each vault has its own token. A request file copied from one vault into another'
 
 ## SAFETY_BLOCKED: sparse checkout safety check failed
 
-The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*. If entries remain staged, unstage them in Termux (`git restore --staged -- <path>`), then verify again. The bridge never auto-repairs here by design.
+The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*. When the entries are files that are only new here, **Delete files locally** moves all of them to Obsidian's trash — folders included, file by file — and immediately re-runs the check so you can see the state is clear; anything it could not move is named instead of silently skipped. If entries remain staged, unstage them in Termux (`git restore --staged -- <path>`), then verify again. The bridge never auto-repairs here by design.
 
 ## CONFLICT: merge conflicts
 
@@ -46,6 +46,7 @@ A pull/sync produced conflicting files; nothing was committed or pushed. The Con
 - **Tap a conflicted text file** → the resolution pane: every conflict block shows *LOCAL (yours)* against *REMOTE (branch or commit)* with a Keep button per block. Blocks you leave unresolved are rewritten with Obsidian-safe markers (`-<<<<<<<` / `-=======` / `->>>>>>>`) so the note still renders sanely; both marker forms are understood. Settings → *Show raw conflict markers* switches between hiding the marker lines under the action rows and showing them as real lines.
 - **Tap a conflicted binary file** (or long-press any conflicted row) → the Git menu: *keep local version*, *keep remote version* (whole file, confirmed), or *Open in default app* to inspect it first.
 - Resolve the file in the editor yourself and stage it.
+- The pane follows the same display preferences as the diff panes (line wrapping, whitespace glyphs, custom colours), which is often how a "these two sides look identical" conflict turns out to be a whitespace-only difference.
 - *Native Git Bridge: Abort merge* returns to the pre-merge state.
 
 When every conflict is resolved, **Commit** prefills git's own merge message (`Merge branch … # Conflicts: …`) and **Sync** uses it automatically.

@@ -14,6 +14,8 @@ export interface HistoryViewActions {
   openDiffAtCommit(file: RepoLogFile, entry: RepoLogEntry): void;
   /** Open the file itself (current working-tree version). */
   openFile(path: string): void;
+  /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
+  progressText(): string;
   /** Shared preference: render each commit's files as a folder tree. */
   treeView(): boolean;
   /** Flip the shared tree/list preference. */
@@ -103,7 +105,12 @@ export class HistoryView extends ItemView {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading…");
     }
+    // The FIRST page hides the Load-more button, so without this the panel is
+    // simply blank while the runner works. Same indicator as the other panels.
+    const waiting = this.skip === 0 ? this.listEl?.createDiv({ cls: "ngb-filehist-waiting" }) : undefined;
+    if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(this.skip, this.pageSize);
+    waiting?.remove();
     this.loading = false;
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
@@ -126,6 +133,20 @@ export class HistoryView extends ItemView {
     this.entries.push(...page);
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
+  }
+
+  /** "The runner is working" indicator, identical in all four panels. */
+  private renderWaiting(el: HTMLElement, what: string): void {
+    el.empty();
+    const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
+    setIcon(spin, "refresh-cw");
+    const text = el.createSpan({ cls: "ngb-settings-note" });
+    const tick = () => {
+      const p = this.actions.progressText();
+      text.setText(p === "" ? `${what}…` : p);
+    };
+    tick();
+    this.registerInterval(window.setInterval(tick, 500));
   }
 
   private renderCommit(e: RepoLogEntry): void {

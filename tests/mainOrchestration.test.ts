@@ -30,9 +30,27 @@ const paths = new RuntimePaths(".obsidian");
 function memAdapter() {
   const files = new Map<string, string>();
   const dirs = new Set<string>();
+  const trashed: string[] = [];
   return {
     files,
     dirs,
+    trashed,
+    stat: async (p: string) => {
+      if (files.has(p)) return { type: "file" as const };
+      if (dirs.has(p) || [...files.keys()].some((f) => f.startsWith(p + "/"))) {
+        return { type: "folder" as const };
+      }
+      return null;
+    },
+    /** Obsidian's "move to .trash"; a path that is not there throws, as it does in the app. */
+    trashLocal: async (p: string) => {
+      const isFolder = dirs.has(p) || [...files.keys()].some((f) => f.startsWith(p + "/"));
+      if (!files.has(p) && !isFolder) throw new Error("ENOENT " + p);
+      trashed.push(p);
+      files.delete(p);
+      dirs.delete(p);
+      for (const f of [...files.keys()]) if (f.startsWith(p + "/")) files.delete(f);
+    },
     exists: async (p: string) => files.has(p) || dirs.has(p),
     read: async (p: string) => {
       const v = files.get(p);
@@ -44,7 +62,7 @@ function memAdapter() {
     remove: async (p: string) => void files.delete(p),
     list: async (p: string) => ({
       files: [...files.keys()].filter((f) => f.startsWith(p + "/")),
-      folders: [],
+      folders: [...dirs].filter((d) => d.startsWith(p + "/") && !d.slice(p.length + 1).includes("/")),
     }),
   };
 }
@@ -54,7 +72,14 @@ type MemAdapter = ReturnType<typeof memAdapter>;
 function makeApp(adapter: MemAdapter): Any {
   let layoutReady: (() => void) | null = null;
   const fileMenuHandlers: Array<(menu: Any, file: Any) => void> = [];
+  /** Every pane the plugin opened: { type, state }. */
+  const openedViews: Array<{ type: string; state?: Any }> = [];
+  let activeFile: Any = null;
   return {
+    openedViews,
+    setActiveFile: (path: string) => {
+      activeFile = { path };
+    },
     appId: "test-app-id",
     vault: {
       configDir: ".obsidian",
@@ -70,8 +95,11 @@ function makeApp(adapter: MemAdapter): Any {
       getLeavesOfType: () => [],
       getRightLeaf: () => null,
       revealLeaf: () => undefined,
-      getLeaf: () => ({ openFile: async () => undefined }),
-      getActiveFile: () => null,
+      getLeaf: () => ({
+        openFile: async () => undefined,
+        setViewState: async (st: Any) => void openedViews.push({ type: st.type, state: st.state }),
+      }),
+      getActiveFile: () => activeFile,
       on: (name: string, cb: Any) => {
         if (name === "file-menu") fileMenuHandlers.push(cb);
         return {};
@@ -539,6 +567,97 @@ describe("several vaults on one device (profiles)", () => {
     await h.plugin.cmdPairThisVault();
     expect(h.adapter.files.has(`${paths.root}/claim.json`)).toBe(true);
     expect(h.plugin.deviceSettings.authToken).toBe("");
+  });
+});
+
+describe("one surface per question (no legacy modals)", () => {
+  /**
+   * History and diffs used to have two UIs: panes (diff2html, display
+   * preferences, per-block restore) from the context menu, and plainer modals
+   * from the command palette. Every entry point now opens the pane.
+   */
+  it("'Show diff for current file' opens the diff PANE", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.app.setActiveFile("Notes/a.md");
+    await h.plugin.cmdDiffCurrentFile();
+    expect(h.app.openedViews.map((v: Any) => v.type)).toContain("native-git-bridge-diff");
+    expect(h.app.openedViews[0].state).toMatchObject({ path: "Notes/a.md", from: "HEAD", to: "WORKTREE" });
+    expect(__openedModals).not.toContain("DiffModal");
+  });
+
+  it("the history / view-at-commit / restore commands all open the file history PANEL", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.app.setActiveFile("Notes/a.md");
+    h.plugin.cmdFileHistory();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.app.openedViews.map((v: Any) => v.type)).toEqual(["native-git-bridge-file-history"]);
+    expect(h.app.openedViews[0].state).toMatchObject({ path: "Notes/a.md" });
+  });
+
+  it("says so instead of opening anything when there is no active file", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.plugin.cmdFileHistory();
+    await h.plugin.cmdDiffCurrentFile();
+    expect(h.app.openedViews).toHaveLength(0);
+    expect(__notices.join(" ")).toContain("No active file");
+  });
+});
+
+describe("sparse safety: moving the listed files to the trash", () => {
+  it("moves EVERY listed file, not just the first one", async () => {
+    const h = await loadPlugin();
+    h.adapter.files.set("Private/Hidden/a.md", "a");
+    h.adapter.files.set("Private/Hidden/b.md", "b");
+    h.adapter.files.set("Private/Hidden/c.md", "c");
+    const res = await (h.plugin as Any).trashAll([
+      "Private/Hidden/a.md",
+      "Private/Hidden/b.md",
+      "Private/Hidden/c.md",
+    ]);
+    expect(res.moved).toBe(3);
+    expect(res.failed).toEqual([]);
+    expect(h.adapter.trashed).toHaveLength(3);
+  });
+
+  it("expands a collapsed 'dir/' entry into the files inside it", async () => {
+    // git status reports a fully untracked directory as ONE line ending in
+    // "/", which is what made the old loop delete a single entry.
+    const h = await loadPlugin();
+    h.adapter.dirs.add("Private/Hidden/New Notes");
+    h.adapter.files.set("Private/Hidden/New Notes/one.md", "1");
+    h.adapter.files.set("Private/Hidden/New Notes/two.md", "2");
+    const res = await (h.plugin as Any).trashAll(["Private/Hidden/New Notes/"]);
+    expect(res.failed).toEqual([]);
+    expect(h.adapter.trashed).toContain("Private/Hidden/New Notes/one.md");
+    expect(h.adapter.trashed).toContain("Private/Hidden/New Notes/two.md");
+    // The files go first, the emptied folder last.
+    expect(h.adapter.trashed[h.adapter.trashed.length - 1]).toBe("Private/Hidden/New Notes");
+    expect([...h.adapter.files.keys()].some((f) => f.startsWith("Private/Hidden/New Notes"))).toBe(false);
+  });
+
+  it("reports what it could not move instead of counting it as done", async () => {
+    const h = await loadPlugin();
+    h.adapter.files.set("Private/Hidden/a.md", "a");
+    const res = await (h.plugin as Any).trashAll(["Private/Hidden/a.md", "Private/Hidden/gone.md"]);
+    expect(res.moved).toBe(1);
+    // The missing one is not on disk afterwards either, so it is not a failure.
+    expect(res.failed).toEqual([]);
+  });
+
+  it("never trashes the same path twice", async () => {
+    const h = await loadPlugin();
+    h.adapter.dirs.add("Private/Hidden/New");
+    h.adapter.files.set("Private/Hidden/New/one.md", "1");
+    const res = await (h.plugin as Any).trashAll([
+      "Private/Hidden/New/",
+      "Private/Hidden/New",
+      "Private/Hidden/New/one.md",
+    ]);
+    expect(res.failed).toEqual([]);
+    expect(h.adapter.trashed.filter((p: string) => p === "Private/Hidden/New/one.md")).toHaveLength(1);
   });
 });
 

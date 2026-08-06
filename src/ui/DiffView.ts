@@ -1,5 +1,6 @@
-import { ItemView, sanitizeHTMLToDom, WorkspaceLeaf } from "obsidian";
+import { ItemView, sanitizeHTMLToDom, setIcon, WorkspaceLeaf } from "obsidian";
 import { html as diff2html } from "diff2html";
+import { DIFF_COLOR_VARS } from "./colors";
 
 export const NGB_DIFF_VIEW = "native-git-bridge-diff";
 
@@ -28,6 +29,13 @@ export interface DiffViewActions {
   wrapLines(): boolean;
   /** Shared preference: render whitespace glyphs (· → ␍). */
   showInvisibles(): boolean;
+  /**
+   * Shared preference: custom colours as CSS variables, or null while the
+   * "custom colours" toggle is off (the theme's own values then apply).
+   */
+  colors(): Record<string, string> | null;
+  /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
+  progressText(): string;
 }
 
 /**
@@ -36,9 +44,13 @@ export interface DiffViewActions {
  * nodes only, so diff2html's own <ins>/<del> char highlighting is preserved.
  * Trade-off (documented in the setting): copying from the diff copies the
  * glyphs, not the original whitespace.
+ *
+ * `selector` exists because the conflict pane renders its own rows rather than
+ * diff2html's, and the setting is one setting: whitespace is either visible in
+ * this plugin's file views or it is not.
  */
-export function markInvisibles(root: HTMLElement): void {
-  for (const ctn of Array.from(root.querySelectorAll(".d2h-code-line-ctn"))) {
+export function markInvisibles(root: HTMLElement, selector = ".d2h-code-line-ctn"): void {
+  for (const ctn of Array.from(root.querySelectorAll(selector))) {
     // Idempotent: a container that already carries glyphs is left alone, so
     // the pass can safely run again after a resize or a re-attach.
     if (ctn.querySelector(".ngb-ws-glyph")) continue;
@@ -63,6 +75,32 @@ export function markInvisibles(root: HTMLElement): void {
       node.replaceWith(frag);
     }
   }
+}
+
+/**
+ * Width the sticky number gutter needs for the longest line number pair plus
+ * the relocated +/- prefix, in `ch` (the font is monospace, so `ch` is exact).
+ *
+ * Wrapping switches the table to `table-layout: fixed`, which needs an explicit
+ * width on the first column — and a guessed one is what put the prefix in the
+ * wrong place: with three-digit line numbers the gutter's content was wider
+ * than the guess and spilled PAST the cell border, so `+`/`-` appeared to sit
+ * inside the code. Measuring the numbers keeps the prefix where it belongs.
+ */
+export function gutterWidthCh(root: ParentNode): number {
+  let digits = 1;
+  for (const el of Array.from(root.querySelectorAll(".line-num1, .line-num2"))) {
+    const t = (el.textContent ?? "").trim();
+    if (t.length > digits) digits = t.length;
+  }
+  // two numbers side by side + one column for the prefix + cell padding
+  return 2 * digits + 4;
+}
+
+/** Apply the measured gutter width to the pane (used by the wrapped layout). */
+export function sizeGutter(box: HTMLElement): void {
+  const host = box.closest<HTMLElement>(".ngb-diff-view") ?? box;
+  host.style.setProperty("--ngb-diff-gutter-w", `${gutterWidthCh(box)}ch`);
 }
 
 /**
@@ -123,13 +161,29 @@ export class DiffView extends ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-diff-view");
-    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: `${st.path} · ${st.label}` });
+    const head = c.createDiv({ cls: "ngb-pane-path", text: `${st.path} · ${st.label}` });
+    head.setAttribute("aria-label", `${st.path} · ${st.label}`);
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
-    box.createEl("p", { cls: "ngb-settings-note", text: "Loading diff…" });
+    // Same wait indicator as the file-history panel: a spinning glyph and the
+    // operation's own elapsed-time line, not a static sentence.
+    this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
     const res = await this.actions.loadDiff(st.path, st.from, st.to);
     if (seq !== this.loadSeq) return; // superseded by a newer setState
     this.lastResult = res;
     this.renderBody(box, res);
+  }
+
+  /** "The runner is working" indicator, identical to the file-history panel's. */
+  private renderWaiting(el: HTMLElement): void {
+    const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
+    setIcon(spin, "refresh-cw");
+    const text = el.createSpan({ cls: "ngb-settings-note" });
+    const tick = () => {
+      const p = this.actions.progressText();
+      text.setText(p === "" ? "Loading diff…" : p);
+    };
+    tick();
+    this.registerInterval(window.setInterval(tick, 500));
   }
 
   private renderBody(box: HTMLElement, res: { diff: string; truncated: boolean } | null): void {
@@ -157,6 +211,7 @@ export class DiffView extends ItemView {
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
     }
+    sizeGutter(box);
     if (res.truncated) {
       box.createDiv({
         cls: "ngb-warning",
@@ -181,6 +236,22 @@ export class DiffView extends ItemView {
     const present = box.querySelector(".ngb-ws-glyph") !== null;
     if (wanted && !present) markInvisibles(box);
     else if (!wanted && present) this.renderBody(box, this.lastResult); // rebuild without glyphs
+    else sizeGutter(box); // renderBody sizes it itself
+    this.applyColors();
+  }
+
+  /**
+   * Custom colours (shared preference, off by default) are written as inline
+   * CSS variables on the pane, which is the only way to beat the stylesheet's
+   * own defaults on the same element. Turning the toggle off removes them, so
+   * the theme takes over again with no reload.
+   */
+  private applyColors(): void {
+    const c = this.actions.colors();
+    for (const name of DIFF_COLOR_VARS) {
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]!);
+      else this.contentEl.style.removeProperty(name);
+    }
   }
 
   /** Re-render from the cached diff when a display preference changed. */

@@ -521,7 +521,13 @@ sparse_safety_raw() {
   # $@ = protected paths; sets SAFE_STATUS and SAFE_STAGED
   SAFE_STATUS=""; SAFE_STAGED=""
   [ $# -eq 0 ] && return 0
-  run_git status --porcelain=v1 -- "$@" || true
+  # -uall: git collapses a fully untracked directory into a single "dir/" line.
+  # For the gate that makes no difference (any output blocks), but the plugin
+  # offers "move these files to the trash" from exactly this list, and one
+  # collapsed line meant one entry was deleted while the rest stayed behind.
+  # The pathspec is limited to the protected paths, so this lists what is new
+  # THERE and nothing else.
+  run_git status --porcelain=v1 -uall -- "$@" || true
   SAFE_STATUS="$GIT_OUT"
   run_git diff --cached --name-status -- "$@" || true
   SAFE_STAGED="$GIT_OUT"

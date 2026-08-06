@@ -5,6 +5,7 @@ import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
 import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
+import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
@@ -308,6 +309,8 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })(); })
       );
 
+    this.renderColorSection(containerEl);
+
     new Setting(containerEl)
       .setName("Auto-refresh status (seconds)")
       .setDesc(
@@ -500,6 +503,68 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
   // Every section refreshes ONLY its own list in place. Re-rendering the whole
   // tab (display()) on each add/remove resets the scroll position and makes
   // the collapsibles flicker — the view visibly "jumps".
+
+  /**
+   * Colours for the diff and conflict panes.
+   *
+   * One toggle guards the whole thing: while it is off the panes use the
+   * theme's own values and there is nothing to configure, so nothing is shown.
+   * Switching it on reveals the pickers — light and dark separately, because
+   * one set of hex values cannot be legible in both.
+   */
+  private renderColorSection(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Custom colours in the diff and conflict panes")
+      .setDesc(
+        "Off: the panes follow your theme. On: the colours below are used. " +
+          "Cosmetic and shared across devices (stored in data.json)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.customColors).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ customColors: v });
+          this.refreshTab();
+        })(); })
+      );
+    if (!this.plugin.sharedPrefs.customColors) return;
+
+    const fields: Array<{ key: keyof NgbColorSet; name: string; desc: string }> = [
+      { key: "diffAddBg", name: "Added line background", desc: "Diff pane" },
+      { key: "diffAddHl", name: "Added characters", desc: "Diff pane, intra-line highlight" },
+      { key: "diffDelBg", name: "Deleted line background", desc: "Diff pane" },
+      { key: "diffDelHl", name: "Deleted characters", desc: "Diff pane, intra-line highlight" },
+      { key: "conflictLocalBg", name: "LOCAL side background", desc: "Conflict pane (yours)" },
+      { key: "conflictRemoteBg", name: "REMOTE side background", desc: "Conflict pane (theirs)" },
+    ];
+    for (const mode of ["dark", "light"] as const) {
+      const { body } = this.detailsSection(
+        containerEl,
+        mode === "dark" ? "Colours (dark theme)" : "Colours (light theme)",
+        ""
+      );
+      const prefKey = mode === "dark" ? "colorsDark" : "colorsLight";
+      for (const f of fields) {
+        new Setting(body)
+          .setName(f.name)
+          .setDesc(f.desc)
+          .addColorPicker((cp) =>
+            cp.setValue(this.plugin.sharedPrefs[prefKey][f.key]).onChange((v) => { void (async () => {
+              await this.plugin.setSharedPref({
+                [prefKey]: { ...this.plugin.sharedPrefs[prefKey], [f.key]: v },
+              } as Record<string, unknown>);
+            })(); })
+          );
+      }
+      new Setting(body)
+        .setName("Reset to the defaults")
+        .setDesc("Restores the values this plugin ships with for this theme.")
+        .addButton((b) =>
+          b.setButtonText("Reset").onClick(() => { void (async () => {
+            await this.plugin.setSharedPref({ [prefKey]: { ...DEFAULT_COLORS[mode] } } as Record<string, unknown>);
+            this.refreshTab();
+          })(); })
+        );
+    }
+  }
 
   private renderProtectedPathsSection(
     containerEl: HTMLElement,

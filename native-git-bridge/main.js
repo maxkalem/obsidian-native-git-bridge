@@ -1247,6 +1247,59 @@ var OperationLogModal = class extends import_obsidian3.Modal {
   }
 };
 
+// src/ui/colors.ts
+var DEFAULT_COLORS = {
+  dark: {
+    diffAddBg: "#1e4620",
+    diffAddHl: "#2f8f2f",
+    diffDelBg: "#4a1f22",
+    diffDelHl: "#AA1414",
+    conflictLocalBg: "#14361f",
+    conflictRemoteBg: "#12283f"
+  },
+  light: {
+    diffAddBg: "#d7f5d7",
+    diffAddHl: "#7fd07f",
+    diffDelBg: "#ffd9dc",
+    diffDelHl: "#AA1414",
+    conflictLocalBg: "#e6f7ec",
+    conflictRemoteBg: "#e3eefb"
+  }
+};
+var DIFF_COLOR_VARS = [
+  "--ngb-diff-ins-bg",
+  "--ngb-diff-ins-hl",
+  "--ngb-diff-del-bg",
+  "--ngb-diff-del-hl"
+];
+var CONFLICT_COLOR_VARS = ["--ngb-conf-ours-bg", "--ngb-conf-theirs-bg"];
+function diffColorVars(set) {
+  return {
+    "--ngb-diff-ins-bg": set.diffAddBg,
+    "--ngb-diff-ins-hl": set.diffAddHl,
+    "--ngb-diff-del-bg": set.diffDelBg,
+    "--ngb-diff-del-hl": set.diffDelHl
+  };
+}
+function conflictColorVars(set) {
+  return {
+    "--ngb-conf-ours-bg": set.conflictLocalBg,
+    "--ngb-conf-theirs-bg": set.conflictRemoteBg
+  };
+}
+var HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+function sanitizeColorSet(raw, mode) {
+  const base = DEFAULT_COLORS[mode];
+  const out = { ...base };
+  if (typeof raw !== "object" || raw === null) return out;
+  const r = raw;
+  for (const k of Object.keys(base)) {
+    const v = r[k];
+    if (typeof v === "string" && HEX.test(v)) out[k] = v;
+  }
+  return out;
+}
+
 // src/settings/SettingsTab.ts
 var import_obsidian5 = require("obsidian");
 var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab {
@@ -1456,6 +1509,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
         })();
       })
     );
+    this.renderColorSection(containerEl);
     new import_obsidian4.Setting(containerEl).setName("Auto-refresh status (seconds)").setDesc(
       "While the status panel is open, run a status this often to pick up outside changes. 0 disables it. Each refresh wakes Termux \u2014 consider battery before choosing a small interval. Device-local."
     ).addText((t) => {
@@ -1602,6 +1656,62 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
   // Every section refreshes ONLY its own list in place. Re-rendering the whole
   // tab (display()) on each add/remove resets the scroll position and makes
   // the collapsibles flicker — the view visibly "jumps".
+  /**
+   * Colours for the diff and conflict panes.
+   *
+   * One toggle guards the whole thing: while it is off the panes use the
+   * theme's own values and there is nothing to configure, so nothing is shown.
+   * Switching it on reveals the pickers — light and dark separately, because
+   * one set of hex values cannot be legible in both.
+   */
+  renderColorSection(containerEl) {
+    new import_obsidian4.Setting(containerEl).setName("Custom colours in the diff and conflict panes").setDesc(
+      "Off: the panes follow your theme. On: the colours below are used. Cosmetic and shared across devices (stored in data.json)."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.sharedPrefs.customColors).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({ customColors: v });
+          this.refreshTab();
+        })();
+      })
+    );
+    if (!this.plugin.sharedPrefs.customColors) return;
+    const fields = [
+      { key: "diffAddBg", name: "Added line background", desc: "Diff pane" },
+      { key: "diffAddHl", name: "Added characters", desc: "Diff pane, intra-line highlight" },
+      { key: "diffDelBg", name: "Deleted line background", desc: "Diff pane" },
+      { key: "diffDelHl", name: "Deleted characters", desc: "Diff pane, intra-line highlight" },
+      { key: "conflictLocalBg", name: "LOCAL side background", desc: "Conflict pane (yours)" },
+      { key: "conflictRemoteBg", name: "REMOTE side background", desc: "Conflict pane (theirs)" }
+    ];
+    for (const mode of ["dark", "light"]) {
+      const { body } = this.detailsSection(
+        containerEl,
+        mode === "dark" ? "Colours (dark theme)" : "Colours (light theme)",
+        ""
+      );
+      const prefKey = mode === "dark" ? "colorsDark" : "colorsLight";
+      for (const f of fields) {
+        new import_obsidian4.Setting(body).setName(f.name).setDesc(f.desc).addColorPicker(
+          (cp) => cp.setValue(this.plugin.sharedPrefs[prefKey][f.key]).onChange((v) => {
+            void (async () => {
+              await this.plugin.setSharedPref({
+                [prefKey]: { ...this.plugin.sharedPrefs[prefKey], [f.key]: v }
+              });
+            })();
+          })
+        );
+      }
+      new import_obsidian4.Setting(body).setName("Reset to the defaults").setDesc("Restores the values this plugin ships with for this theme.").addButton(
+        (b) => b.setButtonText("Reset").onClick(() => {
+          void (async () => {
+            await this.plugin.setSharedPref({ [prefKey]: { ...DEFAULT_COLORS[mode] } });
+            this.refreshTab();
+          })();
+        })
+      );
+    }
+  }
   renderProtectedPathsSection(containerEl, s) {
     const { body, hintEl } = this.detailsSection(containerEl, "Protected paths", "");
     new import_obsidian4.Setting(body).setName("Auto-protect sparse exclusions").setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).").addToggle(
@@ -2641,107 +2751,6 @@ var TextPreviewModal = class extends import_obsidian8.Modal {
     this.contentEl.empty();
   }
 };
-var DiffModal = class extends import_obsidian8.Modal {
-  constructor(app, title, meta, diffText, truncated) {
-    super(app);
-    this.title = title;
-    this.meta = meta;
-    this.diffText = diffText;
-    this.truncated = truncated;
-  }
-  onOpen() {
-    this.modalEl.addClass("ngb-modal");
-    this.titleEl.setText(this.title);
-    const c = this.contentEl;
-    c.createDiv({ cls: "ngb-settings-note", text: this.meta });
-    if (this.diffText.trim() === "") {
-      c.createEl("p", { cls: "ngb-ok", text: "No differences." });
-      return;
-    }
-    const box = c.createDiv({ cls: "ngb-output ngb-output-tall ngb-diff" });
-    for (const line of this.diffText.split("\n")) {
-      const cls = line.startsWith("+") && !line.startsWith("+++") ? "ngb-diff-add" : line.startsWith("-") && !line.startsWith("---") ? "ngb-diff-del" : line.startsWith("@@") ? "ngb-diff-hunk" : line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("+++") || line.startsWith("---") ? "ngb-diff-meta" : "";
-      box.createDiv({ cls: `ngb-diff-line ${cls}`, text: line === "" ? " " : line });
-    }
-    if (this.truncated) {
-      c.createDiv({ cls: "ngb-warning", text: "Diff truncated (too large). Full diff is available via git in Termux." });
-    }
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
-var FileHistoryModal = class extends import_obsidian8.Modal {
-  constructor(app, filePath, actions) {
-    super(app);
-    this.filePath = filePath;
-    this.actions = actions;
-    this.entries = [];
-    this.skip = 0;
-    this.pageSize = 30;
-    this.exhausted = false;
-  }
-  onOpen() {
-    this.modalEl.addClass("ngb-modal");
-    this.titleEl.setText("History");
-    const c = this.contentEl;
-    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: this.filePath });
-    this.listEl = c.createDiv();
-    const btns = c.createDiv({ cls: "ngb-buttons" });
-    this.moreBtn = btns.createEl("button", { text: "Load more" });
-    this.moreBtn.addEventListener("click", () => void this.loadMore());
-    void this.loadMore();
-  }
-  async loadMore() {
-    this.moreBtn.disabled = true;
-    this.moreBtn.setText("Loading\u2026");
-    const page = await this.actions.loadPage(this.skip, this.pageSize);
-    this.moreBtn.disabled = false;
-    this.moreBtn.setText("Load more");
-    if (page === null) return;
-    if (this.skip === 0 && page.length === 0) {
-      this.listEl.createEl("p", { text: "No history for this file (not committed yet?)." });
-      this.moreBtn.hide();
-      return;
-    }
-    if (page.length < this.pageSize) {
-      this.exhausted = true;
-      this.moreBtn.hide();
-    }
-    const startIndex = this.entries.length;
-    this.entries.push(...page);
-    this.skip += page.length;
-    page.forEach((e, i) => this.renderRow(e, startIndex + i));
-  }
-  renderRow(e, index) {
-    const row = this.listEl.createDiv({ cls: "ngb-history-row" });
-    const head = row.createDiv();
-    head.createSpan({ cls: "ngb-badge", text: e.hash.slice(0, 8) });
-    head.createSpan({ text: ` ${e.date.slice(0, 16).replace("T", " ")} \xB7 ${e.author}`, cls: "ngb-settings-note" });
-    row.createDiv({ text: e.subject });
-    if (e.pathAtCommit !== this.filePath) {
-      row.createDiv({ cls: "ngb-settings-note ngb-mono", text: `as: ${e.pathAtCommit}` });
-    }
-    const acts = row.createDiv({ cls: "ngb-history-actions" });
-    const mk = (label2, cb, danger = false) => {
-      const b = acts.createEl("button", { text: label2, cls: danger ? "mod-warning" : "" });
-      b.addEventListener("click", cb);
-    };
-    mk("View", () => this.actions.viewAt(e));
-    mk("Diff vs now", () => this.actions.diffVsCurrent(e));
-    const prev = this.entries[index + 1];
-    mk("Diff vs previous", () => {
-      const p = this.entries[index + 1];
-      if (p) this.actions.diffVsPrevious(e, p);
-      else if (this.exhausted) new import_obsidian8.Notice("This is the oldest known commit for the file.");
-      else new import_obsidian8.Notice("Load more history first (the previous commit is not loaded yet).");
-    });
-    mk("Restore\u2026", () => this.actions.restore(e), true);
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
 
 // src/ui/StatusView.ts
 var import_obsidian11 = require("obsidian");
@@ -2906,6 +2915,36 @@ function applySweepIcon(button, iconName, direction) {
 
 // src/ui/StatusView.ts
 var NGB_STATUS_VIEW = "native-git-bridge-status";
+function actionSlots(scope, group, hasItems = true) {
+  const none = { icon: null };
+  if (!hasItems) return [none, none, none];
+  const where = scope === "group" ? "" : " in this folder";
+  switch (group) {
+    case "staged":
+      return [
+        none,
+        { icon: "minus", tooltip: `Unstage everything staged${where || ""}`, action: "unstage" },
+        none
+        // files offer discard here; staged content does not
+      ];
+    case "unstaged":
+      return [
+        none,
+        { icon: "plus", tooltip: `Stage the changed (tracked) files${where}`, action: "stage" },
+        { icon: "undo-2", tooltip: `Discard the changes${where}`, action: "discard", warn: true }
+      ];
+    case "untracked":
+      return [
+        none,
+        { icon: "plus", tooltip: `Stage the new files${where}`, action: "stage" },
+        // Trashing every new file in the whole group in one tap is deliberately
+        // not offered; on a folder it is, because the blast radius is visible.
+        scope === "folder" ? { icon: "trash", tooltip: "Move the new files in this folder to Obsidian's trash", action: "discard", warn: true } : none
+      ];
+    default:
+      return [none, none, none];
+  }
+}
 var CHANGE_LABEL = {
   M: "modified",
   A: "added",
@@ -3098,25 +3137,9 @@ var StatusView = class extends import_obsidian11.ItemView {
       cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
       text: title
     });
-    const acts = header.createDiv({ cls: "ngb-sv-file-actions" });
-    const gact = (icon, tooltip, cb, warn = false) => {
-      const b = acts.createEl("button", {
-        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}`
-      });
-      b.setAttribute("aria-label", tooltip);
-      (0, import_obsidian11.setIcon)(b, icon);
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        cb();
-      });
-    };
-    if (group === "staged" && items.length > 0) {
-      gact("minus", "Unstage everything", () => this.actions.groupAction(group, "unstage"));
-    } else if (group === "unstaged" && items.length > 0) {
-      gact("plus", "Stage all changed files", () => this.actions.groupAction(group, "stage"));
-      gact("undo-2", "Discard all local changes", () => this.actions.groupAction(group, "discard"), true);
-    } else if (group === "untracked" && items.length > 0) {
-      gact("plus", "Stage all new files", () => this.actions.groupAction(group, "stage"));
+    const gslot = this.slotFactory(header.createDiv({ cls: "ngb-sv-file-actions" }));
+    for (const s of actionSlots("group", group, items.length > 0)) {
+      gslot(s.icon, s.tooltip, s.action ? () => this.actions.groupAction(group, s.action) : void 0, s.warn);
     }
     renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
@@ -3180,6 +3203,31 @@ var StatusView = class extends import_obsidian11.ItemView {
       el.addEventListener(e, clearLongPress, { passive: true });
     }
   }
+  /**
+   * One action column, used by folder rows AND group headers so both mirror
+   * the file rows slot for slot ([open] [stage/unstage] [discard] plus the
+   * count column). `null` renders an invisible placeholder that keeps the
+   * column width without being focusable or clickable.
+   */
+  slotFactory(acts) {
+    return (icon, tooltip, cb, warn = false) => {
+      const b = acts.createEl("button", {
+        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${icon === null ? " ngb-slot-inactive" : ""}`
+      });
+      if (icon === null) {
+        (0, import_obsidian11.setIcon)(b, "circle");
+        b.setAttribute("aria-hidden", "true");
+        b.tabIndex = -1;
+        return;
+      }
+      b.setAttribute("aria-label", tooltip ?? "");
+      (0, import_obsidian11.setIcon)(b, icon);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        cb?.();
+      });
+    };
+  }
   /** Tree layout: group items nested under collapsible folder rows. */
   renderTreeItems(list, group, items) {
     let expanded = items;
@@ -3217,49 +3265,14 @@ var StatusView = class extends import_obsidian11.ItemView {
       rowEl.addClass("ngb-sv-file-busy");
     }
     this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
-    const acts = rowEl.createDiv({ cls: "ngb-sv-file-actions" });
-    const slot = (icon, tooltip, cb, warn = false) => {
-      const b = acts.createEl("button", {
-        cls: `clickable-icon ngb-sv-icon${warn ? " ngb-sv-icon-warn" : ""}${icon === null ? " ngb-slot-inactive" : ""}`
-      });
-      if (icon === null) {
-        (0, import_obsidian11.setIcon)(b, "circle");
-        b.setAttribute("aria-hidden", "true");
-        b.tabIndex = -1;
-        return;
-      }
-      b.setAttribute("aria-label", tooltip ?? "");
-      (0, import_obsidian11.setIcon)(b, icon);
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        cb?.();
-      });
-    };
-    slot(null);
-    if (group === "staged") {
+    const slot = this.slotFactory(rowEl.createDiv({ cls: "ngb-sv-file-actions" }));
+    for (const s of actionSlots("folder", group)) {
       slot(
-        "minus",
-        "Unstage everything staged in this folder",
-        () => this.actions.folderAction(group, node.path, "unstage")
+        s.icon,
+        s.tooltip,
+        s.action ? () => this.actions.folderAction(group, node.path, s.action) : void 0,
+        s.warn
       );
-      slot(null);
-    } else if (group === "unstaged") {
-      slot(
-        "plus",
-        "Stage the changed (tracked) files in this folder",
-        () => this.actions.folderAction(group, node.path, "stage")
-      );
-      slot("undo-2", "Discard the changes in this folder", () => this.actions.folderAction(group, node.path, "discard"), true);
-    } else if (group === "untracked") {
-      slot(
-        "plus",
-        "Stage the new files in this folder",
-        () => this.actions.folderAction(group, node.path, "stage")
-      );
-      slot("trash", "Move the new files in this folder to Obsidian's trash", () => this.actions.folderAction(group, node.path, "discard"), true);
-    } else {
-      slot(null);
-      slot(null);
     }
     renderCountBadge(rowEl, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
@@ -3547,7 +3560,10 @@ var HistoryView = class extends import_obsidian12.ItemView {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading\u2026");
     }
+    const waiting = this.skip === 0 ? this.listEl?.createDiv({ cls: "ngb-filehist-waiting" }) : void 0;
+    if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(this.skip, this.pageSize);
+    waiting?.remove();
     this.loading = false;
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
@@ -3570,6 +3586,19 @@ var HistoryView = class extends import_obsidian12.ItemView {
     this.entries.push(...page);
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
+  }
+  /** "The runner is working" indicator, identical in all four panels. */
+  renderWaiting(el, what) {
+    el.empty();
+    const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
+    (0, import_obsidian12.setIcon)(spin, "refresh-cw");
+    const text = el.createSpan({ cls: "ngb-settings-note" });
+    const tick = () => {
+      const p = this.actions.progressText();
+      text.setText(p === "" ? `${what}\u2026` : p);
+    };
+    tick();
+    this.registerInterval(window.setInterval(tick, 500));
   }
   renderCommit(e) {
     if (!this.listEl) return;
@@ -5614,8 +5643,8 @@ function html(diffInput, configuration = {}) {
 
 // src/ui/DiffView.ts
 var NGB_DIFF_VIEW = "native-git-bridge-diff";
-function markInvisibles(root) {
-  for (const ctn of Array.from(root.querySelectorAll(".d2h-code-line-ctn"))) {
+function markInvisibles(root, selector = ".d2h-code-line-ctn") {
+  for (const ctn of Array.from(root.querySelectorAll(selector))) {
     if (ctn.querySelector(".ngb-ws-glyph")) continue;
     const walker = ctn.ownerDocument.createTreeWalker(ctn, NodeFilter.SHOW_TEXT);
     const textNodes = [];
@@ -5638,6 +5667,18 @@ function markInvisibles(root) {
       node.replaceWith(frag);
     }
   }
+}
+function gutterWidthCh(root) {
+  let digits = 1;
+  for (const el of Array.from(root.querySelectorAll(".line-num1, .line-num2"))) {
+    const t = (el.textContent ?? "").trim();
+    if (t.length > digits) digits = t.length;
+  }
+  return 2 * digits + 4;
+}
+function sizeGutter(box) {
+  const host = box.closest(".ngb-diff-view") ?? box;
+  host.style.setProperty("--ngb-diff-gutter-w", `${gutterWidthCh(box)}ch`);
 }
 var DiffView = class extends import_obsidian13.ItemView {
   constructor(leaf, actions) {
@@ -5684,13 +5725,26 @@ var DiffView = class extends import_obsidian13.ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-diff-view");
-    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: `${st.path} \xB7 ${st.label}` });
+    const head = c.createDiv({ cls: "ngb-pane-path", text: `${st.path} \xB7 ${st.label}` });
+    head.setAttribute("aria-label", `${st.path} \xB7 ${st.label}`);
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
-    box.createEl("p", { cls: "ngb-settings-note", text: "Loading diff\u2026" });
+    this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
     const res = await this.actions.loadDiff(st.path, st.from, st.to);
     if (seq !== this.loadSeq) return;
     this.lastResult = res;
     this.renderBody(box, res);
+  }
+  /** "The runner is working" indicator, identical to the file-history panel's. */
+  renderWaiting(el) {
+    const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
+    (0, import_obsidian13.setIcon)(spin, "refresh-cw");
+    const text = el.createSpan({ cls: "ngb-settings-note" });
+    const tick = () => {
+      const p = this.actions.progressText();
+      text.setText(p === "" ? "Loading diff\u2026" : p);
+    };
+    tick();
+    this.registerInterval(window.setInterval(tick, 500));
   }
   renderBody(box, res) {
     this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
@@ -5714,6 +5768,7 @@ var DiffView = class extends import_obsidian13.ItemView {
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
     }
+    sizeGutter(box);
     if (res.truncated) {
       box.createDiv({
         cls: "ngb-warning",
@@ -5737,6 +5792,21 @@ var DiffView = class extends import_obsidian13.ItemView {
     const present = box.querySelector(".ngb-ws-glyph") !== null;
     if (wanted && !present) markInvisibles(box);
     else if (!wanted && present) this.renderBody(box, this.lastResult);
+    else sizeGutter(box);
+    this.applyColors();
+  }
+  /**
+   * Custom colours (shared preference, off by default) are written as inline
+   * CSS variables on the pane, which is the only way to beat the stylesheet's
+   * own defaults on the same element. Turning the toggle off removes them, so
+   * the theme takes over again with no reload.
+   */
+  applyColors() {
+    const c = this.actions.colors();
+    for (const name of DIFF_COLOR_VARS) {
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]);
+      else this.contentEl.style.removeProperty(name);
+    }
   }
   /** Re-render from the cached diff when a display preference changed. */
   refreshDisplay() {
@@ -5895,6 +5965,18 @@ var ConflictView = class extends import_obsidian14.ItemView {
     }
     return super.setState(state, result);
   }
+  /**
+   * Custom colours (shared preference, off by default) as inline CSS
+   * variables — the only way to beat the stylesheet's defaults on the same
+   * element. Removing them hands the pane back to the theme, no reload needed.
+   */
+  applyColors() {
+    const c = this.actions.colors();
+    for (const name of CONFLICT_COLOR_VARS) {
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]);
+      else this.contentEl.style.removeProperty(name);
+    }
+  }
   async reload() {
     const path = this.path;
     if (path === null) return;
@@ -5909,12 +5991,14 @@ var ConflictView = class extends import_obsidian14.ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-conflict-view");
+    this.applyColors();
     const path = this.path;
     if (path === null) {
       c.createEl("p", { cls: "ngb-settings-note", text: "No file selected." });
       return;
     }
-    c.createDiv({ cls: "ngb-settings-note ngb-mono", text: path });
+    const head = c.createDiv({ cls: "ngb-pane-path", text: path });
+    head.setAttribute("aria-label", path);
     if (this.originalText === null || this.parsed === null) {
       c.createEl("p", {
         cls: "ngb-warning",
@@ -5992,6 +6076,7 @@ var ConflictView = class extends import_obsidian14.ItemView {
         chromeRow(lineNo++, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
       }
     }
+    if (this.actions.showInvisibles()) markInvisibles(list, ".ngb-conf-text");
   }
   async applyResolution(blockIndex, side) {
     const path = this.path;
@@ -6078,6 +6163,12 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
     this.expanded = /* @__PURE__ */ new Set();
     this.listEl = null;
     this.moreBtn = null;
+    /**
+     * Diffs already fetched, by commit hash. Without it a theme switch or a
+     * colour tweak re-ran `diff-file` in Termux for every expanded commit —
+     * rerender() promises "no round trip" and now keeps that promise.
+     */
+    this.diffCache = /* @__PURE__ */ new Map();
     this.navigation = true;
   }
   getViewType() {
@@ -6088,16 +6179,17 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
     return base ? `History: ${base}` : "File history";
   }
   getIcon() {
-    return "history";
+    return "file-clock";
   }
   getState() {
     return { path: this.path };
   }
   async setState(state, result) {
     const s = state;
-    if (s && typeof s.path === "string" && s.path !== this.path) {
+    if (s && typeof s.path === "string") {
       this.path = s.path;
       this.entries = [];
+      this.diffCache.clear();
       this.skip = 0;
       this.exhausted = false;
       this.expanded.clear();
@@ -6109,6 +6201,18 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
   async onOpen() {
     this.renderShell();
     if (this.path !== null && this.entries.length === 0) await this.loadMore();
+  }
+  /**
+   * Redraw the loaded commits from memory — no Termux round trip. Used when a
+   * display preference (wrap, invisibles, colours) or the theme changes, so
+   * this panel follows them exactly like the diff pane does.
+   */
+  rerender() {
+    if (this.path === null) return;
+    const entries = this.entries;
+    this.renderShell();
+    for (const e of entries) this.renderCommit(e);
+    if (!this.exhausted) this.moreBtn?.show();
   }
   renderShell() {
     const c = this.contentEl;
@@ -6125,7 +6229,7 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
   }
   async loadMore() {
     const path = this.path;
-    if (path === null || this.loading) return;
+    if (path === null || this.loading || this.exhausted) return;
     this.loading = true;
     const waiting = this.listEl?.createDiv({ cls: "ngb-filehist-waiting" });
     if (waiting) this.renderWaiting(waiting, "Loading history");
@@ -6140,8 +6244,12 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
       });
       return;
     }
-    if (page.length < this.pageSize) this.exhausted = true;
-    else this.moreBtn?.show();
+    if (page.length < this.pageSize) {
+      this.exhausted = true;
+      this.moreBtn?.hide();
+    } else {
+      this.moreBtn?.show();
+    }
     this.entries.push(...page);
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
@@ -6173,6 +6281,14 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
       text: `${e.hash.slice(0, 8)} \xB7 ${e.date.slice(0, 16).replace("T", " ")} \xB7 ${e.author}`
     });
     titles.createDiv({ cls: "ngb-filehist-change", text: describeFileChange(e) });
+    const viewAt = header.createEl("button", { cls: "ngb-filehist-restore ngb-filehist-viewat" });
+    const vi = viewAt.createSpan({ cls: "ngb-filehist-restore-icon" });
+    (0, import_obsidian15.setIcon)(vi, "eye");
+    viewAt.setAttribute("aria-label", `Show the file as it was at ${e.hash.slice(0, 8)}`);
+    viewAt.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      this.actions.viewAtCommit(e);
+    });
     const restore = header.createEl("button", { cls: "ngb-filehist-restore" });
     const ic = restore.createSpan({ cls: "ngb-filehist-restore-icon" });
     (0, import_obsidian15.setIcon)(ic, "rotate-ccw");
@@ -6196,18 +6312,36 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
     });
     if (open) void this.renderCommitDiff(body, e);
   }
+  /**
+   * Obsidian calls this on every size change, including a rotation. The
+   * embedded diffs are the same diff2html DOM the diff pane renders, and its
+   * wrapped layout is measured, so they have to be re-measured here too.
+   */
+  onResize() {
+    for (const pane of Array.from(this.contentEl.querySelectorAll(".ngb-filehist-diff"))) {
+      pane.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+      sizeGutter(pane);
+    }
+  }
   async renderCommitDiff(body, e) {
     body.empty();
-    this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
-    const res = await this.actions.loadCommitDiff(e);
+    const cached = this.diffCache.get(e.hash);
+    let res;
+    if (cached !== void 0) {
+      res = cached;
+    } else {
+      this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
+      res = await this.actions.loadCommitDiff(e);
+      if (res !== null) this.diffCache.set(e.hash, res);
+    }
     if (!this.expanded.has(e.hash)) return;
     body.empty();
     if (res === null) {
-      body.createEl("p", { cls: "ngb-warning", text: "Could not load this diff." });
+      body.createEl("p", { cls: "ngb-warning", text: "Could not load the diff (see the error message)." });
       return;
     }
     if (res.diff.trim() === "") {
-      body.createEl("p", { cls: "ngb-settings-note", text: "No textual changes in this commit." });
+      body.createEl("p", { cls: "ngb-ok", text: "No differences." });
       return;
     }
     const hunks = parseHunks(res.diff);
@@ -6223,6 +6357,12 @@ var FileHistoryView = class extends import_obsidian15.ItemView {
       const gutter = tr.querySelector(".d2h-code-linenumber");
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
+    }
+    sizeGutter(pane);
+    const colors = this.actions.colors();
+    for (const name of DIFF_COLOR_VARS) {
+      if (colors && colors[name]) pane.style.setProperty(name, colors[name]);
+      else pane.style.removeProperty(name);
     }
     if (this.actions.showInvisibles()) markInvisibles(pane);
     const files = Array.from(pane.querySelectorAll(".d2h-file-wrapper"));
@@ -6362,7 +6502,10 @@ var DEFAULT_SHARED_PREFS = {
   wrapDiffLines: false,
   showInvisibles: false,
   showConflictMarkers: false,
-  treeView: false
+  treeView: false,
+  customColors: false,
+  colorsLight: { ...DEFAULT_COLORS.light },
+  colorsDark: { ...DEFAULT_COLORS.dark }
 };
 var MARKER_KEY = "active-op";
 var LAST_SYNC_KEY = "last-sync";
@@ -6425,6 +6568,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.log = new OperationLog(this.store);
     const data = await this.loadData();
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS, ...data ?? {} };
+    this.sharedPrefs.colorsLight = sanitizeColorSet(this.sharedPrefs.colorsLight, "light");
+    this.sharedPrefs.colorsDark = sanitizeColorSet(this.sharedPrefs.colorsDark, "dark");
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
     this.client = new BridgeClient(this.makeRuntimeFS(), paths);
@@ -6479,6 +6624,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
         openDiffAtCommit: (file, entry2) => void this.openCommitDiff(file, entry2),
         openFile: (p) => this.openVaultFile(p),
+        progressText: () => this.progressText ?? "",
         treeView: () => this.sharedPrefs.treeView,
         toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView })
       })
@@ -6488,7 +6634,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       (leaf) => new DiffView(leaf, {
         loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
         wrapLines: () => this.sharedPrefs.wrapDiffLines,
-        showInvisibles: () => this.sharedPrefs.showInvisibles
+        showInvisibles: () => this.sharedPrefs.showInvisibles,
+        colors: () => this.diffColorVars(),
+        progressText: () => this.progressText ?? ""
       })
     );
     this.registerView(
@@ -6501,9 +6649,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           await this.app.vault.adapter.write(p, text);
         },
         restoreWholeFile: (p, e) => this.confirmRestore(p, e),
+        viewAtCommit: (e) => void this.showFileAtCommit(e),
         progressText: () => this.progressText ?? "",
         wrapLines: () => this.sharedPrefs.wrapDiffLines,
-        showInvisibles: () => this.sharedPrefs.showInvisibles
+        showInvisibles: () => this.sharedPrefs.showInvisibles,
+        colors: () => this.diffColorVars()
       })
     );
     this.registerView(
@@ -6514,9 +6664,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           await this.app.vault.adapter.write(p, content);
         },
         stageFile: (p) => this.cmdStageFile(p),
-        markersVisible: () => this.sharedPrefs.showConflictMarkers
+        markersVisible: () => this.sharedPrefs.showConflictMarkers,
+        showInvisibles: () => this.sharedPrefs.showInvisibles,
+        colors: () => this.conflictColorVars()
       })
     );
+    this.registerEvent(this.app.workspace.on("css-change", () => this.refreshDiffPanes()));
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
     this.registerFileMenu();
@@ -7116,8 +7269,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       { id: "reset-all", name: "Reset everything to HEAD (staged and local changes)", cb: () => this.cmdResetAll() },
       { id: "show-history-current-file", name: "Show history for current file", cb: () => this.cmdFileHistory() },
       { id: "show-diff-current-file", name: "Show diff for current file", cb: () => void this.cmdDiffCurrentFile() },
-      { id: "show-file-at-commit", name: "Show selected file at commit", cb: () => this.cmdFileHistory() },
-      { id: "restore-file-from-commit", name: "Restore selected file from commit", cb: () => this.cmdFileHistory() },
+      { id: "show-file-at-commit", name: "Show current file at a commit", cb: () => this.cmdFileHistory() },
+      { id: "restore-file-from-commit", name: "Restore current file from a commit", cb: () => this.cmdFileHistory() },
       { id: "show-changed-files", name: "Show changed files", cb: () => void this.cmdShowChangedFiles() },
       { id: "verify-sparse-safety", name: "Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
       { id: "reapply-sparse", name: "Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
@@ -7524,6 +7677,66 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING, this.sparseSafetyFixes()).open();
   }
   /**
+   * Move every listed path to Obsidian's trash, expanding folders into their
+   * files first.
+   *
+   * Two reasons this is not a plain loop over `trashLocal`. git's porcelain
+   * output collapses a fully untracked directory into a single `dir/` entry,
+   * so one "file" in the list can be a folder holding many; and a path with
+   * the trailing slash git prints is not a path the adapter recognises. The
+   * old loop therefore trashed the first entry and quietly logged failures for
+   * the rest, which looked like "only one file was deleted".
+   */
+  async trashAll(paths) {
+    const adapter = this.app.vault.adapter;
+    let moved = 0;
+    const failed = [];
+    const expand = async (raw) => {
+      const p = raw.replace(/\/+$/, "");
+      if (p === "") return [];
+      let isFolder = false;
+      try {
+        const st = await adapter.stat(p);
+        isFolder = st?.type === "folder";
+      } catch {
+        isFolder = false;
+      }
+      if (!isFolder) return [p];
+      const out = [];
+      try {
+        const listing = await adapter.list(p);
+        for (const f of listing.files) out.push(f);
+        for (const d of listing.folders) out.push(...await expand(d));
+      } catch (e) {
+        this.log.add("warn", "sparse", `Could not list ${p}: ${String(e)}`);
+      }
+      out.push(p);
+      return out;
+    };
+    const targets = [];
+    for (const raw of paths) {
+      for (const t of await expand(raw)) if (!targets.includes(t)) targets.push(t);
+    }
+    for (const t of targets) {
+      try {
+        await adapter.trashLocal(t);
+        moved++;
+      } catch (e) {
+        let stillThere = true;
+        try {
+          stillThere = await adapter.exists(t);
+        } catch {
+          stillThere = true;
+        }
+        if (stillThere) {
+          failed.push(t);
+          this.log.add("error", "sparse", `Trash failed for ${t}: ${String(e)}`);
+        }
+      }
+    }
+    return { moved, failed };
+  }
+  /**
    * The two recoveries the safety modal offers. Both are explicit, confirmed
    * and reversible in the sense that matters: deleting goes to Obsidian's
    * trash rather than to `rm`, and unprotecting only edits sparse config, so
@@ -7547,17 +7760,28 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           },
           async (confirmed) => {
             if (!confirmed) return;
-            let moved = 0;
-            for (const p of paths) {
-              try {
-                await this.app.vault.adapter.trashLocal(p);
-                moved++;
-              } catch (e) {
-                this.log.add("error", "sparse", `Trash failed for ${p}: ${String(e)}`);
-              }
+            const { moved, failed } = await this.trashAll(paths);
+            if (failed.length > 0) {
+              this.log.add(
+                "error",
+                "sparse",
+                `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
+              );
+              new ResultModal(
+                this.app,
+                "Some files could not be moved",
+                [
+                  `Moved ${moved} file${moved === 1 ? "" : "s"} to the trash; ${failed.length} could not be moved.`,
+                  ...failed.slice(0, 12),
+                  failed.length > 12 ? `\u2026and ${failed.length - 12} more` : "",
+                  "The safety check below shows what is still there."
+                ].filter((l) => l !== ""),
+                { isError: true }
+              ).open();
+            } else {
+              this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
             }
-            this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
-            await this.cmdStatus(true);
+            await this.cmdVerifySparseSafety();
           }
         ).open();
       },
@@ -7728,6 +7952,45 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     ).open();
   }
   // ---------------------------------------------------- phase 3 git commands
+  /**
+   * True when Obsidian is currently drawing a dark theme. `theme-dark` on the
+   * body is how Obsidian itself marks it; absent means light.
+   */
+  isDarkTheme() {
+    try {
+      return activeDocument.body.classList.contains("theme-dark");
+    } catch {
+      return true;
+    }
+  }
+  /** The colour set in force, or null while custom colours are switched off. */
+  activeColorSet() {
+    if (!this.sharedPrefs.customColors) return null;
+    return this.isDarkTheme() ? this.sharedPrefs.colorsDark : this.sharedPrefs.colorsLight;
+  }
+  diffColorVars() {
+    const set = this.activeColorSet();
+    return set ? diffColorVars(set) : null;
+  }
+  conflictColorVars() {
+    const set = this.activeColorSet();
+    return set ? conflictColorVars(set) : null;
+  }
+  /** Re-apply display preferences (and colours) to every open diff/conflict pane. */
+  refreshDiffPanes() {
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof DiffView) view.refreshDisplay();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) view.rerender();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof ConflictView) void view.reload();
+    }
+  }
   /** Merge and persist shareable UI preferences (data.json; cosmetic only). */
   async setSharedPref(patch) {
     this.sharedPrefs = { ...this.sharedPrefs, ...patch };
@@ -7735,6 +7998,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
       const view = leaf.view;
       if (view instanceof DiffView) view.refreshDisplay();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) view.rerender();
     }
     this.pushStatusToView();
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW)) {
@@ -7947,25 +8214,18 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     return f.path;
   }
-  /** Entry point for history / view-at-commit / restore commands. */
+  /**
+   * History / view-at-commit / restore for the active file. All three commands
+   * open the same PANEL the context menu and the status panel open: one file
+   * history surface, with the diff, the whole-file restore, the per-block
+   * restore and the display preferences that every other diff has. The modal
+   * this used to open rendered its own, plainer diff and was the last place in
+   * the plugin where the same question got a different-looking answer.
+   */
   cmdFileHistory() {
     const path = this.activeFilePath();
     if (path === null) return;
-    new FileHistoryModal(this.app, path, {
-      loadPage: async (skip, limit) => {
-        const result = await this.runOperation("file-log", { path, skip, limit });
-        if (!result) return null;
-        if (!result.ok) {
-          this.renderMutationError("Native Git: history failed", result);
-          return null;
-        }
-        return parseFileLog(result.data?.log ?? "", path);
-      },
-      viewAt: (e) => void this.showFileAtCommit(e),
-      diffVsCurrent: (e) => void this.showDiff(path, e.hash, "WORKTREE", `${e.hash.slice(0, 8)} \u2192 working tree`),
-      diffVsPrevious: (e, prev) => void this.showDiff(path, prev.hash, e.hash, `${prev.hash.slice(0, 8)} \u2192 ${e.hash.slice(0, 8)}`),
-      restore: (e) => this.confirmRestore(path, e)
-    }).open();
+    void this.openFileHistoryPanel(path);
   }
   async showFileAtCommit(e) {
     const result = await this.runOperation("show-file-at-commit", {
@@ -7986,22 +8246,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     new TextPreviewModal(this.app, "File at commit", meta, text).open();
   }
-  async showDiff(path, from, to, label2) {
-    const result = await this.runOperation("diff-file", { path, from, to });
-    if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: diff failed", result);
-    new DiffModal(
-      this.app,
-      "Diff",
-      `${path} \xB7 ${label2}`,
-      result.data?.diff ?? "",
-      result.data?.truncated === "true"
-    ).open();
-  }
   async cmdDiffCurrentFile() {
     const path = this.activeFilePath();
     if (path === null) return;
-    await this.showDiff(path, "HEAD", "WORKTREE", "HEAD \u2192 working tree");
+    await this.openDiffPane({ path, from: "HEAD", to: "WORKTREE", label: "HEAD \u2192 working tree" });
   }
   confirmRestore(currentPath, e) {
     const renamed = e.pathAtCommit !== currentPath;

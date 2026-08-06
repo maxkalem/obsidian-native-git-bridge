@@ -22,7 +22,9 @@ Fastest route: open the **companion app**. When the runner is behind, the app sa
 
 Which runner version a release expects, and what each version added, is listed in [protocol.md → Runner version history](protocol.md#runner-version-history).
 
-The manual route is unchanged: paste the install command again in Termux (Settings → Native Git Bridge → Copy command, or see [setup.md](setup.md) step 3). Re-running is safe and idempotent: it keeps the existing pairing token, re-checks auth, re-writes the runner, and re-runs the self-test. Nothing in the vault or the git history is touched.
+The manual route is unchanged: paste the install command again in Termux (Settings → Native Git Bridge → Copy command, or see [setup.md](setup.md) step 3). Re-running is safe and idempotent: it keeps **this vault's** pairing token, re-checks auth, re-writes the runner, and re-runs the self-test. Nothing in the vault or the git history is touched.
+
+Since runner v10 the Termux side keeps one profile per paired vault. Re-running the installer for one vault leaves the others untouched (it used to overwrite them), and an existing single-vault configuration is migrated to a profile automatically on the first run of the new runner — same token, no re-pairing. Updating the runner therefore updates it for every vault at once; the profiles are independent of it.
 
 ## Updating the companion app
 

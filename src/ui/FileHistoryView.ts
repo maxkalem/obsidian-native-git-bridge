@@ -2,7 +2,8 @@ import { ItemView, Notice, sanitizeHTMLToDom, setIcon, WorkspaceLeaf } from "obs
 import { html as diff2html } from "diff2html";
 import { describeFileChange, type FileLogEntry } from "../git/historyParsers";
 import { parseHunks, restoreHunk, type DiffHunk } from "../git/hunks";
-import { markInvisibles } from "./DiffView";
+import { markInvisibles, sizeGutter } from "./DiffView";
+import { DIFF_COLOR_VARS } from "./colors";
 
 export const NGB_FILE_HISTORY_VIEW = "native-git-bridge-file-history";
 
@@ -16,10 +17,14 @@ export interface FileHistoryActions {
   writeFile(path: string, text: string): Promise<void>;
   /** Whole-file restore, with the confirmation the command already has. */
   restoreWholeFile(path: string, entry: FileLogEntry): void;
+  /** Show the file's full content as it was at this commit (read-only preview). */
+  viewAtCommit(entry: FileLogEntry): void;
   /** Progress line of the operation currently in flight ("" when idle). */
   progressText(): string;
   wrapLines(): boolean;
   showInvisibles(): boolean;
+  /** Custom colours as CSS variables, or null while the toggle is off. */
+  colors(): Record<string, string> | null;
 }
 
 /**
@@ -39,6 +44,12 @@ export class FileHistoryView extends ItemView {
   private expanded = new Set<string>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
+  /**
+   * Diffs already fetched, by commit hash. Without it a theme switch or a
+   * colour tweak re-ran `diff-file` in Termux for every expanded commit —
+   * rerender() promises "no round trip" and now keeps that promise.
+   */
+  private diffCache = new Map<string, { diff: string; truncated: boolean } | null>();
 
   constructor(leaf: WorkspaceLeaf, private actions: FileHistoryActions) {
     super(leaf);
@@ -53,7 +64,9 @@ export class FileHistoryView extends ItemView {
     return base ? `History: ${base}` : "File history";
   }
   getIcon(): string {
-    return "history";
+    // Not "history": that is the repository panel's icon, and on a narrow tab
+    // header the icon is what survives when the title is truncated.
+    return "file-clock";
   }
 
   override getState(): Record<string, unknown> {
@@ -62,9 +75,13 @@ export class FileHistoryView extends ItemView {
 
   override async setState(state: unknown, result: unknown): Promise<void> {
     const s = state as { path?: unknown } | null;
-    if (s && typeof s.path === "string" && s.path !== this.path) {
+    // Reload even when the path is unchanged: the panel is REUSED, so running
+    // "show history" again after a commit used to redisplay the stale list
+    // with no way to refresh it.
+    if (s && typeof s.path === "string") {
       this.path = s.path;
       this.entries = [];
+      this.diffCache.clear();
       this.skip = 0;
       this.exhausted = false;
       this.expanded.clear();
@@ -77,6 +94,19 @@ export class FileHistoryView extends ItemView {
   async onOpen(): Promise<void> {
     this.renderShell();
     if (this.path !== null && this.entries.length === 0) await this.loadMore();
+  }
+
+  /**
+   * Redraw the loaded commits from memory — no Termux round trip. Used when a
+   * display preference (wrap, invisibles, colours) or the theme changes, so
+   * this panel follows them exactly like the diff pane does.
+   */
+  rerender(): void {
+    if (this.path === null) return;
+    const entries = this.entries;
+    this.renderShell();
+    for (const e of entries) this.renderCommit(e);
+    if (!this.exhausted) this.moreBtn?.show();
   }
 
   private renderShell(): void {
@@ -97,7 +127,7 @@ export class FileHistoryView extends ItemView {
 
   private async loadMore(): Promise<void> {
     const path = this.path;
-    if (path === null || this.loading) return;
+    if (path === null || this.loading || this.exhausted) return;
     this.loading = true;
     const waiting = this.listEl?.createDiv({ cls: "ngb-filehist-waiting" });
     if (waiting) this.renderWaiting(waiting, "Loading history");
@@ -112,8 +142,12 @@ export class FileHistoryView extends ItemView {
       });
       return;
     }
-    if (page.length < this.pageSize) this.exhausted = true;
-    else this.moreBtn?.show();
+    if (page.length < this.pageSize) {
+      this.exhausted = true;
+      this.moreBtn?.hide();
+    } else {
+      this.moreBtn?.show();
+    }
     this.entries.push(...page);
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
@@ -151,6 +185,17 @@ export class FileHistoryView extends ItemView {
     titles.createDiv({ cls: "ngb-filehist-change", text: describeFileChange(e) });
     // Restore the whole file from this commit. The label may be clipped on a
     // narrow screen; the icon is a separate element and never is.
+    // Read-only preview of the whole file at this commit. It used to live in a
+    // separate modal reachable only from the command palette; the panel is the
+    // one place a file's history is answered, so it belongs here.
+    const viewAt = header.createEl("button", { cls: "ngb-filehist-restore ngb-filehist-viewat" });
+    const vi = viewAt.createSpan({ cls: "ngb-filehist-restore-icon" });
+    setIcon(vi, "eye");
+    viewAt.setAttribute("aria-label", `Show the file as it was at ${e.hash.slice(0, 8)}`);
+    viewAt.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      this.actions.viewAtCommit(e);
+    });
     const restore = header.createEl("button", { cls: "ngb-filehist-restore" });
     const ic = restore.createSpan({ cls: "ngb-filehist-restore-icon" });
     setIcon(ic, "rotate-ccw");
@@ -176,18 +221,37 @@ export class FileHistoryView extends ItemView {
     if (open) void this.renderCommitDiff(body, e);
   }
 
+  /**
+   * Obsidian calls this on every size change, including a rotation. The
+   * embedded diffs are the same diff2html DOM the diff pane renders, and its
+   * wrapped layout is measured, so they have to be re-measured here too.
+   */
+  override onResize(): void {
+    for (const pane of Array.from(this.contentEl.querySelectorAll<HTMLElement>(".ngb-filehist-diff"))) {
+      pane.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
+      sizeGutter(pane);
+    }
+  }
+
   private async renderCommitDiff(body: HTMLElement, e: FileLogEntry): Promise<void> {
     body.empty();
-    this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
-    const res = await this.actions.loadCommitDiff(e);
+    const cached = this.diffCache.get(e.hash);
+    let res: { diff: string; truncated: boolean } | null;
+    if (cached !== undefined) {
+      res = cached;
+    } else {
+      this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
+      res = await this.actions.loadCommitDiff(e);
+      if (res !== null) this.diffCache.set(e.hash, res);
+    }
     if (!this.expanded.has(e.hash)) return; // collapsed while we waited
     body.empty();
     if (res === null) {
-      body.createEl("p", { cls: "ngb-warning", text: "Could not load this diff." });
+      body.createEl("p", { cls: "ngb-warning", text: "Could not load the diff (see the error message)." });
       return;
     }
     if (res.diff.trim() === "") {
-      body.createEl("p", { cls: "ngb-settings-note", text: "No textual changes in this commit." });
+      body.createEl("p", { cls: "ngb-ok", text: "No differences." });
       return;
     }
     const hunks = parseHunks(res.diff);
@@ -203,6 +267,14 @@ export class FileHistoryView extends ItemView {
       const gutter = tr.querySelector(".d2h-code-linenumber");
       const prefix = tr.querySelector(".d2h-code-line-prefix");
       if (gutter && prefix) gutter.appendChild(prefix);
+    }
+    // Same measured gutter and the same optional colours as the diff pane:
+    // this IS a diff pane, just embedded in a commit row.
+    sizeGutter(pane);
+    const colors = this.actions.colors();
+    for (const name of DIFF_COLOR_VARS) {
+      if (colors && colors[name]) pane.style.setProperty(name, colors[name]!);
+      else pane.style.removeProperty(name);
     }
     if (this.actions.showInvisibles()) markInvisibles(pane);
     // One restore control per block, placed ABOVE its hunk in a bar of its

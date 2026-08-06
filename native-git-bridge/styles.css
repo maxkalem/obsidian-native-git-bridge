@@ -1,20 +1,8 @@
 
 /* Phase 4: history & diff */
 .ngb-output-tall { max-height: 60vh; }
-.ngb-diff-line { font-family: var(--font-monospace); font-size: var(--font-smaller); white-space: pre-wrap; word-break: break-word; }
-.ngb-diff-add  { color: var(--color-green, #08b94e); background: rgba(8, 185, 78, 0.08); }
-.ngb-diff-del  { color: var(--color-red, #e93147); background: rgba(233, 49, 71, 0.08); }
-.ngb-diff-hunk { color: var(--text-accent); }
-.ngb-diff-meta { color: var(--text-muted); }
-.ngb-history-row {
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  padding: var(--size-4-2);
-  margin-bottom: var(--size-4-2);
-  background: var(--background-secondary);
-}
-.ngb-history-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-2); }
-.ngb-history-actions button { font-size: var(--font-ui-small); }
+/* (The line-by-line diff and per-commit row styles that used to live here
+   belonged to two modals that panes replaced; see src/ui/historyViews.ts.) */
 
 /* Source-control style status panel (primary status surface on mobile) */
 .ngb-status-view { padding: var(--size-4-2) var(--size-4-2) var(--size-4-4); }
@@ -297,9 +285,16 @@
    (.d2h-code-wrapper): they follow vertical scrolling with their rows and
    stick to the left edge only while scrolling horizontally. */
 
+/* Defaults. The deleted-character highlight is a solid #AA1414: the
+   translucent red it replaced washed out against the row tint on a phone and
+   the changed characters were the hardest part of the line to find. Its text
+   goes white for the same reason — dark theme text on that red is thin, light
+   theme text on it is unreadable. All four are overridable per theme from the
+   settings ("custom colours"), which writes them inline on the pane. */
 .ngb-diff-view {
   --ngb-diff-del-bg: rgba(255, 71, 80, 0.25);
-  --ngb-diff-del-hl: rgba(150, 5, 10, 0.46);
+  --ngb-diff-del-hl: #AA1414;
+  --ngb-diff-del-hl-fg: #ffffff;
   --ngb-diff-ins-bg: rgba(104, 211, 104, 0.25);
   --ngb-diff-ins-hl: rgba(35, 192, 35, 0.31);
 }
@@ -350,7 +345,7 @@
 }
 .ngb-diff-view .d2h-code-line-prefix { user-select: none; white-space: pre; }
 .ngb-diff-view .d2h-code-line del {
-  background-color: var(--ngb-diff-del-hl); color: var(--text-normal);
+  background-color: var(--ngb-diff-del-hl); color: var(--ngb-diff-del-hl-fg);
 }
 .ngb-diff-view .d2h-code-line del,
 .ngb-diff-view .d2h-code-line ins {
@@ -387,7 +382,15 @@
 .ngb-diff-view.ngb-diff-wrap .d2h-diff-table {
   table-layout: fixed; width: 100%; min-width: 0;
 }
-.ngb-diff-view.ngb-diff-wrap .d2h-code-linenumber { width: 5em; }
+/* Width measured from the real line numbers by DiffView (--ngb-diff-gutter-w).
+   A fixed guess was too small for three-digit numbers: the gutter's content
+   overflowed the cell and the relocated +/- prefix ended up drawn past the
+   border, looking like part of the code. `overflow: hidden` is the backstop —
+   nothing may ever spill out of this column again. */
+.ngb-diff-view.ngb-diff-wrap .d2h-code-linenumber {
+  width: var(--ngb-diff-gutter-w, 6em);
+  overflow: hidden;
+}
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line { white-space: normal; }
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line-ctn {
   display: block; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%;
@@ -500,8 +503,13 @@
 /* ------------------------------------------------ file history view */
 
 /* The path identifies the whole view, so it stays on one line and truncates. */
-.ngb-filehist-path {
+/* The identity line of a file pane: which file, and which two sides are being
+   compared. One rule for all three panes (diff, file history, conflict) — they
+   answer questions about the same thing and used to head themselves in three
+   different ways. Always ONE line: wrapping it would push the content down. */
+.ngb-pane-path, .ngb-filehist-path {
   font-size: var(--font-smaller); color: var(--text-muted);
+  font-family: var(--font-monospace);
   padding-bottom: var(--size-4-2);
   border-bottom: 1px solid var(--background-modifier-border);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
