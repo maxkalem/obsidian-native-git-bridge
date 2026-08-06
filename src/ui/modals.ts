@@ -216,11 +216,20 @@ export class ChangedFilesModal extends Modal {
 }
 
 /** Sparse safety verdict modal, including the mandated warning on failure. */
+/** Recovery actions offered on a blocked safety check (both confirmed first). */
+export interface SparseSafetyFixes {
+  /** Move the listed files to Obsidian's trash, leaving git history alone. */
+  deleteLocally(paths: string[]): void;
+  /** Drop the sparse exclusion for these directories, so they stop being protected. */
+  unprotect(paths: string[]): void;
+}
+
 export class SparseSafetyModal extends Modal {
   constructor(
     app: App,
     private report: SparseSafetyReport,
-    private warningText: string
+    private warningText: string,
+    private fixes?: SparseSafetyFixes
   ) {
     super(app);
   }
@@ -243,14 +252,83 @@ export class SparseSafetyModal extends Modal {
       c.createEl("p", {
         cls: "ngb-settings-note",
         text:
-          "No automatic repair is performed. Use 'Run diagnostics' to inspect the sparse state, " +
-          "and resolve the changes manually in Termux (e.g. review why the protected paths were touched).",
+          "Nothing is repaired automatically. The two fixes below are the usual ones; " +
+          "'Run diagnostics' inspects the sparse state, and anything else is resolved in Termux.",
       });
+      this.renderFixes(c);
     }
     c.createDiv({
       cls: "ngb-settings-note",
       text: `Protected paths: ${this.report.protectedPaths.join(", ")} · checked ${this.report.checkedAt}`,
     });
+  }
+
+  /**
+   * The two recoveries that actually apply here, side by side. Both stay on
+   * one row on a phone: equal flex widths, small type, labels truncated
+   * rather than wrapped, and the detail spelled out underneath instead of in
+   * the button.
+   */
+  private renderFixes(c: HTMLElement): void {
+    if (!this.fixes) return;
+    // Deleting is offered ONLY for paths that are new here (untracked, or
+    // added to the index). Deleting a tracked protected file would turn the
+    // block into a staged deletion, which is the exact accident this plugin
+    // exists to prevent; those the user resolves in Termux.
+    const isNew = (s: string) => s === "untracked" || s === "added";
+    // A path counts as risky if ANY of its violations is something other than
+    // "new here"; the same path can appear twice (worktree and index).
+    const other = new Set(
+      this.report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
+    );
+    const paths = [
+      ...new Set(
+        this.report.violations
+          .filter((v) => isNew(v.status) && !other.has(v.path))
+          .map((v) => v.path)
+      ),
+    ];
+    // Which protected directories the violations actually fall under; dropping
+    // the exclusion for anything else would be unrelated collateral.
+    const allPaths = [...new Set(this.report.violations.map((v) => v.path))];
+    const dirs = this.report.protectedPaths.filter((p) =>
+      allPaths.some((f) => f === p || f.startsWith(`${p}/`))
+    );
+    if (paths.length === 0 && dirs.length === 0) return;
+    const row = c.createDiv({ cls: "ngb-fix-row" });
+    if (paths.length > 0) {
+      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: "Delete files locally" });
+      b.setAttribute("aria-label", `Move ${paths.length} listed files to Obsidian's trash`);
+      b.addEventListener("click", () => {
+        this.close();
+        this.fixes?.deleteLocally(paths);
+      });
+    }
+    if (dirs.length > 0) {
+      const b = row.createEl("button", { cls: "ngb-fix-btn", text: "Unprotect path" });
+      b.setAttribute("aria-label", `Remove ${dirs.join(", ")} from the sparse exclusions`);
+      b.addEventListener("click", () => {
+        this.close();
+        this.fixes?.unprotect(dirs);
+      });
+    }
+    const notes: string[] = [];
+    if (paths.length > 0) {
+      notes.push(
+        `Delete: moves ${paths.length} new file${paths.length === 1 ? "" : "s"} to Obsidian's trash (reversible; git history untouched).`
+      );
+    }
+    if (other.size > 0) {
+      notes.push(
+        `${other.size} listed path${other.size === 1 ? " is" : "s are"} tracked here, so deleting would create the very deletion this check blocks. Resolve those in Termux.`
+      );
+    }
+    if (dirs.length > 0) {
+      notes.push(
+        `Unprotect: removes ${dirs.join(", ")} from the sparse exclusions, so it is checked out and committed like any other directory.`
+      );
+    }
+    c.createDiv({ cls: "ngb-settings-note", text: notes.join(" ") });
   }
 
   onClose(): void {

@@ -58,3 +58,42 @@ describe("evaluateSparseSafety", () => {
     expect(r.violations[0]!.path).toBe("Private/Hidden/Füße.md");
   });
 });
+
+describe("safety-modal recovery eligibility", () => {
+  // The modal offers "delete locally" only for paths that are NEW here.
+  // Deleting a tracked protected file would create a staged deletion, which
+  // is precisely what the gate exists to stop, so those are excluded.
+  const isNew = (s: string) => s === "untracked" || s === "added";
+  const deletable = (report: ReturnType<typeof evaluateSparseSafety>) => {
+    const risky = new Set(
+      report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
+    );
+    return [
+      ...new Set(
+        report.violations
+          .filter((v) => isNew(v.status) && !risky.has(v.path))
+          .map((v) => v.path)
+      ),
+    ];
+  };
+
+  it("offers deletion for an untracked file inside a protected directory", () => {
+    const r = evaluateSparseSafety("?? Private/Mem/new.md\n", "", ["Private/Mem"]);
+    expect(deletable(r)).toEqual(["Private/Mem/new.md"]);
+  });
+
+  it("offers deletion for a newly added (staged) file", () => {
+    const r = evaluateSparseSafety("", "A\tPrivate/Mem/new.md\n", ["Private/Mem"]);
+    expect(deletable(r)).toEqual(["Private/Mem/new.md"]);
+  });
+
+  it("never offers deletion for a modified or deleted tracked path", () => {
+    const r = evaluateSparseSafety(" M Private/Mem/old.md\n", "D\tPrivate/Mem/gone.md\n", ["Private/Mem"]);
+    expect(deletable(r)).toEqual([]);
+  });
+
+  it("excludes a path that is both added and modified (mixed states are not safe to delete)", () => {
+    const r = evaluateSparseSafety("?? Private/Mem/x.md\n", "M\tPrivate/Mem/x.md\n", ["Private/Mem"]);
+    expect(deletable(r)).toEqual([]);
+  });
+});

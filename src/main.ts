@@ -45,6 +45,7 @@ import {
   ResultModal,
   type ResultModalAction,
   SparseSafetyModal,
+  type SparseSafetyFixes,
   StatusModal,
 } from "./ui/modals";
 import { DiagnosticsModal, type DiagnosticsReport } from "./ui/DiagnosticsModal";
@@ -1213,7 +1214,71 @@ export default class NativeGitBridgePlugin extends Plugin {
     const d = result.data ?? {};
     const report = evaluateSparseSafety(d.statusProtected ?? "", d.stagedProtected ?? "", protectedPaths);
     if (!report.safe) this.statusBar?.set("error");
-    new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+    new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING, this.sparseSafetyFixes()).open();
+  }
+
+  /**
+   * The two recoveries the safety modal offers. Both are explicit, confirmed
+   * and reversible in the sense that matters: deleting goes to Obsidian's
+   * trash rather than to `rm`, and unprotecting only edits sparse config, so
+   * git history is never touched here.
+   */
+  private sparseSafetyFixes(): SparseSafetyFixes {
+    return {
+      deleteLocally: (paths) => {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Move these files to the trash?",
+            body: [
+              ...paths.slice(0, 12),
+              paths.length > 12 ? `…and ${paths.length - 12} more` : "",
+              "They go to Obsidian's trash (.trash in the vault), so you can restore them from there. Git history is not touched.",
+            ].filter((l) => l !== ""),
+            confirmLabel: "Move to trash",
+            icon: "trash",
+            danger: true,
+          },
+          async (confirmed) => {
+            if (!confirmed) return;
+            let moved = 0;
+            for (const p of paths) {
+              try {
+                await this.app.vault.adapter.trashLocal(p);
+                moved++;
+              } catch (e) {
+                this.log.add("error", "sparse", `Trash failed for ${p}: ${String(e)}`);
+              }
+            }
+            this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
+            await this.cmdStatus(true);
+          }
+        ).open();
+      },
+      unprotect: (dirs) => {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Stop protecting these directories?",
+            body: [
+              dirs.join(", "),
+              "Their sparse exclusion is removed, so git checks them out again and their contents become ordinary tracked files that this device will commit and push.",
+              "Protection is derived from the sparse rules, so they also disappear from the protected set.",
+            ],
+            confirmLabel: "Remove exclusion",
+            icon: "eye",
+            danger: true,
+          },
+          async (confirmed) => {
+            if (!confirmed) return;
+            // exclude=false takes the no-extra-confirmation path; this modal
+            // already asked, and asking twice per directory is noise.
+            for (const d of dirs) await this.cmdSparseExclude(d, false);
+            await this.cmdStatus(true);
+          }
+        ).open();
+      },
+    };
   }
 
   // -------------------- repo config management (sparse / gitignore / exclude)
@@ -1483,7 +1548,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         this.effectiveProtectedPaths()
       );
       this.statusBar?.set("error");
-      new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+      new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING, this.sparseSafetyFixes()).open();
       return;
     }
     if (err?.code === "CONFLICT") {

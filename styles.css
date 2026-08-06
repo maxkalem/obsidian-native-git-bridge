@@ -461,6 +461,19 @@
   max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
+/* Recovery buttons in the sparse-safety window. Both must fit on ONE row on a
+   phone: equal share of the width, small type, labels truncated instead of
+   wrapped (the full text is in the aria-label and in the note below them). */
+.ngb-fix-row {
+  display: flex; gap: var(--size-4-2); margin: var(--size-4-2) 0;
+}
+.ngb-fix-btn {
+  flex: 1 1 0; min-width: 0;
+  font-size: var(--font-ui-smaller);
+  padding: var(--size-2-3) var(--size-4-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
 /* ---------------------------------------- platform-aware modal action button */
 
 /* The single agree button of confirm/commit modals (no Cancel anywhere: the

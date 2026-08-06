@@ -1055,10 +1055,11 @@ var ChangedFilesModal = class extends import_obsidian2.Modal {
   }
 };
 var SparseSafetyModal = class extends import_obsidian2.Modal {
-  constructor(app, report, warningText) {
+  constructor(app, report, warningText, fixes) {
     super(app);
     this.report = report;
     this.warningText = warningText;
+    this.fixes = fixes;
   }
   onOpen() {
     this.modalEl.addClass("ngb-modal");
@@ -1077,13 +1078,71 @@ var SparseSafetyModal = class extends import_obsidian2.Modal {
       }
       c.createEl("p", {
         cls: "ngb-settings-note",
-        text: "No automatic repair is performed. Use 'Run diagnostics' to inspect the sparse state, and resolve the changes manually in Termux (e.g. review why the protected paths were touched)."
+        text: "Nothing is repaired automatically. The two fixes below are the usual ones; 'Run diagnostics' inspects the sparse state, and anything else is resolved in Termux."
       });
+      this.renderFixes(c);
     }
     c.createDiv({
       cls: "ngb-settings-note",
       text: `Protected paths: ${this.report.protectedPaths.join(", ")} \xB7 checked ${this.report.checkedAt}`
     });
+  }
+  /**
+   * The two recoveries that actually apply here, side by side. Both stay on
+   * one row on a phone: equal flex widths, small type, labels truncated
+   * rather than wrapped, and the detail spelled out underneath instead of in
+   * the button.
+   */
+  renderFixes(c) {
+    if (!this.fixes) return;
+    const isNew = (s) => s === "untracked" || s === "added";
+    const other = new Set(
+      this.report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
+    );
+    const paths = [
+      ...new Set(
+        this.report.violations.filter((v) => isNew(v.status) && !other.has(v.path)).map((v) => v.path)
+      )
+    ];
+    const allPaths = [...new Set(this.report.violations.map((v) => v.path))];
+    const dirs = this.report.protectedPaths.filter(
+      (p) => allPaths.some((f) => f === p || f.startsWith(`${p}/`))
+    );
+    if (paths.length === 0 && dirs.length === 0) return;
+    const row = c.createDiv({ cls: "ngb-fix-row" });
+    if (paths.length > 0) {
+      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: "Delete files locally" });
+      b.setAttribute("aria-label", `Move ${paths.length} listed files to Obsidian's trash`);
+      b.addEventListener("click", () => {
+        this.close();
+        this.fixes?.deleteLocally(paths);
+      });
+    }
+    if (dirs.length > 0) {
+      const b = row.createEl("button", { cls: "ngb-fix-btn", text: "Unprotect path" });
+      b.setAttribute("aria-label", `Remove ${dirs.join(", ")} from the sparse exclusions`);
+      b.addEventListener("click", () => {
+        this.close();
+        this.fixes?.unprotect(dirs);
+      });
+    }
+    const notes = [];
+    if (paths.length > 0) {
+      notes.push(
+        `Delete: moves ${paths.length} new file${paths.length === 1 ? "" : "s"} to Obsidian's trash (reversible; git history untouched).`
+      );
+    }
+    if (other.size > 0) {
+      notes.push(
+        `${other.size} listed path${other.size === 1 ? " is" : "s are"} tracked here, so deleting would create the very deletion this check blocks. Resolve those in Termux.`
+      );
+    }
+    if (dirs.length > 0) {
+      notes.push(
+        `Unprotect: removes ${dirs.join(", ")} from the sparse exclusions, so it is checked out and committed like any other directory.`
+      );
+    }
+    c.createDiv({ cls: "ngb-settings-note", text: notes.join(" ") });
   }
   onClose() {
     this.contentEl.empty();
@@ -6753,7 +6812,68 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     const d = result.data ?? {};
     const report = evaluateSparseSafety(d.statusProtected ?? "", d.stagedProtected ?? "", protectedPaths);
     if (!report.safe) this.statusBar?.set("error");
-    new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+    new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING, this.sparseSafetyFixes()).open();
+  }
+  /**
+   * The two recoveries the safety modal offers. Both are explicit, confirmed
+   * and reversible in the sense that matters: deleting goes to Obsidian's
+   * trash rather than to `rm`, and unprotecting only edits sparse config, so
+   * git history is never touched here.
+   */
+  sparseSafetyFixes() {
+    return {
+      deleteLocally: (paths) => {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Move these files to the trash?",
+            body: [
+              ...paths.slice(0, 12),
+              paths.length > 12 ? `\u2026and ${paths.length - 12} more` : "",
+              "They go to Obsidian's trash (.trash in the vault), so you can restore them from there. Git history is not touched."
+            ].filter((l) => l !== ""),
+            confirmLabel: "Move to trash",
+            icon: "trash",
+            danger: true
+          },
+          async (confirmed) => {
+            if (!confirmed) return;
+            let moved = 0;
+            for (const p of paths) {
+              try {
+                await this.app.vault.adapter.trashLocal(p);
+                moved++;
+              } catch (e) {
+                this.log.add("error", "sparse", `Trash failed for ${p}: ${String(e)}`);
+              }
+            }
+            this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
+            await this.cmdStatus(true);
+          }
+        ).open();
+      },
+      unprotect: (dirs) => {
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Stop protecting these directories?",
+            body: [
+              dirs.join(", "),
+              "Their sparse exclusion is removed, so git checks them out again and their contents become ordinary tracked files that this device will commit and push.",
+              "Protection is derived from the sparse rules, so they also disappear from the protected set."
+            ],
+            confirmLabel: "Remove exclusion",
+            icon: "eye",
+            danger: true
+          },
+          async (confirmed) => {
+            if (!confirmed) return;
+            for (const d of dirs) await this.cmdSparseExclude(d, false);
+            await this.cmdStatus(true);
+          }
+        ).open();
+      }
+    };
   }
   /** Hide (exclude=true) or materialize a path via non-cone sparse patterns. */
   async cmdSparseExclude(path, exclude) {
@@ -6987,7 +7107,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         this.effectiveProtectedPaths()
       );
       this.statusBar?.set("error");
-      new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING).open();
+      new SparseSafetyModal(this.app, report, SPARSE_SAFETY_WARNING, this.sparseSafetyFixes()).open();
       return;
     }
     if (err?.code === "CONFLICT") {
