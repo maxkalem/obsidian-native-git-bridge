@@ -34,6 +34,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 
 **Starting from nothing**: a vault that is not a repository yet can be paired, given a repository (chosen default branch, optional first commit) or have one cloned into it. Cloning into a vault that already holds files never overwrites a single one of them: the repository's other files are checked out, and the ones that exist on both sides keep your version and appear in the panel as ordinary local changes, with a diff to look at before you decide.
 
+**Re-cloning** a vault that already has a repository replaces it only after the new clone has succeeded, and the old repository is set aside with its history intact rather than deleted — with a daily reminder about the disk it uses, and one tap to remove it.
+
 **Authentication** never leaves Termux: a PAT through a credential helper, an SSH key, or GitHub's OAuth device flow through the GitHub CLI (`gh`), configured per repository so two vaults can use two accounts.
 
 **Several vaults on one device**: every vault is a repository of its own with its own Termux profile, its own token and its own credentials; one runner drains them all in one pass, oldest request first. A vault opened inside another vault's repository is kept out of it through the outer repository's `.git/info/exclude` (device-local, nothing tracked is edited), and each side's operations are pinned to its own repository. A second vault can pair itself from the plugin without re-running the installer; a moved vault is found again; a deleted one is reported, never silently replaced.

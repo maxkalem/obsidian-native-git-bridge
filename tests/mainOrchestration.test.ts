@@ -52,6 +52,11 @@ function memAdapter() {
       dirs.delete(p);
       for (const f of [...files.keys()]) if (f.startsWith(p + "/")) files.delete(f);
     },
+    rmdir: async (p: string, recursive: boolean) => {
+      if (!recursive) throw new Error("non-recursive rmdir not used");
+      dirs.delete(p);
+      for (const f of [...files.keys()]) if (f.startsWith(p + "/")) files.delete(f);
+    },
     exists: async (p: string) => files.has(p) || dirs.has(p),
     read: async (p: string) => {
       const v = files.get(p);
@@ -712,6 +717,61 @@ describe("repository bootstrap", () => {
     const result = await (h.plugin as Any).runOperation("init-repo", { branch: "main", initialCommit: true });
     expect(result.ok).toBe(false);
     expect(result.data.initialised).toBe("true");
+  });
+});
+
+describe("a repository set aside by a re-clone", () => {
+  const manifest = (dir: string, sizeKb = 188416) =>
+    JSON.stringify({
+      dir,
+      createdAt: "2026-08-07T10:15:00Z",
+      sizeKb,
+      commits: 1240,
+      branch: "main",
+      lastCommit: "abc1234 2026-08-01 fix typo",
+    });
+
+  it("is found from its manifest, without walking the directory", async () => {
+    const h = await loadPlugin();
+    h.adapter.files.set(`${paths.root}/previous-git-20260807T101500Z.json`, manifest("previous-git-20260807T101500Z"));
+    // A large tree that must never be read to answer the question.
+    for (let i = 0; i < 50; i++) {
+      h.adapter.files.set(`${paths.root}/previous-git-20260807T101500Z/objects/pack/p${i}.pack`, "x");
+    }
+    const repos = await h.plugin.listPreviousRepos();
+    expect(repos).toHaveLength(1);
+    expect(repos[0]).toMatchObject({ dir: "previous-git-20260807T101500Z", commits: 1240 });
+  });
+
+  it("reminds once, then stays quiet for the rest of the day", async () => {
+    const h = await loadPlugin();
+    h.adapter.files.set(`${paths.root}/previous-git-20260807T101500Z.json`, manifest("previous-git-20260807T101500Z"));
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 5));
+    const first = __openedModals.filter((m) => m === "ResultModal").length;
+    expect(first).toBeGreaterThan(0);
+    expect(h.plugin.deviceSettings.previousRepoRemindedAt).toBeGreaterThan(0);
+    __openedModals.length = 0;
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(__openedModals).toHaveLength(0);
+  });
+
+  it("says nothing at all when nothing was set aside", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(h.plugin.deviceSettings.previousRepoRemindedAt).toBe(0);
+  });
+
+  it("never mentions one the user has dismissed", async () => {
+    const h = await loadPlugin();
+    await h.plugin.updateDeviceSettings({ previousRepoDismissed: ["previous-git-20260807T101500Z"] });
+    h.adapter.files.set(`${paths.root}/previous-git-20260807T101500Z.json`, manifest("previous-git-20260807T101500Z"));
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(h.plugin.deviceSettings.previousRepoRemindedAt).toBe(0);
   });
 });
 

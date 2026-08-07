@@ -69,6 +69,14 @@ import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
 import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { isValidBranchName, redactRemoteUrl, validateRemoteUrl } from "./git/remoteUrl";
+import {
+  describePreviousRepo,
+  formatSize,
+  parsePreviousRepo,
+  reposToRemindAbout,
+  PREVIOUS_GIT_PREFIX,
+  type PreviousRepo,
+} from "./git/previousRepos";
 import { registerIcons } from "./ui/icons";
 import {
   COMPANION_DOWNLOAD_APK_URI,
@@ -655,6 +663,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.store.setValue("setup-guide-shown", "1");
       this.openSetupGuide("First run: this device is not set up yet.");
     }
+    // Disk that nobody asked for, in a folder nobody opens: worth one line a day.
+    void this.remindAboutPreviousRepos();
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", "Auto pull on open.");
@@ -906,6 +916,139 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /**
+   * Repositories set aside by a re-clone, read from the manifests the runner
+   * writes next to them. No Termux round trip and no walking of a large
+   * directory: the manifest is a few hundred bytes.
+   */
+  async listPreviousRepos(): Promise<PreviousRepo[]> {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const out: PreviousRepo[] = [];
+    try {
+      const listing = await this.app.vault.adapter.list(root);
+      for (const f of listing.files) {
+        const name = f.slice(f.lastIndexOf("/") + 1);
+        if (!name.startsWith(PREVIOUS_GIT_PREFIX) || !name.endsWith(".json")) continue;
+        const parsed = parsePreviousRepo(await this.app.vault.adapter.read(f));
+        if (parsed) out.push(parsed);
+      }
+    } catch {
+      /* no runtime folder yet, or unreadable */
+    }
+    return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  /**
+   * Once a day, if a re-clone left a repository behind, say so.
+   *
+   * It is invisible (inside a dot-folder inside the config directory) and it
+   * can be hundreds of megabytes on a vault of a few thousand files. Nobody
+   * goes looking for it; the plugin that created it should be the one to
+   * mention it — once a day, never twice in a session, and never again about a
+   * copy the user has decided to keep.
+   */
+  private async remindAboutPreviousRepos(): Promise<void> {
+    const repos = await this.listPreviousRepos();
+    if (repos.length === 0) return;
+    const s = this.deviceSettings;
+    const due = reposToRemindAbout(repos, {
+      lastRemindedAt: s.previousRepoRemindedAt,
+      dismissed: s.previousRepoDismissed,
+    });
+    if (due.length === 0) return;
+    await this.updateDeviceSettings({ previousRepoRemindedAt: Date.now() });
+    this.showPreviousRepoModal(due, "A previous repository is still taking up space");
+  }
+
+  /** The reminder and the settings entry share one window. */
+  showPreviousRepoModal(repos: PreviousRepo[], title: string): void {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+    const lines = [
+      repos.length === 1
+        ? "Re-cloning this vault put the repository it replaced aside instead of deleting it, because it may hold commits that exist nowhere else."
+        : `Re-cloning this vault put ${repos.length} earlier repositories aside instead of deleting them.`,
+      "",
+      ...repos.map((r) => `${r.dir} — ${describePreviousRepo(r)}${r.lastCommit ? `, last: ${r.lastCommit}` : ""}`),
+      "",
+      `Total: ${formatSize(total)}, in ${root}/`,
+      "",
+      "Keeping it costs only disk. Deleting it is final: any commit that exists only there goes with it. To look inside first, in Termux:",
+      `git -C <vault> remote add previous <vault>/${root}/${repos[0]?.dir ?? ""}`,
+      "git -C <vault> fetch previous     # then browse previous/<branch>",
+    ];
+    const actions: ResultModalAction[] = [
+      {
+        label: repos.length === 1 ? "Delete it" : "Delete all of them",
+        onClick: () => this.confirmDeletePreviousRepos(repos),
+      },
+      {
+        label: "Keep, remind me tomorrow",
+        cta: true,
+        onClick: () => undefined,
+      },
+      {
+        label: "Keep, stop reminding",
+        onClick: () => {
+          void this.updateDeviceSettings({
+            previousRepoDismissed: [
+              ...this.deviceSettings.previousRepoDismissed,
+              ...repos.map((r) => r.dir),
+            ],
+          });
+          this.notify("The old repository stays; no more reminders about it.");
+        },
+      },
+    ];
+    new ResultModal(this.app, title, lines, { actions }).open();
+  }
+
+  private confirmDeletePreviousRepos(repos: PreviousRepo[]): void {
+    const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+    const commits = repos.reduce((n, r) => n + r.commits, 0);
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Delete the old repository?",
+        body: [
+          `${repos.length === 1 ? "One repository" : `${repos.length} repositories`}, ${formatSize(total)}, ${commits} commit${commits === 1 ? "" : "s"} in total.`,
+          "Only the history goes: your notes are the files in the vault and are not touched.",
+          "This cannot be undone from here. Any commit that exists only in this copy — anything never pushed — is gone with it.",
+        ],
+        confirmLabel: "Delete permanently",
+        icon: "trash",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const root = new RuntimePaths(this.app.vault.configDir).root;
+        const failed: string[] = [];
+        for (const r of repos) {
+          try {
+            // rmdir(recursive) rather than the trash: this IS the copy that was
+            // kept for safety, and moving it to the trash would only move the
+            // disk usage somewhere the user looks at even less often.
+            await this.app.vault.adapter.rmdir(`${root}/${r.dir}`, true);
+            await this.app.vault.adapter.remove(`${root}/${r.dir}.json`);
+          } catch (e) {
+            failed.push(r.dir);
+            this.log.add("error", "clone", `Could not delete ${r.dir}: ${String(e)}`);
+          }
+        }
+        if (failed.length > 0) {
+          new ResultModal(
+            this.app,
+            "Some copies could not be deleted",
+            [...failed, `Delete them by hand in Termux: rm -rf <vault>/${root}/previous-git-*`],
+            { isError: true }
+          ).open();
+          return;
+        }
+        this.notify(`Freed ${formatSize(total)}.`);
+      }
+    ).open();
+  }
+
+  /**
    * Does this vault hold a repository? Answered from the vault itself, without
    * a Termux round trip: `.git` is either a directory (normal) or a file (a
    * worktree link). Used to decide which bootstrap steps make sense.
@@ -983,6 +1126,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         cta: true,
         keepOpen: true,
         onClick: () => this.promptSetRemote(),
+      });
+      actions.push({
+        label: "Re-clone from a remote",
+        keepOpen: true,
+        onClick: () => this.promptClone(true),
       });
     }
     new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
@@ -1074,7 +1222,31 @@ export default class NativeGitBridgePlugin extends Plugin {
     ).open();
   }
 
-  private promptClone(): void {
+  private promptClone(replaceExisting = false): void {
+    if (replaceExisting) {
+      new ConfirmModal(
+        this.app,
+        {
+          title: "Replace this vault's repository?",
+          body: [
+            "The repository will be cloned again from a remote you give next.",
+            "Your notes are not touched: files that exist on both sides keep your version and show up as local changes, files that exist only here stay untracked.",
+            "The repository that is here now is NOT deleted — it is set aside in the plugin's runtime folder, with its history intact, and you decide later what to do with it.",
+            "Nothing happens until the clone succeeds: a clone that fails leaves everything exactly as it is.",
+          ],
+          confirmLabel: "Choose the remote",
+          icon: "download",
+        },
+        (confirmed) => {
+          if (confirmed) this.askCloneUrl(true);
+        }
+      ).open();
+      return;
+    }
+    this.askCloneUrl(false);
+  }
+
+  private askCloneUrl(replaceExisting: boolean): void {
     new CommitMessageModal(
       this.app,
       {
@@ -1092,7 +1264,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           }).open();
           return;
         }
-        void this.runClone(verdict.url);
+        void this.runClone(verdict.url, replaceExisting);
       }
     ).open();
   }
@@ -1189,8 +1361,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     new ResultModal(this.app, "Repository content taken over", lines.filter((l) => l !== "")).open();
   }
 
-  private async runClone(url: string): Promise<void> {
-    const result = await this.runOperation("clone-into-vault", { url });
+  private async runClone(url: string, replaceExisting = false): Promise<void> {
+    const args: Record<string, unknown> = { url };
+    if (replaceExisting) args.replaceExisting = true;
+    const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
     this.absorbStatusData(result.data ?? {});
@@ -1208,6 +1382,12 @@ export default class NativeGitBridgePlugin extends Plugin {
         collisions.length > 10 ? `…and ${collisions.length - 10} more` : "",
         "",
         "Open each one to see the difference, then commit to keep yours or discard to take the repository's version. Files that exist only here were left alone and are simply untracked."
+      );
+    }
+    if (result.data?.previousGit) {
+      lines.push(
+        "",
+        `The repository that was here is not deleted — it is set aside as ${result.data.previousGit} in the plugin's runtime folder. The plugin will remind you about the disk it uses; delete it once you are sure nothing in it is needed.`
       );
     }
     if (result.data?.configDirTracked === "true" && result.data?.empty !== "true") {

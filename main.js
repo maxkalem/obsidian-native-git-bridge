@@ -747,7 +747,9 @@ var DEFAULT_DEVICE_SETTINGS = {
   menuGitignore: true,
   menuSparse: true,
   menuExclude: true,
-  statusRefreshSeconds: 0
+  statusRefreshSeconds: 0,
+  previousRepoRemindedAt: 0,
+  previousRepoDismissed: []
 };
 var DeviceLocalSettingsStore = class {
   constructor(backend, scopeId) {
@@ -829,6 +831,9 @@ var DeviceLocalSettingsStore = class {
     }
     if (!Array.isArray(merged.derivedProtectedPaths) || merged.derivedProtectedPaths.some((p) => typeof p !== "string")) {
       merged.derivedProtectedPaths = [];
+    }
+    if (!Array.isArray(merged.previousRepoDismissed) || merged.previousRepoDismissed.some((p) => typeof p !== "string")) {
+      merged.previousRepoDismissed = [];
     }
     return merged;
   }
@@ -1312,6 +1317,59 @@ function sanitizeColorSet(raw, mode) {
   return out;
 }
 
+// src/git/previousRepos.ts
+var PREVIOUS_GIT_PREFIX = "previous-git-";
+var DIR_RE = /^previous-git-\d{8}T\d{6}Z$/;
+function isPreviousRepoDir(name) {
+  return DIR_RE.test(name);
+}
+function parsePreviousRepo(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw;
+  if (typeof r.dir !== "string" || !isPreviousRepoDir(r.dir)) return null;
+  const num = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+  const str = (v) => typeof v === "string" ? v : "";
+  return {
+    dir: r.dir,
+    createdAt: str(r.createdAt),
+    sizeKb: num(r.sizeKb),
+    commits: num(r.commits),
+    branch: str(r.branch),
+    lastCommit: str(r.lastCommit)
+  };
+}
+function formatSize(sizeKb) {
+  if (sizeKb <= 0) return "unknown size";
+  if (sizeKb < 1024) return `${sizeKb} KB`;
+  const mb = sizeKb / 1024;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+function describePreviousRepo(r, now = /* @__PURE__ */ new Date()) {
+  const parts = [formatSize(r.sizeKb)];
+  if (r.commits > 0) parts.push(`${r.commits} commit${r.commits === 1 ? "" : "s"}`);
+  if (r.branch) parts.push(r.branch);
+  const days = daysSince(r.createdAt, now);
+  if (days !== null) parts.push(days === 0 ? "set aside today" : `set aside ${days} day${days === 1 ? "" : "s"} ago`);
+  return parts.join(" \xB7 ");
+}
+function daysSince(iso, now = /* @__PURE__ */ new Date()) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((now.getTime() - t) / 864e5));
+}
+var REMIND_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+function reposToRemindAbout(repos, state, now = Date.now()) {
+  if (now - state.lastRemindedAt < REMIND_INTERVAL_MS) return [];
+  return repos.filter((r) => !state.dismissed.includes(r.dir));
+}
+
 // src/settings/SettingsTab.ts
 var import_obsidian5 = require("obsidian");
 var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab {
@@ -1436,6 +1494,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
     ).addButton(
       (b) => b.setButtonText("Set up repository").onClick(() => void this.plugin.cmdSetupRepository())
     );
+    this.renderPreviousReposSetting(containerEl);
     new import_obsidian4.Setting(containerEl).setName("Repository path (informational)").setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.").addText(
       (t) => t.setValue(s.repoPathHint).onChange((v) => {
         void (async () => {
@@ -1681,6 +1740,27 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
    * Switching it on reveals the pickers — light and dark separately, because
    * one set of hex values cannot be legible in both.
    */
+  /**
+   * Only shown when there is something to show: a repository set aside by a
+   * re-clone. It is invisible otherwise, and a permanent empty row would just
+   * be a question nobody has.
+   */
+  renderPreviousReposSetting(containerEl) {
+    const setting = new import_obsidian4.Setting(containerEl).setName("Previous repository copies").setDesc("Checking\u2026");
+    setting.settingEl.hide();
+    void (async () => {
+      const repos = await this.plugin.listPreviousRepos();
+      if (repos.length === 0) return;
+      const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+      setting.setDesc(
+        `${repos.length === 1 ? "One earlier repository was" : `${repos.length} earlier repositories were`} set aside by a re-clone and still use ${formatSize(total)}. Their history is intact; deleting is final.`
+      );
+      setting.addButton(
+        (b) => b.setButtonText("Review").onClick(() => this.plugin.showPreviousRepoModal(repos, "Previous repository copies"))
+      );
+      setting.settingEl.show();
+    })();
+  }
   renderColorSection(containerEl) {
     new import_obsidian4.Setting(containerEl).setName("Custom colours in the diff and conflict panes").setDesc(
       "Off: the panes follow your theme. On: the colours below are used. Cosmetic and shared across devices (stored in data.json)."
@@ -7047,6 +7127,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       this.store.setValue("setup-guide-shown", "1");
       this.openSetupGuide("First run: this device is not set up yet.");
     }
+    void this.remindAboutPreviousRepos();
     if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", "Auto pull on open.");
@@ -7262,6 +7343,129 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     ).open();
   }
   /**
+   * Repositories set aside by a re-clone, read from the manifests the runner
+   * writes next to them. No Termux round trip and no walking of a large
+   * directory: the manifest is a few hundred bytes.
+   */
+  async listPreviousRepos() {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const out = [];
+    try {
+      const listing = await this.app.vault.adapter.list(root);
+      for (const f of listing.files) {
+        const name = f.slice(f.lastIndexOf("/") + 1);
+        if (!name.startsWith(PREVIOUS_GIT_PREFIX) || !name.endsWith(".json")) continue;
+        const parsed = parsePreviousRepo(await this.app.vault.adapter.read(f));
+        if (parsed) out.push(parsed);
+      }
+    } catch {
+    }
+    return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  /**
+   * Once a day, if a re-clone left a repository behind, say so.
+   *
+   * It is invisible (inside a dot-folder inside the config directory) and it
+   * can be hundreds of megabytes on a vault of a few thousand files. Nobody
+   * goes looking for it; the plugin that created it should be the one to
+   * mention it — once a day, never twice in a session, and never again about a
+   * copy the user has decided to keep.
+   */
+  async remindAboutPreviousRepos() {
+    const repos = await this.listPreviousRepos();
+    if (repos.length === 0) return;
+    const s = this.deviceSettings;
+    const due = reposToRemindAbout(repos, {
+      lastRemindedAt: s.previousRepoRemindedAt,
+      dismissed: s.previousRepoDismissed
+    });
+    if (due.length === 0) return;
+    await this.updateDeviceSettings({ previousRepoRemindedAt: Date.now() });
+    this.showPreviousRepoModal(due, "A previous repository is still taking up space");
+  }
+  /** The reminder and the settings entry share one window. */
+  showPreviousRepoModal(repos, title) {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+    const lines = [
+      repos.length === 1 ? "Re-cloning this vault put the repository it replaced aside instead of deleting it, because it may hold commits that exist nowhere else." : `Re-cloning this vault put ${repos.length} earlier repositories aside instead of deleting them.`,
+      "",
+      ...repos.map((r) => `${r.dir} \u2014 ${describePreviousRepo(r)}${r.lastCommit ? `, last: ${r.lastCommit}` : ""}`),
+      "",
+      `Total: ${formatSize(total)}, in ${root}/`,
+      "",
+      "Keeping it costs only disk. Deleting it is final: any commit that exists only there goes with it. To look inside first, in Termux:",
+      `git -C <vault> remote add previous <vault>/${root}/${repos[0]?.dir ?? ""}`,
+      "git -C <vault> fetch previous     # then browse previous/<branch>"
+    ];
+    const actions = [
+      {
+        label: repos.length === 1 ? "Delete it" : "Delete all of them",
+        onClick: () => this.confirmDeletePreviousRepos(repos)
+      },
+      {
+        label: "Keep, remind me tomorrow",
+        cta: true,
+        onClick: () => void 0
+      },
+      {
+        label: "Keep, stop reminding",
+        onClick: () => {
+          void this.updateDeviceSettings({
+            previousRepoDismissed: [
+              ...this.deviceSettings.previousRepoDismissed,
+              ...repos.map((r) => r.dir)
+            ]
+          });
+          this.notify("The old repository stays; no more reminders about it.");
+        }
+      }
+    ];
+    new ResultModal(this.app, title, lines, { actions }).open();
+  }
+  confirmDeletePreviousRepos(repos) {
+    const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+    const commits = repos.reduce((n, r) => n + r.commits, 0);
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Delete the old repository?",
+        body: [
+          `${repos.length === 1 ? "One repository" : `${repos.length} repositories`}, ${formatSize(total)}, ${commits} commit${commits === 1 ? "" : "s"} in total.`,
+          "Only the history goes: your notes are the files in the vault and are not touched.",
+          "This cannot be undone from here. Any commit that exists only in this copy \u2014 anything never pushed \u2014 is gone with it."
+        ],
+        confirmLabel: "Delete permanently",
+        icon: "trash",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const root = new RuntimePaths(this.app.vault.configDir).root;
+        const failed = [];
+        for (const r of repos) {
+          try {
+            await this.app.vault.adapter.rmdir(`${root}/${r.dir}`, true);
+            await this.app.vault.adapter.remove(`${root}/${r.dir}.json`);
+          } catch (e) {
+            failed.push(r.dir);
+            this.log.add("error", "clone", `Could not delete ${r.dir}: ${String(e)}`);
+          }
+        }
+        if (failed.length > 0) {
+          new ResultModal(
+            this.app,
+            "Some copies could not be deleted",
+            [...failed, `Delete them by hand in Termux: rm -rf <vault>/${root}/previous-git-*`],
+            { isError: true }
+          ).open();
+          return;
+        }
+        this.notify(`Freed ${formatSize(total)}.`);
+      }
+    ).open();
+  }
+  /**
    * Does this vault hold a repository? Answered from the vault itself, without
    * a Termux round trip: `.git` is either a directory (normal) or a file (a
    * worktree link). Used to decide which bootstrap steps make sense.
@@ -7331,6 +7535,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         cta: true,
         keepOpen: true,
         onClick: () => this.promptSetRemote()
+      });
+      actions.push({
+        label: "Re-clone from a remote",
+        keepOpen: true,
+        onClick: () => this.promptClone(true)
       });
     }
     new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
@@ -7414,7 +7623,30 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       }
     ).open();
   }
-  promptClone() {
+  promptClone(replaceExisting = false) {
+    if (replaceExisting) {
+      new ConfirmModal(
+        this.app,
+        {
+          title: "Replace this vault's repository?",
+          body: [
+            "The repository will be cloned again from a remote you give next.",
+            "Your notes are not touched: files that exist on both sides keep your version and show up as local changes, files that exist only here stay untracked.",
+            "The repository that is here now is NOT deleted \u2014 it is set aside in the plugin's runtime folder, with its history intact, and you decide later what to do with it.",
+            "Nothing happens until the clone succeeds: a clone that fails leaves everything exactly as it is."
+          ],
+          confirmLabel: "Choose the remote",
+          icon: "download"
+        },
+        (confirmed) => {
+          if (confirmed) this.askCloneUrl(true);
+        }
+      ).open();
+      return;
+    }
+    this.askCloneUrl(false);
+  }
+  askCloneUrl(replaceExisting) {
     new CommitMessageModal(
       this.app,
       {
@@ -7432,7 +7664,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           }).open();
           return;
         }
-        void this.runClone(verdict.url);
+        void this.runClone(verdict.url, replaceExisting);
       }
     ).open();
   }
@@ -7526,8 +7758,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     new ResultModal(this.app, "Repository content taken over", lines.filter((l) => l !== "")).open();
   }
-  async runClone(url) {
-    const result = await this.runOperation("clone-into-vault", { url });
+  async runClone(url, replaceExisting = false) {
+    const args = { url };
+    if (replaceExisting) args.replaceExisting = true;
+    const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
     this.absorbStatusData(result.data ?? {});
@@ -7545,6 +7779,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         collisions.length > 10 ? `\u2026and ${collisions.length - 10} more` : "",
         "",
         "Open each one to see the difference, then commit to keep yours or discard to take the repository's version. Files that exist only here were left alone and are simply untracked."
+      );
+    }
+    if (result.data?.previousGit) {
+      lines.push(
+        "",
+        `The repository that was here is not deleted \u2014 it is set aside as ${result.data.previousGit} in the plugin's runtime folder. The plugin will remind you about the disk it uses; delete it once you are sure nothing in it is needed.`
       );
     }
     if (result.data?.configDirTracked === "true" && result.data?.empty !== "true") {

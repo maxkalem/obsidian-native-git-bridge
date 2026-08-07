@@ -43,6 +43,14 @@ export interface DeviceLocalSettings {
   /** File context menu: show the .git/info/exclude add/remove entries. */
   menuExclude: boolean;
   /**
+   * Epoch ms of the last "you still have an old repository set aside" reminder.
+   * Device-local: the copy sits on THIS device's disk, and so does the decision
+   * about it.
+   */
+  previousRepoRemindedAt: number;
+  /** Set-aside repositories the user asked not to be reminded about again. */
+  previousRepoDismissed: string[];
+  /**
    * Auto-refresh status this often (seconds) while the status panel is open.
    * 0 = off. Device-local: every refresh wakes Termux, so this is a per-device
    * battery decision, never synced.
@@ -77,6 +85,8 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   menuSparse: true,
   menuExclude: true,
   statusRefreshSeconds: 0,
+  previousRepoRemindedAt: 0,
+  previousRepoDismissed: [],
 };
 
 /** Minimal localStorage-compatible backend, injectable for tests. */
@@ -190,6 +200,12 @@ export class DeviceLocalSettingsStore {
       merged.derivedProtectedPaths.some((p) => typeof p !== "string")
     ) {
       merged.derivedProtectedPaths = [];
+    }
+    if (
+      !Array.isArray(merged.previousRepoDismissed) ||
+      merged.previousRepoDismissed.some((p) => typeof p !== "string")
+    ) {
+      merged.previousRepoDismissed = [];
     }
     return merged;
   }

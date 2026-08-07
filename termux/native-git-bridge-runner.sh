@@ -1537,6 +1537,54 @@ pick_remote_branch() { # $1 = requested branch or empty
   return 1
 }
 
+# Put the vault's current repository aside instead of destroying it.
+#
+# It may hold commits that exist nowhere else, and a repository is the one kind
+# of data whose loss is invisible: a missing file is noticed today, a missing
+# commit in three weeks. So it is RENAMED (same filesystem, instant, no copy)
+# into the runtime folder, and a small manifest next to it records what it was —
+# size, commits, branch, last commit — so the plugin can describe it later
+# without walking a large directory.
+STASHED_GIT=""
+stash_existing_git() {
+  local ts name dir commits branch last size
+  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+  name="previous-git-$ts"
+  dir="$NGB_RUNTIME_DIR/$name"
+  [ -e "$dir" ] && { ERROR=$(err_json GIT_FAILED "A previous repository copy with this name already exists." "" ""); return 1; }
+  # Facts have to be gathered while .git is still in place.
+  commits="$(git rev-list --count --all 2>/dev/null || echo 0)"
+  branch="$(git symbolic-ref --short -q HEAD || echo '(detached)')"
+  last="$(git log -1 --format='%h %cs %s' 2>/dev/null || true)"
+  if ! mv "$NGB_REPO_DIR/.git" "$dir"; then
+    ERROR=$(err_json GIT_FAILED "The existing repository could not be moved aside; nothing was changed." "" "")
+    return 1
+  fi
+  size="$(du -sk "$dir" 2>/dev/null | cut -f1)"
+  printf '%s' "${size:-0}" | grep -Eq '^[0-9]+$' || size=0
+  jq -n --arg dir "$name" --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --argjson sizeKb "$size" --argjson commits "${commits:-0}" \
+        --arg branch "$branch" --arg lastCommit "$last" \
+        '{dir:$dir,createdAt:$createdAt,sizeKb:$sizeKb,commits:$commits,branch:$branch,lastCommit:$lastCommit}' \
+    > "$NGB_RUNTIME_DIR/$name.json" 2>/dev/null || true
+  STASHED_GIT="$name"
+  log "CLONE moved the existing repository aside as $name (${size:-0} KB, ${commits:-0} commits)"
+  return 0
+}
+
+# Undo the stash: used when the clone fails after the old repository was moved.
+restore_stashed_git() {
+  [ -n "$STASHED_GIT" ] || return 0
+  [ -e "$NGB_REPO_DIR/.git" ] && return 1
+  if mv "$NGB_RUNTIME_DIR/$STASHED_GIT" "$NGB_REPO_DIR/.git" 2>/dev/null; then
+    rm -f "$NGB_RUNTIME_DIR/$STASHED_GIT.json"
+    log "CLONE restored the existing repository after a failure"
+    STASHED_GIT=""
+    return 0
+  fi
+  return 1
+}
+
 action_init_repo() {
   local req_file="$1" branch msg initial
   branch=$(jq -r '.args.branch // "main"' "$req_file")
@@ -1701,9 +1749,11 @@ action_adopt_remote() {
 # move is a rename), move the .git in, then decide what to do about files that
 # exist on both sides. Nothing is overwritten without being asked.
 action_clone_into_vault() {
-  local req_file="$1" url branch tmp head_branch
+  local req_file="$1" url branch tmp head_branch replace
   url=$(jq -r '.args.url // empty' "$req_file")
   branch=$(jq -r '.args.branch // empty' "$req_file")
+  replace=$(jq -r '.args.replaceExisting // false' "$req_file")
+  STASHED_GIT=""
   if ! valid_remote_url "$url"; then
     ERROR=$(err_json BAD_REQUEST \
       "Invalid remote URL. Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git or file:///absolute/path. A URL with a password in it is refused: keep credentials in Termux (credential helper or SSH key)." "" "")
@@ -1712,7 +1762,7 @@ action_clone_into_vault() {
   if [ -n "$branch" ] && ! valid_branch_name "$branch"; then
     ERROR=$(err_json BAD_REQUEST "Invalid branch name." "" ""); return 1
   fi
-  if [ "$PROFILE_STATE" = "ready" ]; then
+  if [ "$PROFILE_STATE" = "ready" ] && [ "$replace" != "true" ]; then
     ERROR=$(err_json REPO_EXISTS "This vault is already a git repository; refusing to clone over it." "" "")
     return 1
   fi
@@ -1736,20 +1786,24 @@ action_clone_into_vault() {
     rm -rf "$tmp"
     ERROR=$(err_json GIT_FAILED "The clone produced no repository." "" ""); return 1
   fi
-  # Move into place. Same filesystem, so this is a rename: the vault is either
-  # without a repository or with a complete one, never half way.
-  #
-  # The guard matters: `mv src dst` where dst is an existing DIRECTORY moves
-  # src inside it, producing .git/.git. A repository appearing between the
-  # state check above and this line is unlikely, but the failure would be
-  # bizarre and hard to diagnose.
+  # The clone has succeeded, so now — and only now — the vault's existing
+  # repository may be disturbed. Doing it in this order means a clone that
+  # fails (bad URL, no credentials, connection lost) never touches what is
+  # already there.
   if [ -e "$NGB_REPO_DIR/.git" ]; then
-    rm -rf "$tmp"
-    ERROR=$(err_json REPO_EXISTS "A repository appeared in this vault while the clone was running; nothing was changed." "" "")
-    return 1
+    if [ "$replace" != "true" ]; then
+      rm -rf "$tmp"
+      ERROR=$(err_json REPO_EXISTS "A repository appeared in this vault while the clone was running; nothing was changed." "" "")
+      return 1
+    fi
+    if ! stash_existing_git; then
+      rm -rf "$tmp"
+      return 1
+    fi
   fi
   if ! mv "$tmp/repo/.git" "$NGB_REPO_DIR/.git"; then
     rm -rf "$tmp"
+    restore_stashed_git || true
     ERROR=$(err_json GIT_FAILED "Could not move the cloned repository into the vault." "" ""); return 1
   fi
   rm -rf "$tmp"
@@ -1839,7 +1893,7 @@ action_clone_into_vault() {
   collect_status_fields
   DATA=$(merge_data "$DATA" "$(obj_from_fields \
     cloned "true" branch "$head_branch" collisions "$collisions" \
-    configDirTracked "$config_tracked")")
+    configDirTracked "$config_tracked" previousGit "$STASHED_GIT")")
 }
 
 # ---- request processing ------------------------------------------------------

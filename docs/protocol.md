@@ -124,7 +124,7 @@ Until v11 the plugin assumed the vault already was a repository with a working r
 - **`init-repo`** — `args.branch` (default `main`), `args.initialCommit`, `args.message`. Creates a repository in the vault, sets the default branch explicitly, writes the runtime exclude, optionally makes the first commit. It refuses `REPO_EXISTS` when one is already there. Once `git init` has run the repository EXISTS, so a failure after that point (no `user.name`, for example) is reported with `data.initialised = true` and a message that says so, never as a bare "init failed".
 - **`set-remote`** — `args.url`. Adds `origin`, or changes it when it is already there. Returns the previous URL redacted, plus what it found: `remoteReachable`, `remoteBranches` (from `ls-remote`, 30 s budget, an unreachable remote is reported as unknown rather than as a failure) and `localCommits`. Those three decide what can happen next.
 - **`adopt-remote`** — optional `args.branch`. Takes an already configured remote's history into a repository that has **no commits of its own**: fetch, point HEAD at the branch, then the same two steps the clone uses. It refuses when the local side already has commits, because then the two histories are unrelated and no automatic answer would be honest.
-- **`clone-into-vault`** — `args.url`, optional `args.branch`.
+- **`clone-into-vault`** — `args.url`, optional `args.branch`, optional `args.replaceExisting`.
 
 ### Cloning into a directory that is not empty
 
@@ -168,6 +168,28 @@ both routes end with exactly
 ```
 
 and the only entries in `git status` are the files that existed on both sides (kept as the vault's version, shown as modified) plus whatever the vault had of its own (untracked). The e2e suite asserts that listing literally, for both routes, against a vault populated the way Obsidian really leaves one.
+
+### Re-cloning a vault that already has a repository
+
+`replaceExisting: true` is the only way past `REPO_EXISTS`, and the order is what makes it safe: the clone happens **first**, into `runtime/clone-tmp/`, and the vault's existing repository is not touched until that clone has succeeded. A re-clone that fails on a bad URL, missing credentials or a dropped connection changes nothing at all.
+
+When it succeeds, the old `.git` is **renamed** (never deleted) to `runtime/previous-git-<timestamp>/`, and a manifest is written beside it:
+
+```json
+{"dir":"previous-git-20260807T101500Z","createdAt":"…","sizeKb":188416,
+ "commits":1240,"branch":"main","lastCommit":"abc1234 2026-08-01 fix typo"}
+```
+
+A repository is the one kind of data whose loss is invisible — a missing file is noticed today, a missing commit in three weeks — so it is kept, and the decision is left to the user. The manifest exists so the plugin can describe it (size, commits, branch, last commit) without walking a directory that may hold hundreds of megabytes. If anything fails after the rename, the old repository is moved back.
+
+The old history stays fully usable: it is a valid git directory, so it can be attached to the new repository and browsed, cherry-picked or merged deliberately —
+
+```
+git -C <vault> remote add previous <vault>/<runtime>/previous-git-<timestamp>
+git -C <vault> fetch previous
+```
+
+Nothing removes it automatically. The plugin reminds the user about the disk it uses once a day (device-local: the copy is on this device and so is the decision), offers to delete it with an explicit confirmation, and offers "stop reminding about this one". The reminder never fires when there is nothing set aside.
 
 ### The two ways in end in the same place
 

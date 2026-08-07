@@ -6,6 +6,7 @@ import { ConfirmModal } from "../ui/modals";
 import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
+import { formatSize } from "../git/previousRepos";
 import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
@@ -190,6 +191,8 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .addButton((b) =>
         b.setButtonText("Set up repository").onClick(() => void this.plugin.cmdSetupRepository())
       );
+
+    this.renderPreviousReposSetting(containerEl);
 
     new Setting(containerEl)
       .setName("Repository path (informational)")
@@ -522,6 +525,33 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
    * Switching it on reveals the pickers — light and dark separately, because
    * one set of hex values cannot be legible in both.
    */
+  /**
+   * Only shown when there is something to show: a repository set aside by a
+   * re-clone. It is invisible otherwise, and a permanent empty row would just
+   * be a question nobody has.
+   */
+  private renderPreviousReposSetting(containerEl: HTMLElement): void {
+    const setting = new Setting(containerEl)
+      .setName("Previous repository copies")
+      .setDesc("Checking…");
+    setting.settingEl.hide();
+    void (async () => {
+      const repos = await this.plugin.listPreviousRepos();
+      if (repos.length === 0) return;
+      const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+      setting.setDesc(
+        `${repos.length === 1 ? "One earlier repository was" : `${repos.length} earlier repositories were`} ` +
+          `set aside by a re-clone and still use ${formatSize(total)}. Their history is intact; deleting is final.`
+      );
+      setting.addButton((b) =>
+        b
+          .setButtonText("Review")
+          .onClick(() => this.plugin.showPreviousRepoModal(repos, "Previous repository copies"))
+      );
+      setting.settingEl.show();
+    })();
+  }
+
   private renderColorSection(containerEl: HTMLElement): void {
     new Setting(containerEl)
       .setName("Custom colours in the diff and conflict panes")

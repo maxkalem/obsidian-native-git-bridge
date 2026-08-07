@@ -1250,6 +1250,46 @@ check '[ -f "$BOOT/ShapeClone/.obsidian/workspace.json" ]' "a file the remote gi
 check '[ -f "$BOOT/ShapeClone/Private/Hidden/mem.md" ] && [ -f "$BOOT/ShapeClone/Projects/Archive/spec.md" ]' "the repository's own folders are all checked out"
 check '[ "$(git -C "$BOOT/ShapeClone" rev-parse HEAD)" = "$(git -C "$BOOT/ShapeInit" rev-parse HEAD)" ]' "…on the same commit either way"
 
+echo "# phase 7: re-cloning a vault that already has a repository"
+# The old repository may hold commits that exist nowhere else, so it is set
+# aside, never deleted — and only after the new clone has actually succeeded.
+newvault "$BOOT/ReClone"
+mkdir -p "$BOOT/ReClone/Notes"
+echo "local version" > "$BOOT/ReClone/Notes/note.md"
+echo "only here" > "$BOOT/ReClone/mine.md"
+brun >/dev/null
+RC_RT="$BOOT/ReClone/.obsidian/plugins/native-git-bridge/runtime"
+RC_TOKEN="$(jq -r .token "$RC_RT/pairing.json")"; RC_PID="$(jq -r .profileId "$RC_RT/pairing.json")"
+breq "$RC_RT" "r-20260806T112000Z-rc01" "$RC_TOKEN" init-repo "$RC_PID" '{"branch":"scratch","initialCommit":true,"message":"e2e: history of its own"}'
+brun >/dev/null
+OLD_HEAD="$(git -C "$BOOT/ReClone" rev-parse HEAD)"
+breq "$RC_RT" "r-20260806T112001Z-rc02" "$RC_TOKEN" clone-into-vault "$RC_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+check 'jq -e ".error.code == \"REPO_EXISTS\"" "$RC_RT/results/r-20260806T112001Z-rc02.json" >/dev/null' "without asking, an existing repository is still never replaced"
+# A clone that FAILS must leave the existing repository exactly where it is.
+breq "$RC_RT" "r-20260806T112002Z-rc03" "$RC_TOKEN" clone-into-vault "$RC_PID" '{"url":"file:///nonexistent/nope.git","replaceExisting":true}'
+brun >/dev/null
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$RC_RT/results/r-20260806T112002Z-rc03.json" >/dev/null' "a failing re-clone fails"
+check '[ "$(git -C "$BOOT/ReClone" rev-parse HEAD)" = "$OLD_HEAD" ]' "…and the existing repository is untouched"
+check '[ -z "$(ls -d "$RC_RT"/previous-git-* 2>/dev/null)" ]' "…and nothing was set aside"
+breq "$RC_RT" "r-20260806T112003Z-rc04" "$RC_TOKEN" clone-into-vault "$RC_PID" "{\"url\":\"file://$ROOT/remote.git\",\"replaceExisting\":true}"
+brun >/dev/null
+RES="$RC_RT/results/r-20260806T112003Z-rc04.json"
+PREV="$(jq -r .data.previousGit "$RES")"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "asked explicitly, the re-clone runs"
+check 'printf %s "$PREV" | grep -Eq "^previous-git-[0-9]{8}T[0-9]{6}Z$"' "the result names where the old repository went"
+check '[ -d "$RC_RT/$PREV" ] && [ -f "$RC_RT/$PREV.json" ]' "the old repository and its manifest are in the runtime folder"
+check '[ "$(git --git-dir="$RC_RT/$PREV" rev-parse HEAD)" = "$OLD_HEAD" ]' "the old history is intact and readable"
+check '[ "$(jq -r .branch "$RC_RT/$PREV.json")" = "scratch" ]' "the manifest records the branch it was on"
+check '[ "$(jq -r .commits "$RC_RT/$PREV.json")" -ge 1 ]' "…how many commits it had"
+check '[ "$(jq -r .sizeKb "$RC_RT/$PREV.json")" -gt 0 ]' "…and how much disk it uses, so the plugin can say so"
+check 'git -C "$BOOT/ReClone" remote add previous "$RC_RT/$PREV" && git -C "$BOOT/ReClone" fetch -q previous && git -C "$BOOT/ReClone" rev-parse --verify -q previous/scratch >/dev/null' "the old history can be attached to the new repository as a remote"
+# And the new repository behaves exactly like any other clone.
+check '[ "$(cat "$BOOT/ReClone/Notes/note.md")" = "local version" ]' "the vault's own file version is kept"
+check 'git -C "$BOOT/ReClone" status --porcelain | grep -q "^ M Notes/note.md"' "…shown as a local change"
+check '[ -f "$BOOT/ReClone/mine.md" ]' "a file that exists only in the vault is untouched"
+check '[ "$(git -C "$BOOT/ReClone" rev-parse HEAD)" != "$OLD_HEAD" ]' "the new history is the remote's"
+
 echo "# phase 7: a remote whose HEAD points at a branch it does not have"
 # `git init --bare` writes HEAD -> master; pushing only `main` leaves that HEAD
 # dangling. Plain `git clone` gives up here and leaves an unusable repository.
