@@ -47,6 +47,21 @@ export class HistoryView extends ItemView {
   private savedScroll = 0;
   /** State line in the strip, mirroring the status panel's. */
   private progressEl: HTMLElement | null = null;
+  /**
+   * The refresh button, kept so its animation can follow `loading`.
+   *
+   * It used to be decided once, inside `renderShell`, from a flag that
+   * `loadMore` sets afterwards — so the button never span at all, no matter how
+   * long the runner took.
+   */
+  private refreshBtn: HTMLElement | null = null;
+  /**
+   * Interval behind the in-list wait indicator. One per load, cleared when the
+   * load ends: `registerInterval` ties an interval to the VIEW's lifetime, so
+   * without this every refresh left another timer ticking into a detached node
+   * until the panel was closed.
+   */
+  private waitTicker: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, private actions: HistoryViewActions) {
     super(leaf);
@@ -109,15 +124,15 @@ export class HistoryView extends ItemView {
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Refresh history");
     setIcon(refreshBtn, "refresh-cw");
-    if (this.loading) refreshBtn.addClass("ngb-anim-spin", "ngb-sv-icon-active");
     refreshBtn.addEventListener("click", () => void this.refresh());
+    this.refreshBtn = refreshBtn;
 
     // The strip mirrors the status panel's: state on the left, the two view
     // controls on the right.
     const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
     const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
-    this.applyStripState();
+    this.applyLoadingState();
     const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
     // Same tree/list toggle as the status panel: icon = CURRENT layout.
     const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
@@ -142,10 +157,21 @@ export class HistoryView extends ItemView {
   }
 
   /**
-   * The strip's state line. "Idle" is the same word the status panel uses, so
-   * the two panels do not describe the same condition differently.
+   * The strip's state line and the refresh animation, both driven by `loading`.
+   *
+   * Called whenever `loading` changes rather than only at render time. An
+   * indicator that keeps moving after the work stopped is worse than no
+   * indicator: it says the runner is busy when it is not. The same rule applies
+   * to a refused operation, where the animation must never start.
+   *
+   * "Idle" is the word the status panel uses, so the two panels do not describe
+   * the same condition differently.
    */
-  private applyStripState(): void {
+  private applyLoadingState(): void {
+    if (this.refreshBtn) {
+      this.refreshBtn.toggleClass("ngb-anim-spin", this.loading);
+      this.refreshBtn.toggleClass("ngb-sv-icon-active", this.loading);
+    }
     if (!this.progressEl) return;
     const p = this.actions.progressText();
     const running = this.loading || p !== "";
@@ -165,7 +191,7 @@ export class HistoryView extends ItemView {
   private async loadMore(): Promise<void> {
     if (this.loading) return;
     this.loading = true;
-    this.applyStripState();
+    this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading…");
@@ -176,8 +202,9 @@ export class HistoryView extends ItemView {
     if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(this.skip, this.pageSize);
     waiting?.remove();
+    this.stopWaitTicker();
     this.loading = false;
-    this.applyStripState();
+    this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
       this.moreBtn.setText("Load more");
@@ -212,7 +239,18 @@ export class HistoryView extends ItemView {
       text.setText(p === "" ? `${what}…` : p);
     };
     tick();
-    this.registerInterval(window.setInterval(tick, 500));
+    // Registered with the view AND remembered here. `registerInterval` only
+    // guarantees the timer dies with the panel, which left one ticking per
+    // refresh, each writing into a node that had already been removed.
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+  }
+
+  private stopWaitTicker(): void {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
   }
 
   private renderCommit(e: RepoLogEntry): void {

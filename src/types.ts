@@ -47,7 +47,13 @@ export type BridgeAction =
    * will do to a protected path, and only for paths that HEAD does not
    * contain — see the runner for why that constraint is what makes it safe.
    */
-  | "unstage-protected";
+  | "unstage-protected"
+  /**
+   * Apply one patch to the index or the working tree, forward or reversed.
+   * Stage, unstage and discard a hunk are the same operation pointed three
+   * ways, so they share one action.
+   */
+  | "apply-patch";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -74,6 +80,7 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["abort-rebase", 11],
   ["continue-rebase", 11],
   ["unstage-protected", 11],
+  ["apply-patch", 12],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -100,6 +107,7 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "abort-rebase",
   "continue-rebase",
   "unstage-protected",
+  "apply-patch",
 ]);
 
 export interface BridgeRequest {

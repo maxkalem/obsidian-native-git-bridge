@@ -60,8 +60,16 @@ describe("sanitizeColorSet", () => {
 });
 
 describe("gutterWidthCh", () => {
-  const fake = (nums: string[]) =>
-    ({ querySelectorAll: () => nums.map((t) => ({ textContent: t })) }) as unknown as ParentNode;
+  /**
+   * `picking` stands in for line-selection mode, where a checkbox shares the
+   * cell with the numbers and the measurement has to allow for it.
+   */
+  const fake = (nums: string[], picking = false) =>
+    ({
+      querySelectorAll: () => nums.map((t) => ({ textContent: t })),
+      querySelector: (sel: string) =>
+        sel === ".ngb-line-pick" && picking ? ({} as unknown) : null,
+    }) as unknown as ParentNode;
 
   it("grows with the longest line number, so the +/- prefix stays inside the gutter", () => {
     // The wrapped layout needs an explicit width on the number column. A fixed
@@ -77,5 +85,11 @@ describe("gutterWidthCh", () => {
   it("never returns zero for an empty diff", () => {
     expect(gutterWidthCh(fake([]))).toBeGreaterThan(0);
     expect(gutterWidthCh(fake(["", "  "]))).toBeGreaterThan(0);
+  });
+
+  // The checkbox shares the cell with the numbers, and the wrapped layout takes
+  // this measurement as the column's fixed width.
+  it("leaves room for the line checkbox while picking", () => {
+    expect(gutterWidthCh(fake(["1", "7"], true))).toBeGreaterThan(gutterWidthCh(fake(["1", "7"])));
   });
 });

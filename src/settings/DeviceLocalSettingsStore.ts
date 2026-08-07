@@ -56,7 +56,27 @@ export interface DeviceLocalSettings {
    * battery decision, never synced.
    */
   statusRefreshSeconds: number;
+  /**
+   * Budget for one diff, in KB. Device-local: it trades detail for how long the
+   * pane takes to build, and that is a property of the phone, not of the vault.
+   *
+   * The runner keeps whole hunks within the budget and reports how many it had
+   * to leave out, so the pane can offer to fetch the rest once. Measured at
+   * roughly 12 DOM nodes per diff line, which is what actually decides whether
+   * a diff feels instant or not.
+   */
+  diffLimitKb: number;
 }
+
+/** Selectable budgets, in KB. The default is deliberately modest. */
+export const DIFF_LIMIT_CHOICES_KB = [50, 100, 200, 500, 1024] as const;
+export const DEFAULT_DIFF_LIMIT_KB = 100;
+/**
+ * Ceiling for a ONE-OFF override, when the user asks to see a diff the setting
+ * would cut. Past this the result writer truncates the field mid-line, which
+ * would undo hunk-aligned cutting.
+ */
+export const DIFF_LIMIT_ABSOLUTE_MAX_KB = 4096;
 
 export const CURRENT_SCHEMA_VERSION = 1;
 
@@ -85,6 +105,7 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   menuSparse: true,
   menuExclude: true,
   statusRefreshSeconds: 0,
+  diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
   previousRepoDismissed: [],
 };

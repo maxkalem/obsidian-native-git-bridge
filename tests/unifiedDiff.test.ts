@@ -75,6 +75,57 @@ describe("parseUnifiedDiff", () => {
     expect(lines[0]!.runs).toBeUndefined();
   });
 
+  // Inside a hunk body the first character is the marker and the rest is
+  // content, always. A note line `-- signature` arrives as `--- signature` when
+  // it is removed, and `++ list` as `+++ list` when it is added; both used to
+  // match the file-header check and vanish from the rendered diff.
+  it("reads content that looks like a file header as content", () => {
+    const lines = parseUnifiedDiff(`--- a/f.md
++++ b/f.md
+@@ -1,2 +1,2 @@
+--- signature
++++ signature
+`)[0]!.hunks[0]!.lines;
+    expect(lines.map((l) => [l.kind, l.text])).toEqual([
+      ["delete", "-- signature"],
+      ["insert", "++ signature"],
+    ]);
+  });
+
+  // The header's counts are what separate the body from what follows it.
+  it("stops reading the body once the counts are spent", () => {
+    const files = parseUnifiedDiff(`--- a/one.md
++++ b/one.md
+@@ -1 +1 @@
+-a
++b
+--- a/two.md
++++ b/two.md
+@@ -1 +1 @@
+-c
++d
+`);
+    // Both `+++ b/two.md` lines land outside a body, so the second file's path
+    // is picked up rather than swallowed as an added line.
+    expect(files.map((f) => f.path)).toEqual(["two.md"]);
+    expect(files[0]!.hunks).toHaveLength(2);
+  });
+
+  // A diff is capped at 200 KB by the runner, so a hunk can be cut off before
+  // its counts run out. The next header still has to win.
+  it("a truncated hunk does not swallow the next one", () => {
+    const files = parseUnifiedDiff(`+++ b/f.md
+@@ -1,50 +1,50 @@
+-a
++b
+@@ -90,2 +90,2 @@
+-c
++d
+`);
+    expect(files[0]!.hunks).toHaveLength(2);
+    expect(files[0]!.hunks[1]!.lines.map((l) => l.text)).toEqual(["c", "d"]);
+  });
+
   it("ignores metadata before the first hunk", () => {
     const lines = parseUnifiedDiff(SAMPLE)[0]!.hunks[0]!.lines;
     // `index`, `--- a/…`, `+++ b/…` must never become diff lines: the `---`

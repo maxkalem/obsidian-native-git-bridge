@@ -43,8 +43,8 @@ Termux side (runner ≥ 10), mode 600, never inside a vault:
 
 - `id`: `^r-[0-9TZ.-]+-[a-z0-9]+$`, unique per request.
 - `profileId` (runner ≥ 10, optional): which paired vault the request belongs to, `^p-[0-9a-f]{8,32}$`. It is **looked up** in `profiles/`, never used as a path, and a request naming a profile other than the one that owns the request directory is rejected with `BAD_REQUEST`. Omitted while a vault has not learned its id yet (pairings from before v10); the token then carries the whole burden, as before.
-- `action` (implemented): `ping` | `status` | `verify-sparse-safety` | `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` | `abort-merge` | `abort-rebase` | `continue-rebase` | `unstage-protected`.
-  - **Runner v4**: `file-log` (paginated, rename-aware via `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap, `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or commit→WORKTREE, 200 KB cap with `truncated` flag; a commit-ish may carry a single trailing `^` so the history panel can diff a commit against its parent), `restore-file` (worktree-only `git restore --source`, blocked for protected paths).
+- `action` (implemented): `ping` | `status` | `verify-sparse-safety` | `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` | `abort-merge` | `abort-rebase` | `continue-rebase` | `unstage-protected` | `apply-patch`.
+  - **Runner v4**: `file-log` (paginated, rename-aware via `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap, `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or commit→WORKTREE, with a `truncated` flag; capped at 200 KB in v4, replaced by the hunk-aligned budget in v12; a commit-ish may carry a single trailing `^` so the history panel can diff a commit against its parent), `restore-file` (worktree-only `git restore --source`, blocked for protected paths).
   - **Runner v5**: `repo-log` (repository-wide paginated log for the history panel, same `\x1e`/`\x1f` record format as `file-log` with a `--name-status` block per commit, no `--follow`).
   - **Runner v6**: `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses non-conflicted paths and protected paths, then `git checkout --<side>` + `git add` to mark the file resolved, only ever on an explicit user choice; the bridge never picks a side by itself).
   - **Runner v7**: `diff-file` accepts the `INDEX` pseudo-ref (`HEAD→INDEX` = `git diff --cached`, `INDEX→WORKTREE` = plain `git diff`; INDEX pairs with nothing else), `stage-file` accepts `args.mode` = `all` (default) | `update` (`git add -u`, for folder rows in the tracked-changes group), FAILED mutating actions still attach fresh status fields to `data` (merged with any error payload such as `data.conflicts`), and the runner prints `NGB_RUNNER_VERSION=<n>` on stdout so the companion app's probe can learn the current runner version.
@@ -242,6 +242,7 @@ Updating the plugin does **not** update the runner in Termux, so the two carry i
 | 8 | 0.5.9 | Per-path actions (`stage-file`, `unstage-file`, `discard-file`) exclude protected paths that lie UNDER the requested path, so acting on a parent folder can no longer stage or discard a sparse-protected subdirectory; `discard-file` on an untracked folder deletes the untracked files it contains instead of failing; new `discard-all` (drops unstaged work, keeps staged content and untracked files) and `reset-all` (index and worktree back to HEAD, expressed as a pathspec restore so protected paths stay excluded and untracked files survive) |
 | 9 | 0.5.10 | `file-log` uses `--raw --numstat`, so each commit reports the change letter, both sides of a rename and the added/deleted counts the file-history view shows |
 | 10 | 0.6.0 | Several repositories per device: `profiles/<id>.conf` (one per vault, own token), automatic migration of the single-repo config, one run drains every profile oldest-first, `profileId` in requests and results, `REPO_MISSING` for a dead profile, git pinned per profile (`GIT_CEILING_DIRECTORIES` + toplevel check) so nested vaults cannot leak into each other, nested-vault exclusion in the outer repository's `.git/info/exclude`, relocation of a moved vault and self-pairing of a new one (`claim.json` → `pairing.json`), global single-instance lock in the config directory; `verify-sparse-safety` and the safety gate run `git status -uall`, so a new folder under a protected path is reported file by file instead of as one collapsed `dir/` line (the plugin offers to trash exactly that list) |
+| 12 | 0.6.2 | Hunk-level staging and a diff budget: `apply-patch` (one patch, `--cached` or not, forward or reversed, which covers stage / unstage / discard of a hunk or of picked lines); `diff-file` takes `args.maxBytes` and trims at HUNK boundaries, reporting `hunksShown`, `hunksTotal`, `diffBytesTotal` and `diffBytesLimit`; failed actions attach fresh status by exclusion rather than from a hand-kept list |
 | 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin. Later in the same unreleased 0.6.1: `unstage-protected`, `abort-rebase`, `continue-rebase`, and `rebaseInProgress` in status (see below) |
 
 ### No runtime dependencies
@@ -252,8 +253,8 @@ The plugin executes no generated code. All repository access goes through the gi
 
 ### Why v11 grew instead of becoming v12
 
-The rule above says a runner version number is never reused. `unstage-protected`, `abort-rebase`, `continue-rebase` and `rebaseInProgress` were added to v11 anyway, because 0.6.1 has not been released: no release ever shipped a v11 runner, so no installed v11 can be stale. The only device carrying one is the developer's, and it is reinstalled by hand from the plugin folder alongside this change.
-The exception ends with 0.6.1. After that release the next runner change is v12.
+The rule above says a runner version number is never reused. `unstage-protected`, `abort-rebase`, `continue-rebase` and `rebaseInProgress` were added to v11 anyway, during the window when 0.6.1 had not yet been released: no release had shipped a v11 runner, so no installed v11 could be stale. The only device carrying one was the developer's, reinstalled by hand alongside that change.
+That exception closed when 0.6.1 shipped. Everything after it is v12, which is why v12 carries two unrelated features rather than one.
 
 ### Leaving an unfinished operation (runner 11)
 
@@ -277,5 +278,31 @@ The state this addresses: a file staged inside a directory that was added to the
 `continue-rebase` refuses while any path is unmerged, and reports how many.
 `git rebase --continue` in that state opens an editor, and the runner has no terminal, so it would hang until the request expired. When it does run,
 `GIT_EDITOR=true` accepts the message git prepared.
+
+### Hunk-level staging (runner 12)
+
+**`apply-patch`** — `args.patch`, `args.target` (`index` | `worktree`), `args.reverse`, `args.protectedPaths`. One action for three operations, because they are one operation pointed three ways:
+
+| operation | target | reverse | effect |
+|---|---|---|---|
+| stage hunk | `index` | no | the hunk enters the index; the file is untouched |
+| unstage hunk | `index` | yes | the hunk leaves the index; the file is untouched |
+| discard hunk | `worktree` | yes | the hunk leaves the file |
+
+The patch arrives as a field and is written to a file before git sees it, never as an argument: the 128 KB `execve` limit applies, and a patch contains newlines and whatever else the vault holds.
+
+Three guards, in order. The patch must name exactly ONE path, taken from the patch itself rather than from the request, because the patch is what git acts on; that path must pass `valid_rel_path`; and it must not be protected.
+
+No `--3way` and no fuzz. A patch that does not apply exactly means the diff the user was reading is stale, and the answer is to say so, not to guess where the hunk belongs now. The error message says to refresh the diff.
+
+### The diff budget (runner 12)
+
+`diff-file` takes `args.maxBytes` and keeps WHOLE hunks within it, reporting `hunksShown`, `hunksTotal`, `diffBytesTotal` and `diffBytesLimit` so the pane can say "12 of 40 hunks" and offer to fetch the rest for that one diff.
+
+This replaced a cap that sliced the diff text with bash's `${s:0:n}`, which had two faults. It was locale-dependent: measured on one file, `${#s}` reported 216 "characters" under `LC_ALL=C` and 154 under UTF-8, for 217 actual bytes, so one number meant two different sizes depending on the environment. And the byte form could cut a multi-byte character in half — truncating `Це` at 3 bytes yields `d0a6d0`, which jq turns into `Ц` plus a replacement character.
+
+Cutting between hunks removes both: the seam is always a line boundary, so the output is always valid UTF-8, and `LC_ALL=C awk` makes the measurement mean bytes everywhere. Half a hunk was never useful anyway — it cannot be staged, cannot be applied, and forces every reader to tolerate a broken tail.
+
+Note the `NGB_FIELD_MAX_BYTES` ceiling (4 MB) is the real transport limit and always was; the diff cap is a rendering budget. The pane costs about 12 DOM nodes per diff line, which is what actually decides whether a diff feels instant.
 
 Versions 1–3 predate the first tagged release: the oldest runner any published release shipped is v4. Actions introduced after v4 are additionally listed in the plugin's `ACTION_MIN_RUNNER` map, so requesting one against an older runner produces a named "runner too old for this action" message instead of a bare `BAD_REQUEST`. Capabilities that are argument-level rather than new actions (the `INDEX` ref, `stage-file` `mode`) are covered by the version handshake only, hence the strict `RUNNER_MIN_VERSION` bump for them.

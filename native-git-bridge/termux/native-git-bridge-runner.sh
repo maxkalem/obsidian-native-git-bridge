@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=11
+RUNNER_VERSION=12
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -1089,7 +1089,54 @@ action_continue_rebase() {
 # ---- phase 4 actions: history / diff / restore --------------------------------
 
 NGB_MAX_SHOW_BYTES="${NGB_MAX_SHOW_BYTES:-1048576}"
-NGB_MAX_DIFF_CHARS="${NGB_MAX_DIFF_CHARS:-200000}"
+# Default budget for one diff, in BYTES. The plugin sends its own value with
+# every request (`args.maxBytes`); this is the fallback and the ceiling for a
+# request that asks for more than the field cap can carry.
+NGB_MAX_DIFF_BYTES="${NGB_MAX_DIFF_BYTES:-102400}"
+
+# Keep WHOLE hunks of a unified diff, up to a byte budget.
+#
+# $1 = file holding the diff, $2 = budget in bytes.
+# Sets DIFF_KEPT (path to the trimmed diff), DIFF_SHOWN, DIFF_TOTAL_HUNKS and
+# DIFF_TOTAL_BYTES.
+#
+# LC_ALL=C is not decoration: awk's length() counts characters under a UTF-8
+# locale, so the same budget meant 217 bytes in one environment and 155 in
+# another. The cap this replaces had the same fault in bash (`${#s}`,
+# `${s:0:n}`) and could additionally cut a multi-byte character in half, which
+# jq then turned into a replacement character in the middle of the last line.
+#
+# Cutting between hunks removes that class of problem outright, and a partial
+# hunk was never useful anyway: it cannot be staged, it cannot be applied, and
+# it makes every reader of the diff tolerate a broken tail.
+trim_diff_to_hunks() {
+  local src="$1" limit="$2"
+  DIFF_KEPT="$(dirname "$src")/diff.kept"
+  local report
+  report="$(LC_ALL=C awk -v LIMIT="$limit" '
+    { allBytes += length($0) + 1 }
+    /^@@/ { n++; size[n] = 0; text[n] = "" }
+    {
+      if (n == 0) { preamble = preamble $0 "\n"; preBytes += length($0) + 1 }
+      else { text[n] = text[n] $0 "\n"; size[n] += length($0) + 1 }
+    }
+    END {
+      printf "%s", preamble
+      used = preBytes; shown = 0
+      for (i = 1; i <= n; i++) {
+        if (used + size[i] > LIMIT) break
+        printf "%s", text[i]
+        used += size[i]
+        shown++
+      }
+      printf "%d %d %d", shown, n, allBytes > "/dev/stderr"
+    }
+  ' "$src" 2>&1 >"$DIFF_KEPT")"
+  DIFF_SHOWN="${report%% *}"
+  DIFF_TOTAL_HUNKS="$(printf '%s' "$report" | cut -d' ' -f2)"
+  DIFF_TOTAL_BYTES="$(printf '%s' "$report" | cut -d' ' -f3)"
+  : "${DIFF_SHOWN:=0}" "${DIFF_TOTAL_HUNKS:=0}" "${DIFF_TOTAL_BYTES:=0}"
+}
 
 # A single trailing ^ (first parent) is allowed so the plugin can diff a commit
 # against its parent (history view). Still no ranges, no refs, no pathspecs.
@@ -1182,12 +1229,30 @@ action_diff_file() {
     run_git diff --find-renames "$from" "$to" -- "$path" || true
   fi
   [ $GIT_EC -gt 1 ] && { ERROR=$(err_json GIT_FAILED "git diff failed." "$GIT_OUT" "$GIT_ERR"); return 1; }
-  local diff_out="$GIT_OUT"
-  if [ "${#diff_out}" -gt "$NGB_MAX_DIFF_CHARS" ]; then
-    diff_out="${diff_out:0:$NGB_MAX_DIFF_CHARS}"
-    truncated=true
-  fi
-  DATA=$(obj_from_fields diff "$diff_out" truncated "$truncated" from "$from" to "$to" path "$path")
+
+  # Budget for THIS diff. The plugin sends its device-local setting, and may
+  # send a larger one for a single request when the user asked to see a diff
+  # that the setting would cut. Clamped to the field cap, past which the result
+  # writer would truncate mid-line anyway and undo the point of hunk-aligned
+  # cutting.
+  local limit
+  limit=$(jq -r '.args.maxBytes // empty' "$req_file")
+  case "$limit" in ""|*[!0-9]*) limit="$NGB_MAX_DIFF_BYTES" ;; esac
+  [ "$limit" -gt "$NGB_FIELD_MAX_BYTES" ] && limit="$NGB_FIELD_MAX_BYTES"
+
+  local dir; dir="$(json_tmpdir)"
+  printf '%s' "$GIT_OUT" > "$dir/diff.raw"
+  trim_diff_to_hunks "$dir/diff.raw" "$limit"
+  [ "$DIFF_SHOWN" -lt "$DIFF_TOTAL_HUNKS" ] && truncated=true
+
+  DATA=$(obj_from_fields \
+    diff "$(cat "$DIFF_KEPT")" \
+    truncated "$truncated" \
+    hunksShown "$DIFF_SHOWN" \
+    hunksTotal "$DIFF_TOTAL_HUNKS" \
+    diffBytesTotal "$DIFF_TOTAL_BYTES" \
+    diffBytesLimit "$limit" \
+    from "$from" to "$to" path "$path")
 }
 
 action_restore_file() {
@@ -1312,6 +1377,83 @@ action_unstage_protected() {
   collect_status_fields
   local list; list=$(printf '%s\n' ${accepted[@]+"${accepted[@]}"})
   DATA=$(merge_data "$DATA" "$(obj_from_fields unstagedProtected "$list" unstagedProtectedCount "${#accepted[@]}")")
+}
+
+# Apply one patch, in one of the three directions the hunk controls need.
+#
+#   args.target  "index" | "worktree"     --cached, or not
+#   args.reverse  true | false            -R, or not
+#
+# That covers all three operations with one action, because they ARE one
+# operation pointed differently:
+#   stage    index,    forward   the hunk enters the index, the file is untouched
+#   unstage  index,    reverse   the hunk leaves the index, the file is untouched
+#   discard  worktree, reverse   the hunk leaves the file
+#
+# The patch arrives as a field and is written to a file before git sees it:
+# never as an argument, both for the 128 KB execve limit and because a patch
+# contains newlines and anything else the vault happens to hold.
+#
+# Guards, in order:
+#   1. the patch names exactly ONE path, extracted from the patch itself rather
+#      than trusted from the request — that is what git will act on;
+#   2. the path passes valid_rel_path;
+#   3. the path is not protected.
+#
+# No --3way and no fuzz. A patch that does not apply exactly means the diff the
+# user was looking at is stale, and the honest answer is to say so and let them
+# refresh, not to guess where the hunk belongs now.
+action_apply_patch() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+
+  local target reverse
+  target=$(jq -r '.args.target // "index"' "$req_file")
+  reverse=$(jq -r '.args.reverse // false' "$req_file")
+  case "$target" in
+    index|worktree) ;;
+    *) ERROR=$(err_json BAD_REQUEST "Invalid target (must be 'index' or 'worktree')." "" ""); return 1 ;;
+  esac
+  case "$reverse" in
+    true|false) ;;
+    *) ERROR=$(err_json BAD_REQUEST "Invalid reverse flag." "" ""); return 1 ;;
+  esac
+
+  local dir; dir="$(json_tmpdir)"
+  local pf="$dir/apply.patch"
+  jq -r '.args.patch // ""' "$req_file" > "$pf"
+  if [ ! -s "$pf" ]; then
+    ERROR=$(err_json BAD_REQUEST "Empty patch." "" ""); return 1
+  fi
+
+  # Paths the patch itself declares. /dev/null is the counterpart of a creation
+  # or a deletion and names no path.
+  local paths
+  paths="$(sed -n 's|^--- \(.*\)$|\1|p; s|^+++ \(.*\)$|\1|p' "$pf" \
+    | grep -v '^/dev/null$' \
+    | sed 's|^[abciwo]/||' \
+    | sort -u)"
+  local count
+  count="$(printf '%s\n' "$paths" | grep -c . || true)"
+  if [ "$count" != "1" ]; then
+    ERROR=$(err_json BAD_REQUEST "A patch must touch exactly one path; this one names $count." "" "")
+    return 1
+  fi
+  local path="$paths"
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid path in patch: $path" "" ""); return 1; }
+  refuse_if_protected "$path" || return 1
+
+  local -a flags=(apply --whitespace=nowarn)
+  [ "$target" = "index" ] && flags+=(--cached)
+  [ "$reverse" = "true" ] && flags+=(-R)
+  if ! run_git "${flags[@]}" -- "$pf"; then
+    ERROR=$(err_json GIT_FAILED \
+      "git apply failed; the diff this patch came from is probably out of date. Refresh the diff and try again." \
+      "$GIT_OUT" "$GIT_ERR")
+    return 1
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields appliedPath "$path" appliedTarget "$target" appliedReverse "$reverse")")
 }
 
 # Pathspec excludes for every protected path that lies UNDER $1.
@@ -2132,6 +2274,7 @@ process_request() {
     stage-file)            action_stage_file "$req_file" || { ok=false; ec=1; } ;;
     unstage-file)          action_unstage_file "$req_file" || { ok=false; ec=1; } ;;
     unstage-protected)     action_unstage_protected "$req_file" || { ok=false; ec=1; } ;;
+    apply-patch)           action_apply_patch "$req_file" || { ok=false; ec=1; } ;;
     discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
     stage-all)             action_stage_all "$req_file" || { ok=false; ec=1; } ;;
     unstage-all)           action_unstage_all "$req_file" || { ok=false; ec=1; } ;;
@@ -2153,13 +2296,26 @@ process_request() {
   esac
   [ "$ERROR" != "null" ] && ok=false
 
-  # FAILED mutating actions still carry fresh status fields: a rejected pull
-  # or a blocked commit changes what the user should see (conflict markers,
-  # dirty files), and the plugin must not keep rendering the stale state. The
-  # error payload (e.g. data.conflicts) is preserved by merging.
+  # FAILED actions still carry fresh status fields: a rejected pull or a blocked
+  # commit changes what the user should see (conflict markers, dirty files), and
+  # the plugin must not keep rendering the stale state. The error payload (e.g.
+  # data.conflicts) is preserved by merging.
+  #
+  # Listed by EXCLUSION, and that direction is the point. This used to name the
+  # mutating actions one by one — a second copy of the plugin's
+  # MUTATING_ACTIONS, kept by hand, which had drifted: `discard-all`,
+  # `reset-all`, `init-repo`, `clone-into-vault` and every action added after
+  # them were missing, so a failure in any of those left the panel showing a
+  # state that no longer existed.
+  #
+  # Inverted, the failure mode inverts with it. Forgetting to list a new
+  # mutating action now costs nothing; forgetting to list a read-only one costs
+  # one redundant `git status`. Neither leaves stale data on screen.
   if [ "$ok" = false ]; then
     case "$action" in
-      pull|commit|push|sync|sparse-reapply|restore-file|abort-merge|stage-file|unstage-file|discard-file|stage-all|unstage-all|resolve-conflict|set-remote|adopt-remote)
+      # Read-only, or already collecting status themselves.
+      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list) ;;
+      *)
         error_data="$DATA"
         collect_status_fields
         [ "$error_data" != "null" ] && [ -n "$error_data" ] && DATA=$(merge_data "$error_data" "$DATA")

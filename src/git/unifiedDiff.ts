@@ -72,6 +72,20 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   let hunk: DiffHunk | null = null;
   let oldNo = 0;
   let newNo = 0;
+  /**
+   * Lines of the current hunk still to come, per side, taken from the counts in
+   * its `@@` header.
+   *
+   * Needed because inside a hunk body the FIRST CHARACTER is the marker and
+   * everything after it is content — always. A note line `-- signature` arrives
+   * as `--- signature` when it is removed, and `++ list` as `+++ list` when it
+   * is added, and matching those against the `--- `/`+++ ` file headers dropped
+   * them from the rendered diff. Front matter is the same story: `---` removed
+   * is `----`, which is harmless, but `--- ` with a trailing space is not.
+   */
+  let oldLeft = 0;
+  let newLeft = 0;
+  const insideHunk = (): boolean => hunk !== null && oldLeft + newLeft > 0;
 
   const ensureFile = (): DiffFile => {
     if (!file) {
@@ -90,16 +104,14 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
   for (const raw of body.split("\n")) {
     const line = raw.replace(/\r$/, "");
 
+    // A new file or a new hunk always wins, even mid-hunk: the runner caps a
+    // diff at 200 KB, so a hunk can be cut off before its counts run out, and
+    // without this the rest of the diff would be swallowed as that hunk's body.
     if (line.startsWith("diff --git ")) {
       file = { path: "", hunks: [] };
       files.push(file);
       hunk = null;
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      // `+++ b/path`, or `+++ /dev/null` for a deletion.
-      const p = line.slice(4).trim();
-      ensureFile().path = p === "/dev/null" ? "" : p.replace(/^[abciwo]\//, "");
+      oldLeft = newLeft = 0;
       continue;
     }
     const m = HUNK_RE.exec(line);
@@ -108,6 +120,17 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
       ensureFile().hunks.push(hunk);
       oldNo = Number(m[1]);
       newNo = Number(m[2]);
+      const counts = hunkCounts(line);
+      oldLeft = counts.old;
+      newLeft = counts.new;
+      continue;
+    }
+    // Only OUTSIDE a hunk body is `+++ ` a file header rather than an added
+    // line that happens to begin with two plus signs.
+    if (!insideHunk() && line.startsWith("+++ ")) {
+      // `+++ b/path`, or `+++ /dev/null` for a deletion.
+      const p = line.slice(4).trim();
+      ensureFile().path = p === "/dev/null" ? "" : p.replace(/^[abciwo]\//, "");
       continue;
     }
     // Everything before the first hunk is metadata: `index`, `--- a/…`, mode
@@ -118,8 +141,10 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
 
     if (line.startsWith("+")) {
       hunk.lines.push({ kind: "insert", text: line.slice(1), oldNumber: null, newNumber: newNo++ });
+      if (newLeft > 0) newLeft--;
     } else if (line.startsWith("-")) {
       hunk.lines.push({ kind: "delete", text: line.slice(1), oldNumber: oldNo++, newNumber: null });
+      if (oldLeft > 0) oldLeft--;
     } else if (line.startsWith(" ") || line === "") {
       // A context line is " " + text, so an EMPTY string is git's context line
       // for an empty line with the trailing space stripped somewhere in transit.
@@ -130,6 +155,8 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
         oldNumber: oldNo++,
         newNumber: newNo++,
       });
+      if (oldLeft > 0) oldLeft--;
+      if (newLeft > 0) newLeft--;
     }
     // Anything else (a stray header inside a hunk) is ignored rather than
     // guessed at.
@@ -137,6 +164,23 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
 
   for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines);
   return files;
+}
+
+/**
+ * How many lines the `@@` header promises on each side.
+ *
+ * A missing comma means one line, which is how git writes a single-line hunk.
+ * The counts are what tells the body apart from the metadata that follows it,
+ * so an unreadable header yields 0 and the parser falls back to reading the
+ * body until the next `@@` or `diff --git`.
+ */
+function hunkCounts(header: string): { old: number; new: number } {
+  const m = /@@+ -(\d+)(?:,(\d+))?(?: -\d+(?:,\d+)?)* \+(\d+)(?:,(\d+))? @@/.exec(header);
+  if (!m) return { old: 0, new: 0 };
+  return {
+    old: m[2] === undefined ? 1 : Number(m[2]),
+    new: m[4] === undefined ? 1 : Number(m[4]),
+  };
 }
 
 /**

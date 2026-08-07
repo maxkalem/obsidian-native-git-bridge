@@ -94,6 +94,19 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
       el.hidden = true;
       return el;
     },
+    /**
+     * Class selectors only, comma-separated. Enough for the measuring helpers
+     * (`gutterWidthCh`, `markInvisibles`) and honest about the rest: anything
+     * fancier belongs in a real DOM, not here.
+     */
+    querySelectorAll: (sel: string) => {
+      const classes = sel.split(",").map((x) => x.trim().replace(/^\./, ""));
+      return classes.flatMap((c) => __findAllByClass(el, c));
+    },
+    querySelector: (sel: string) => {
+      const hits = el.querySelectorAll(sel);
+      return hits.length > 0 ? hits[0] : null;
+    },
     show: () => {
       el.hidden = false;
       return el;
@@ -207,9 +220,15 @@ export class ItemView {
   containerEl = fakeEl();
   contentEl = fakeEl();
   app: Any;
+  navigation = false;
   constructor(leaf: Any) {
     this.leaf = leaf;
   }
+  /** Obsidian ties the timer to the view's lifetime and hands the id back. */
+  registerInterval(id: number): number {
+    return id;
+  }
+  register(): void {}
   getViewType(): string {
     return "";
   }

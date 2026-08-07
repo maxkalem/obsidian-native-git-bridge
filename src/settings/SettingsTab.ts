@@ -1,7 +1,7 @@
 import { App, Platform, PluginSettingTab, Setting } from "obsidian";
 import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
-import { DEFAULT_DEVICE_SETTINGS } from "./DeviceLocalSettingsStore";
+import { DEFAULT_DEVICE_SETTINGS, DIFF_LIMIT_CHOICES_KB } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
 import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
@@ -344,6 +344,26 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     this.renderColorSection(containerEl);
+
+    new Setting(containerEl)
+      .setName("Diff size limit")
+      .setDesc(
+        "How much of one diff the pane builds at a time. The runner keeps whole " +
+          "hunks within the limit and never a partial one, and the pane says how " +
+          "many it left out, with a one-tap way to fetch the rest for that diff " +
+          "alone. Every diff line costs about a dozen elements to draw, so this " +
+          "is a per-phone decision and stays device-local."
+      )
+      .addDropdown((d) => {
+        for (const kb of DIFF_LIMIT_CHOICES_KB) {
+          d.addOption(String(kb), kb >= 1024 ? `${kb / 1024} MB` : `${kb} KB`);
+        }
+        d.setValue(String(s.diffLimitKb)).onChange((v) => { void (async () => {
+          const n = parseInt(v, 10);
+          if (!Number.isFinite(n) || n <= 0) return;
+          await this.plugin.updateDeviceSettings({ diffLimitKb: n });
+        })(); });
+      });
 
     new Setting(containerEl)
       .setName("Auto-refresh status (seconds)")

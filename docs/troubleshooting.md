@@ -143,6 +143,18 @@ The file-history panel restores a block only when the current file still contain
 
 That is git, not the panel. Rename detection compares the index, so a file moved in the working tree is a deletion and a new untracked file until the change is staged; `git status --find-renames` does not change it. Stage both halves (the "+" buttons on the Changes and Untracked groups, or Stage all) and the two rows collapse into one "renamed" row that shows the old path.
 
+## A hunk will not stage: "the diff is out of date"
+
+`apply-patch` applies exactly, with no three-way merge and no fuzz. When it fails, the diff the pane was showing no longer matches the file or the index — usually because the file changed after the diff was fetched, in Obsidian or anywhere else. Refresh the diff (close and reopen the pane, or run *Status*) and try the hunk again. Nothing was applied, so there is nothing to undo.
+
+## "Showing 12 of 40 hunks"
+
+The diff was larger than the budget in Settings → *Diff size limit* (100 KB by default). Whole hunks are kept and never a partial one, so what you see is a valid patch and every hunk button on it works.
+
+**Show the whole diff** fetches the rest for that one diff, after a confirmation that names how many lines it is. The setting is untouched; the next diff starts from the configured budget again. The warning counts lines rather than bytes because lines are what the panel pays for: roughly a dozen elements each.
+
+Raise the setting if you routinely read large diffs, and remember it is a per-device choice — it decides how long the pane takes to build, which depends on the phone.
+
 ## Still stuck
 
 `~/.config/native-git-bridge/runner.sh` in Termux runs the exact same code path by hand and prints everything. `runner.log` in `<vault>/.obsidian/plugins/native-git-bridge/runtime/` records every run. Nothing else logs anywhere; credentials never appear in either.

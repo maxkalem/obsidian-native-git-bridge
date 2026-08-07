@@ -64,7 +64,8 @@ import {
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
 import { buildMenuEntries, type MenuAction, type MenuScope } from "./ui/gitMenu";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
-import { DiffView, NGB_DIFF_VIEW, type DiffViewState } from "./ui/DiffView";
+import { DiffView, NGB_DIFF_VIEW, type DiffLoadResult, type DiffViewState } from "./ui/DiffView";
+import { overrideWarning } from "./git/diffBudget";
 import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
 import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
 import { runSelfCheck } from "./bridge/selfCheck";
@@ -257,7 +258,37 @@ export default class NativeGitBridgePlugin extends Plugin {
       NGB_DIFF_VIEW,
       (leaf: WorkspaceLeaf) =>
         new DiffView(leaf, {
-          loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
+          loadDiff: (path, from, to, limitKb) => this.loadDiffText(path, from, to, limitKb),
+          applyPatch: (patch, target, reverse) => this.applyHunkPatch(patch, target, reverse),
+          confirmDiscard: (lines) =>
+            new Promise<boolean>((resolve) => {
+              new ConfirmModal(
+                this.app,
+                {
+                  title: lines === 1 ? "Discard this line?" : `Discard ${lines} lines?`,
+                  body: [
+                    "The change is removed from the file itself. Unlike staging, this is not a move between the index and the working tree, and there is no opposite action that brings it back.",
+                    "Obsidian's own version history may still have the text; git will not.",
+                  ],
+                  confirmLabel: "Discard",
+                  danger: true,
+                },
+                (ok) => resolve(ok)
+              ).open();
+            }),
+          confirmLargerDiff: (notice) =>
+            new Promise<number | null>((resolve) => {
+              new ConfirmModal(
+                this.app,
+                {
+                  title: "Show the whole diff?",
+                  body: overrideWarning(notice),
+                  confirmLabel: notice.overrideLabel ?? "Show it",
+                  icon: "file-diff",
+                },
+                (ok) => resolve(ok ? notice.overrideKb : null)
+              ).open();
+            }),
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
           colors: () => this.diffColorVars(),
@@ -276,6 +307,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           writeFile: async (p, text) => {
             await this.app.vault.adapter.write(p, text);
           },
+          stagePatch: (patch) => this.applyHunkPatch(patch, "index", false),
           restoreWholeFile: (p, e) => this.confirmRestore(p, e),
           viewAtCommit: (e) => void this.showFileAtCommit(e),
           progressText: () => this.progressText ?? "",
@@ -3073,18 +3105,70 @@ export default class NativeGitBridgePlugin extends Plugin {
   private async loadDiffText(
     path: string,
     from: string,
-    to: string
-  ): Promise<{ diff: string; truncated: boolean } | null> {
-    let result = await this.runOperation("diff-file", { path, from, to });
+    to: string,
+    /**
+     * Budget for THIS request, in KB. Omitted means the device-local setting.
+     * The pane passes a larger value only after the user accepted the warning
+     * for one diff; the setting itself is never touched.
+     */
+    limitKb?: number
+  ): Promise<DiffLoadResult | null> {
+    const maxBytes = (limitKb ?? this.deviceSettings.diffLimitKb) * 1024;
+    let result = await this.runOperation("diff-file", { path, from, to, maxBytes });
     if (result && !result.ok && from.endsWith("^")) {
-      result = await this.runOperation("diff-file", { path, from: EMPTY_TREE_HASH, to });
+      result = await this.runOperation("diff-file", {
+        path,
+        from: EMPTY_TREE_HASH,
+        to,
+        maxBytes,
+      });
     }
     if (!result) return null;
     if (!result.ok) {
       this.renderMutationError("Native Git: diff failed", result);
       return null;
     }
-    return { diff: result.data?.diff ?? "", truncated: result.data?.truncated === "true" };
+    const d = result.data ?? {};
+    const num = (k: string): number => {
+      const n = Number(d[k]);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return {
+      diff: d.diff ?? "",
+      truncated: d.truncated === "true",
+      hunksShown: num("hunksShown"),
+      hunksTotal: num("hunksTotal"),
+      totalBytes: num("diffBytesTotal"),
+      limitBytes: num("diffBytesLimit") || maxBytes,
+    };
+  }
+
+  /**
+   * Send one hunk patch to the runner.
+   *
+   * The patch is built by `hunkPatch.ts` from the diff the pane is showing, and
+   * the runner checks independently that it names exactly one path, that the
+   * path is valid, and that it is not protected: the patch is what git acts on,
+   * so the patch is what has to be verified.
+   */
+  private async applyHunkPatch(
+    patch: string,
+    target: "index" | "worktree",
+    reverse: boolean
+  ): Promise<boolean> {
+    const result = await this.runOperation("apply-patch", {
+      patch,
+      target,
+      reverse,
+      protectedPaths: this.effectiveProtectedPaths(),
+    });
+    if (!result) return false;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: could not apply the hunk", result);
+      return false;
+    }
+    this.absorbStatusData(result.data ?? {});
+    return true;
   }
 
   /** Tick the elapsed-time label without rebuilding the panel. */

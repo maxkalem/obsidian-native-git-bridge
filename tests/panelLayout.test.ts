@@ -28,6 +28,13 @@ type Any = any;
 
 const leaf = {} as Any;
 
+// The panels schedule their wait indicator with window.setInterval; the node
+// test environment has no window.
+(globalThis as Any).window = {
+  setInterval: (fn: Any, ms: Any) => setInterval(fn, ms),
+  clearInterval: (id: Any) => clearInterval(id),
+};
+
 function statusActions(): StatusViewActions {
   const noop = () => undefined;
   return {
@@ -54,7 +61,7 @@ function renderStatus(over: Partial<StatusViewData> = {}): Any {
   return (v as Any).contentEl;
 }
 
-function historyActions(): HistoryViewActions {
+function historyActions(over: Partial<HistoryViewActions> = {}): HistoryViewActions {
   return {
     loadPage: async () => [],
     openDiffAtCommit: () => undefined,
@@ -63,6 +70,7 @@ function historyActions(): HistoryViewActions {
     treeView: () => false,
     toggleTree: () => undefined,
     openStatusPanel: () => undefined,
+    ...over,
   };
 }
 
@@ -175,6 +183,62 @@ describe("the history panel mirrors the status panel", () => {
       __findAllByClass(c, "ngb-sv-icon").map((b: Any) => b.getAttribute("aria-label"));
     expect(labels(renderStatus())).toContain("Repository history");
     expect(labels(renderHistory())).toContain("Git panel");
+  });
+});
+
+describe("nothing animates for work that is not happening", () => {
+  /**
+   * Reported from the device: opening the history panel while the runner is busy
+   * shows a notice that the refresh cannot run, and something keeps spinning.
+   *
+   * Two separate faults were behind it. The refresh button decided its animation
+   * inside `renderShell`, from a flag `loadMore` sets afterwards, so it never
+   * span at all however long the runner took. And each load registered another
+   * interval for the in-list indicator, which `registerInterval` keeps alive
+   * until the panel closes, leaving one timer per refresh ticking into a node
+   * that had already been removed.
+   */
+  const busyRunner = () => ({ loadPage: async () => null }); // the lock refuses
+
+  it("the refresh button spins while the load is in flight", async () => {
+    __setPlatformAndroid(true);
+    let release: (v: unknown) => void = () => undefined;
+    const v = new HistoryView(
+      leaf,
+      historyActions({ loadPage: () => new Promise((r) => (release = r as never)) })
+    );
+    const pending = v.onOpen();
+    const btn = __findByClass((v as Any).contentEl, "ngb-sv-toolbar").children[0];
+    expect(btn.hasClass("ngb-anim-spin")).toBe(true);
+    release([]);
+    await pending;
+    expect(btn.hasClass("ngb-anim-spin")).toBe(false);
+  });
+
+  it("stops spinning when the operation is refused", async () => {
+    __setPlatformAndroid(true);
+    const v = new HistoryView(leaf, historyActions(busyRunner()));
+    await v.onOpen();
+    const c = (v as Any).contentEl;
+    expect(__findAllByClass(c, "ngb-anim-spin")).toHaveLength(0);
+    expect(__findAllByClass(c, "ngb-filehist-waiting")).toHaveLength(0);
+  });
+
+  it("says Idle again rather than Loading history", async () => {
+    __setPlatformAndroid(true);
+    const v = new HistoryView(leaf, historyActions(busyRunner()));
+    await v.onOpen();
+    const strip = __findByClass((v as Any).contentEl, "ngb-sv-strip");
+    expect(__textOf(strip)).toContain("Idle");
+    expect(__textOf(strip)).not.toContain("Loading history");
+  });
+
+  it("leaves one wait timer at most, however many refreshes have run", async () => {
+    __setPlatformAndroid(true);
+    const v = new HistoryView(leaf, historyActions(busyRunner()));
+    await v.onOpen();
+    for (let i = 0; i < 4; i++) await v.refresh();
+    expect((v as Any).waitTicker).toBeNull();
   });
 });
 

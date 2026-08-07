@@ -16,8 +16,9 @@
  * `display: none`, so it was markup nobody could see.
  */
 
-import { parseUnifiedDiff, type DiffLine } from "../git/unifiedDiff";
+import { parseUnifiedDiff, type DiffHunk, type DiffLine } from "../git/unifiedDiff";
 import type { InlineRun } from "../git/inlineDiff";
+import { selectableLines } from "../git/hunkPatch";
 
 /** Non-breaking space: the prefix cell of a context line, as diff2html had it. */
 const NBSP = " ";
@@ -28,8 +29,30 @@ const NBSP = " ";
  * Returns the wrapper element, so a caller can measure it before the browser
  * has painted anything.
  */
-export function renderUnifiedDiff(parent: HTMLElement, diff: string): HTMLElement {
+export interface DiffRenderOptions {
+  /**
+   * Draw a control bar above each hunk. Called with the hunk, its index within
+   * the whole diff, and the row that holds the controls.
+   */
+  hunkBar?: (bar: HTMLElement, hunk: DiffHunk, hunkIndex: number) => void;
+  /**
+   * Line-picking mode: put a checkbox beside every added and removed line.
+   * Called with the checkbox, the hunk index and the line's index within that
+   * hunk, which is the coordinate `buildHunkPatch` takes.
+   */
+  lineCheckbox?: (box: HTMLInputElement, hunkIndex: number, lineIndex: number) => void;
+}
+
+export function renderUnifiedDiff(
+  parent: HTMLElement,
+  diff: string,
+  opts: DiffRenderOptions = {}
+): HTMLElement {
   const wrapper = parent.createDiv({ cls: "d2h-wrapper" });
+  // Hunks are numbered across the WHOLE diff, not per file: the coordinate has
+  // to survive a multi-file diff, and a caller holding "hunk 3" must not have to
+  // know which file it came from.
+  let hunkIndex = 0;
   for (const file of parseUnifiedDiff(diff)) {
     const fileWrap = wrapper.createDiv({ cls: "d2h-file-wrapper" });
     const table = fileWrap
@@ -38,21 +61,45 @@ export function renderUnifiedDiff(parent: HTMLElement, diff: string): HTMLElemen
       .createEl("table", { cls: "d2h-diff-table" });
     const tbody = table.createEl("tbody", { cls: "d2h-diff-tbody" });
     for (const hunk of file.hunks) {
-      renderHunkHeader(tbody, hunk.header);
-      for (const line of hunk.lines) renderLine(tbody, line);
+      renderHunkHeader(tbody, hunk.header, hunk, hunkIndex, opts);
+      const pickable = new Set(selectableLines(hunk));
+      hunk.lines.forEach((line, i) => {
+        renderLine(tbody, line, hunkIndex, i, pickable.has(i) ? opts : {});
+      });
+      hunkIndex++;
     }
   }
   return wrapper;
 }
 
-/** The `@@ … @@` separator row: no line numbers, header text across the code cell. */
-function renderHunkHeader(tbody: HTMLElement, header: string): void {
+/**
+ * The `@@ … @@` separator row: no line numbers, header text across the code
+ * cell, and the hunk's controls when the caller supplies any.
+ *
+ * The controls live in the header row rather than floating over the hunk so
+ * they scroll with it and cannot cover a line of the diff.
+ */
+function renderHunkHeader(
+  tbody: HTMLElement,
+  header: string,
+  hunk: DiffHunk,
+  hunkIndex: number,
+  opts: DiffRenderOptions
+): void {
   const tr = tbody.createEl("tr");
   tr.createEl("td", { cls: "d2h-code-linenumber d2h-info" });
-  tr.createEl("td", { cls: "d2h-info" }).createDiv({ cls: "d2h-code-line", text: header });
+  const cell = tr.createEl("td", { cls: "d2h-info" });
+  cell.createDiv({ cls: "d2h-code-line", text: header });
+  if (opts.hunkBar) opts.hunkBar(cell.createDiv({ cls: "ngb-hunk-bar" }), hunk, hunkIndex);
 }
 
-function renderLine(tbody: HTMLElement, line: DiffLine): void {
+function renderLine(
+  tbody: HTMLElement,
+  line: DiffLine,
+  hunkIndex: number,
+  lineIndex: number,
+  opts: DiffRenderOptions
+): void {
   const kindCls =
     line.kind === "insert" ? "d2h-ins" : line.kind === "delete" ? "d2h-del" : "d2h-cntx";
   // `d2h-change` marks the half of a change rather than a pure add/remove.
@@ -62,6 +109,14 @@ function renderLine(tbody: HTMLElement, line: DiffLine): void {
 
   const tr = tbody.createEl("tr");
   const gutter = tr.createEl("td", { cls: `d2h-code-linenumber ${cls}` });
+  // The checkbox goes FIRST in the gutter, left of the numbers: it belongs to
+  // the row, and on a phone the left edge is the only part of a wide diff that
+  // is reliably reachable without scrolling sideways.
+  if (opts.lineCheckbox) {
+    const box = gutter.createEl("input", { cls: "ngb-line-pick" });
+    box.type = "checkbox";
+    opts.lineCheckbox(box, hunkIndex, lineIndex);
+  }
   gutter.createDiv({ cls: "line-num1", text: line.oldNumber === null ? "" : String(line.oldNumber) });
   gutter.createDiv({ cls: "line-num2", text: line.newNumber === null ? "" : String(line.newNumber) });
   // The prefix lives in the STICKY gutter, not in the code cell: in the code

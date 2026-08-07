@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { __fakeEl, __findAllByClass, __findByClass, __resetObsidianMock, __textOf } from "./mocks/obsidian";
 import { renderUnifiedDiff } from "../src/ui/diffDom";
+import { gutterWidthCh } from "../src/ui/DiffView";
 
 /**
  * The rendered DOM is a contract with styles.css: 27 rules are keyed to these
@@ -147,6 +148,125 @@ describe("intra-line highlighting", () => {
     const ctn = __findByClass(codeRows(render(SAMPLE))[0]!, "d2h-code-line-ctn");
     expect(ctn.children).toEqual([]);
     expect(ctn.textContent).toBe("context line");
+  });
+});
+
+describe("hunk controls and line picking", () => {
+  const TWO_HUNKS = `+++ b/f.md
+@@ -1,2 +1,2 @@
+-a
++b
+@@ -9,2 +9,2 @@
+ ctx
+-c
++d
+`;
+
+  it("draws no bar when the caller asks for none", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS);
+    expect(__findAllByClass(root, "ngb-hunk-bar")).toHaveLength(0);
+  });
+
+  it("puts one bar per hunk, inside that hunk's header row", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    const seen: number[] = [];
+    renderUnifiedDiff(root, TWO_HUNKS, {
+      hunkBar: (bar, _h, i) => {
+        seen.push(i);
+        bar.createEl("button", { cls: "ngb-hunk-btn", text: "Stage hunk" });
+      },
+    });
+    expect(seen).toEqual([0, 1]);
+    const bars = __findAllByClass(root, "ngb-hunk-bar");
+    expect(bars).toHaveLength(2);
+    // The bar sits in the info cell, so it scrolls with the hunk it belongs to.
+    expect(bars[0].parent.hasClass("d2h-info")).toBe(true);
+  });
+
+  // A caller holding "hunk 3" must not have to know which file it came from.
+  it("numbers hunks across the whole diff, not per file", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    const seen: number[] = [];
+    renderUnifiedDiff(
+      root,
+      `diff --git a/one.md b/one.md
++++ b/one.md
+@@ -1 +1 @@
+-a
++b
+diff --git a/two.md b/two.md
++++ b/two.md
+@@ -1 +1 @@
+-c
++d
+`,
+      { hunkBar: (_b, _h, i) => seen.push(i) }
+    );
+    expect(seen).toEqual([0, 1]);
+  });
+
+  it("hands the caller the hunk itself, so it can build the patch", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    const texts: string[][] = [];
+    renderUnifiedDiff(root, TWO_HUNKS, {
+      hunkBar: (_b, h) => texts.push(h.lines.map((l) => l.text)),
+    });
+    expect(texts).toEqual([
+      ["a", "b"],
+      ["ctx", "c", "d"],
+    ]);
+  });
+
+  it("puts a checkbox on changed lines only, never on context", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    const coords: string[] = [];
+    renderUnifiedDiff(root, TWO_HUNKS, {
+      lineCheckbox: (_b, h, l) => coords.push(`${h}:${l}`),
+    });
+    // Hunk 0: lines 0 and 1 both change. Hunk 1: line 0 is context, 1 and 2 change.
+    expect(coords).toEqual(["0:0", "0:1", "1:1", "1:2"]);
+    const ctxRow = codeRows(root)[2]!; // the " ctx" line
+    expect(__findByClass(ctxRow, "ngb-line-pick")).toBeNull();
+  });
+
+  it("puts the checkbox in the gutter, before the numbers", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS, { lineCheckbox: () => undefined });
+    const gutter = __findByClass(codeRows(root)[0]!, "d2h-code-linenumber");
+    expect(gutter.children[0].hasClass("ngb-line-pick")).toBe(true);
+    expect(gutter.children[1].hasClass("line-num1")).toBe(true);
+  });
+
+  it("makes them real checkboxes", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS, { lineCheckbox: () => undefined });
+    expect(__findAllByClass(root, "ngb-line-pick").every((b: Any) => b.type === "checkbox")).toBe(true);
+  });
+
+  // The wrapped layout gives the gutter a fixed width from this measurement, so
+  // a checkbox it does not know about pushes the numbers past the cell border.
+  it("the measured gutter width leaves room for the checkbox", () => {
+    const plain = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(plain, TWO_HUNKS);
+    const picking = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(picking, TWO_HUNKS, { lineCheckbox: () => undefined });
+    expect(gutterWidthCh(picking)).toBeGreaterThan(gutterWidthCh(plain));
+  });
+
+  it("the picking coordinate is what buildHunkPatch takes", () => {
+    // The pair (hunkIndex, lineIndex) has to index hunk.lines directly, or a
+    // patch would be built from the wrong lines.
+    const root = __fakeEl("div", "ngb-diff-view");
+    const hunks: Any[] = [];
+    const coords: [number, number][] = [];
+    renderUnifiedDiff(root, TWO_HUNKS, {
+      hunkBar: (_b, h) => hunks.push(h),
+      lineCheckbox: (_b, h, l) => coords.push([h, l]),
+    });
+    for (const [h, l] of coords) {
+      expect(hunks[h].lines[l].kind).not.toBe("context");
+    }
   });
 });
 

@@ -1,6 +1,7 @@
 import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
 import { describeFileChange, type FileLogEntry } from "../git/historyParsers";
 import { parseHunks, restoreHunk, type DiffHunk } from "../git/hunks";
+import { buildWholeFilePatch, needsNoNewlineMarker } from "../git/hunkPatch";
 import { markInvisibles, sizeGutter } from "./DiffView";
 import { renderUnifiedDiff } from "./diffDom";
 import { DIFF_COLOR_VARS } from "./colors";
@@ -15,6 +16,18 @@ export interface FileHistoryActions {
   /** Current worktree text of the file, or null when it is binary/absent. */
   readFile(path: string): Promise<string | null>;
   writeFile(path: string, text: string): Promise<void>;
+  /**
+   * Put the restored block straight into the index.
+   *
+   * Composed rather than "write the file and stage the path": staging the whole
+   * path would sweep in every OTHER edit the file happens to carry, which is the
+   * opposite of restoring one block. A patch describing only this block leaves
+   * the rest of the file unstaged, exactly as it was.
+   *
+   * Returns false when the staging step failed; the file is already written by
+   * then, so the caller says so rather than claiming success.
+   */
+  stagePatch(patch: string): Promise<boolean>;
   /** Whole-file restore, with the confirmation the command already has. */
   restoreWholeFile(path: string, entry: FileLogEntry): void;
   /** Show the file's full content as it was at this commit (read-only preview). */
@@ -41,6 +54,8 @@ export class FileHistoryView extends ItemView {
   private readonly pageSize = 30;
   private exhausted = false;
   private loading = false;
+  /** Interval behind the in-list wait indicator; one per load. */
+  private waitTicker: number | null = null;
   private expanded = new Set<string>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
@@ -141,6 +156,7 @@ export class FileHistoryView extends ItemView {
     if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(path, this.skip, this.pageSize);
     waiting?.remove();
+    this.stopWaitTicker();
     this.loading = false;
     if (page === null) return;
     if (this.skip === 0 && page.length === 0) {
@@ -172,8 +188,18 @@ export class FileHistoryView extends ItemView {
       text.setText(p === "" ? `${what}…` : p);
     };
     tick();
-    const id = this.registerInterval(window.setInterval(tick, 500));
-    void id;
+    // Remembered, not only registered: `registerInterval` ties the timer to the
+    // PANEL's lifetime, so one was left ticking per load, each writing into a
+    // node that had already been removed.
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+  }
+
+  private stopWaitTicker(): void {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
   }
 
   private renderCommit(e: FileLogEntry): void {
@@ -322,8 +348,27 @@ export class FileHistoryView extends ItemView {
       new Notice("This block already matches that commit.");
       return;
     }
+    // The patch has to be built from the texts as they are RIGHT NOW, before the
+    // file is written: afterwards `current` no longer describes what is on disk,
+    // and git would have nothing to match the removals against.
+    const patch =
+      needsNoNewlineMarker(current) || needsNoNewlineMarker(out.text)
+        ? null
+        : buildWholeFilePatch(path, current, out.text);
     await this.actions.writeFile(path, out.text);
-    new Notice(`Restored one block from ${e.hash.slice(0, 8)}.`);
+    const short = e.hash.slice(0, 8);
+    if (patch === null) {
+      // A file with no trailing newline needs git's "\ No newline at end of
+      // file" marker, and getting that wrong corrupts the last line. The restore
+      // itself already happened, so say what is left to do rather than undo it.
+      new Notice(`Restored one block from ${short}. Stage it from the git panel.`);
+      return;
+    }
+    if (await this.actions.stagePatch(patch)) {
+      new Notice(`Restored one block from ${short} and staged it.`);
+    } else {
+      new Notice(`Restored one block from ${short}, but staging it failed.`);
+    }
   }
 }
 

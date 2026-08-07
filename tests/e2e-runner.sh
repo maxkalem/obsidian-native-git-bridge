@@ -587,8 +587,8 @@ check '[ ! -d "$RUNTIME/.runner.lock" ]' "no lock left inside the vault runtime 
 check '[ ! -d "$ROOT/conf/.runner.lock" ]' "global lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "11" ]' "runnerVersion = 11 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=11"' "runner announces its version on stdout (companion probe)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "12" ]' "runnerVersion = 12 reported to the plugin"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=12"' "runner announces its version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -1566,6 +1566,157 @@ else
   p9run >/dev/null
   check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090014Z-p9reb5.json" >/dev/null' "a rebase that already finished cleanly reports nothing to continue"
 fi
+
+# ---------------------------------------------------------------------------
+# phase 10: a diff budget that cuts between hunks
+#
+# The cap this replaces sliced the diff text by bash string length, which counts
+# characters under a UTF-8 locale and bytes under C, and could cut a multi-byte
+# character in half. It also landed mid-hunk, leaving half a hunk that cannot be
+# staged or applied.
+# ---------------------------------------------------------------------------
+echo "# phase 10: the diff budget keeps whole hunks"
+cd "$ROOT/vault"
+# Three well-separated edits in one file: three hunks, whatever the context size.
+{ for i in $(seq 1 60); do echo "line $i, з кирилицею щоб байти не дорівнювали символам"; done; } > Notes/budget.md
+git add Notes/budget.md >/dev/null 2>&1
+git commit -qm "e2e: budget base" >/dev/null 2>&1
+sed -i '5s/.*/EDIT ONE, теж кирилицею/; 30s/.*/EDIT TWO, теж кирилицею/; 55s/.*/EDIT THREE, теж кирилицею/' Notes/budget.md
+
+req "r-20260807T110000Z-bud01" diff-file "$TOKEN" '{"path":"Notes/budget.md","from":"INDEX","to":"WORKTREE","maxBytes":1000000}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260807T110000Z-bud01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "diff-file with a generous budget ok"
+check '[ "$(jq -r .data.hunksTotal "$RES")" = "3" ]' "all three hunks are counted"
+check '[ "$(jq -r .data.hunksShown "$RES")" = "3" ]' "…and all three are sent"
+check '[ "$(jq -r .data.truncated "$RES")" = "false" ]' "nothing reported as truncated"
+check '[ "$(jq -r .data.diffBytesTotal "$RES")" -gt 0 ]' "the whole diff's size is reported"
+
+# A budget that admits the first hunk and not the rest.
+ONEHUNK=$(jq -r '.data.diff' "$RES" | awk '/^@@/{n++} n<2' | wc -c)
+req "r-20260807T110001Z-bud02" diff-file "$TOKEN" "{\"path\":\"Notes/budget.md\",\"from\":\"INDEX\",\"to\":\"WORKTREE\",\"maxBytes\":$((ONEHUNK + 20))}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260807T110001Z-bud02.json"
+check '[ "$(jq -r .data.hunksShown "$RES")" -lt "$(jq -r .data.hunksTotal "$RES")" ]' "a tight budget sends fewer hunks than it counted"
+check '[ "$(jq -r .data.truncated "$RES")" = "true" ]' "…and says it truncated"
+check '[ "$(jq -r .data.diffBytesTotal "$RES")" -gt "$(jq -r .data.diffBytesLimit "$RES")" ]' "the reported total exceeds the budget it was given"
+
+# The point of cutting between hunks: what arrives is a valid patch.
+jq -r '.data.diff' "$RES" > "$ROOT/trimmed.patch"
+check 'git apply --cached --check "$ROOT/trimmed.patch"' "the trimmed diff still applies to the INDEX, which is the side it came from"
+check '[ "$(grep -c "^@@" "$ROOT/trimmed.patch")" = "$(jq -r .data.hunksShown "$RES")" ]' "it holds exactly the hunks it claims"
+# Every hunk's line count must match its header, which is what a mid-hunk cut breaks.
+check 'awk "/^@@/{if(h){if(o!=oc||n!=nc) exit 1}; match(\$0,/-[0-9]+(,[0-9]+)?/); split(substr(\$0,RSTART+1,RLENGTH-1),a,\",\"); oc=(a[2]==\"\")?1:a[2]; match(\$0,/\\+[0-9]+(,[0-9]+)?/); split(substr(\$0,RSTART+1,RLENGTH-1),b,\",\"); nc=(b[2]==\"\")?1:b[2]; o=0;n=0;h=1;next} h&&/^ /{o++;n++} h&&/^-/{o++} h&&/^\\+/{n++} END{if(h&&(o!=oc||n!=nc)) exit 1}" "$ROOT/trimmed.patch"' "every hunk's body matches its own @@ counts"
+
+# Deterministic regardless of locale: the old cap meant characters in one
+# environment and bytes in another.
+req "r-20260807T110002Z-bud03" diff-file "$TOKEN" "{\"path\":\"Notes/budget.md\",\"from\":\"INDEX\",\"to\":\"WORKTREE\",\"maxBytes\":$((ONEHUNK + 20))}"
+LC_ALL=C.UTF-8 bash "$RUNNER"
+A=$(jq -r .data.hunksShown "$RUNTIME/results/r-20260807T110002Z-bud03.json")
+req "r-20260807T110003Z-bud04" diff-file "$TOKEN" "{\"path\":\"Notes/budget.md\",\"from\":\"INDEX\",\"to\":\"WORKTREE\",\"maxBytes\":$((ONEHUNK + 20))}"
+LC_ALL=C bash "$RUNNER"
+B=$(jq -r .data.hunksShown "$RUNTIME/results/r-20260807T110003Z-bud04.json")
+check '[ "$A" = "$B" ]' "the same budget keeps the same hunks under C and under UTF-8"
+
+# The output is always valid UTF-8, because the cut lands between lines.
+check 'jq -r ".data.diff" "$RUNTIME/results/r-20260807T110003Z-bud04.json" | iconv -f UTF-8 -t UTF-8 >/dev/null' "the trimmed diff is valid UTF-8, no half character at the seam"
+
+req "r-20260807T110004Z-bud05" diff-file "$TOKEN" '{"path":"Notes/budget.md","from":"INDEX","to":"WORKTREE","maxBytes":1}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260807T110004Z-bud05.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "an absurd budget is answered, not failed"
+check '[ "$(jq -r .data.hunksShown "$RES")" = "0" ]' "…with zero hunks rather than a broken one"
+check '[ "$(jq -r .data.hunksTotal "$RES")" = "3" ]' "…and still reports how many there were"
+
+git checkout -- Notes/budget.md 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# phase 11: apply-patch, the one action behind stage / unstage / discard hunk
+# ---------------------------------------------------------------------------
+echo "# phase 11: apply-patch in all three directions"
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+# Two well-separated edits, so git reports two hunks whatever the context size.
+{ for i in $(seq 1 40); do echo "рядок $i"; done; } > Notes/hunks.md
+git add Notes/hunks.md >/dev/null 2>&1
+git commit -qm "e2e: hunks base" >/dev/null 2>&1
+sed -i '5s/.*/ПРАВКА ОДИН/; 35s/.*/ПРАВКА ДВА/' Notes/hunks.md
+
+# The plugin builds these; here they are cut from git's own diff, which is the
+# same shape hunkPatch.ts produces.
+git diff -U1 -- Notes/hunks.md > "$ROOT/full.patch"
+check '[ "$(grep -c "^@@" "$ROOT/full.patch")" = "2" ]' "the fixture really has two hunks"
+{ sed -n '1,4p' "$ROOT/full.patch"; awk '/^@@/{n++} n==1' "$ROOT/full.patch"; } > "$ROOT/h1.patch"
+apatch() { jq -Rs . < "$1"; }
+
+req "r-20260807T120000Z-ap01" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/h1.patch"),\"target\":\"index\",\"reverse\":false,\"protectedPaths\":[\"Private/Hidden\"]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260807T120000Z-ap01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "stage hunk: apply --cached ok"
+check '[ "$(jq -r .data.appliedPath "$RES")" = "Notes/hunks.md" ]' "…and it reports the path it acted on"
+check 'git diff --cached -U0 -- Notes/hunks.md | grep -q "ПРАВКА ОДИН"' "the first edit is now staged"
+check '! git diff --cached -U0 -- Notes/hunks.md | grep -q "ПРАВКА ДВА"' "…and only the first"
+check 'git diff -U0 -- Notes/hunks.md | grep -q "ПРАВКА ДВА"' "the second edit stays unstaged"
+check 'grep -q "ПРАВКА ОДИН" Notes/hunks.md' "the working tree file is untouched by staging"
+
+req "r-20260807T120001Z-ap02" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/h1.patch"),\"target\":\"index\",\"reverse\":true,\"protectedPaths\":[]}"
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260807T120001Z-ap02.json" >/dev/null' "unstage hunk: apply -R --cached ok"
+check '[ -z "$(git diff --cached --name-only -- Notes/hunks.md)" ]' "the index is clean again"
+check 'grep -q "ПРАВКА ОДИН" Notes/hunks.md' "…and the file still has both edits"
+
+req "r-20260807T120002Z-ap03" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/h1.patch"),\"target\":\"worktree\",\"reverse\":true,\"protectedPaths\":[]}"
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260807T120002Z-ap03.json" >/dev/null' "discard hunk: apply -R ok"
+check '! grep -q "ПРАВКА ОДИН" Notes/hunks.md' "the first edit is gone from the file"
+check 'grep -q "ПРАВКА ДВА" Notes/hunks.md' "…and the second edit survived"
+
+echo "# phase 11: apply-patch refuses what it must"
+req "r-20260807T120010Z-ap04" apply-patch "$TOKEN" '{"patch":"","target":"index","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260807T120010Z-ap04.json" >/dev/null' "an empty patch is refused"
+
+req "r-20260807T120011Z-ap05" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/full.patch"),\"target\":\"index\",\"reverse\":false,\"protectedPaths\":[],\"target\":\"nowhere\"}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260807T120011Z-ap05.json" >/dev/null' "an unknown target is refused"
+
+# Two paths in one patch: the runner reads the paths from the PATCH, not from
+# the request, because the patch is what git will act on.
+printf -- '--- a/one.md\n+++ b/one.md\n@@ -1 +1 @@\n-a\n+b\n--- a/two.md\n+++ b/two.md\n@@ -1 +1 @@\n-c\n+d\n' > "$ROOT/two.patch"
+req "r-20260807T120012Z-ap06" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/two.patch"),\"target\":\"index\",\"protectedPaths\":[]}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260807T120012Z-ap06.json" >/dev/null' "a patch touching two paths is refused"
+check 'jq -er ".error.message" "$RUNTIME/results/r-20260807T120012Z-ap06.json" | grep -q "exactly one path"' "…and says why"
+
+printf -- '--- a/Private/Hidden/mem.md\n+++ b/Private/Hidden/mem.md\n@@ -1 +1 @@\n-x\n+y\n' > "$ROOT/prot.patch"
+req "r-20260807T120013Z-ap07" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/prot.patch"),\"target\":\"index\",\"protectedPaths\":[\"Private/Hidden\"]}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260807T120013Z-ap07.json" >/dev/null' "a patch aimed at a protected path is refused"
+
+printf -- '--- a/../outside.md\n+++ b/../outside.md\n@@ -1 +1 @@\n-x\n+y\n' > "$ROOT/trav.patch"
+req "r-20260807T120014Z-ap08" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/trav.patch"),\"target\":\"index\",\"protectedPaths\":[]}"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260807T120014Z-ap08.json" >/dev/null' "a traversal path inside the patch is refused"
+
+# A stale patch must be refused, not force-fitted: no --3way, no fuzz.
+req "r-20260807T120015Z-ap09" apply-patch "$TOKEN" \
+  "{\"patch\":$(apatch "$ROOT/h1.patch"),\"target\":\"worktree\",\"reverse\":true,\"protectedPaths\":[]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260807T120015Z-ap09.json"
+check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "re-applying an already-applied patch fails instead of guessing"
+check 'jq -er ".error.message" "$RES" | grep -qi "out of date"' "…and the message tells the user to refresh the diff"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "…and fresh status still rides along"
+
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

@@ -1,6 +1,10 @@
-import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import { DIFF_COLOR_VARS } from "./colors";
 import { renderUnifiedDiff } from "./diffDom";
+import { describeDiffBudget, overrideWarning, type DiffBudgetNotice } from "../git/diffBudget";
+import { hunkActionsFor, supportsLineSelection, type HunkActionPlan } from "../git/hunkActions";
+import { buildHunkPatch, selectableLines, selectionHasChanges } from "../git/hunkPatch";
+import { parseUnifiedDiff, type DiffHunk } from "../git/unifiedDiff";
 
 export const NGB_DIFF_VIEW = "native-git-bridge-diff";
 
@@ -19,12 +23,33 @@ export interface DiffViewState {
   label: string;
 }
 
+/**
+ * A diff as it came back, with the facts about what the budget left out.
+ *
+ * The runner keeps whole hunks within the budget and counts the rest, so the
+ * pane can name what is missing instead of showing a bare "truncated".
+ */
+export interface DiffLoadResult {
+  diff: string;
+  truncated: boolean;
+  hunksShown: number;
+  hunksTotal: number;
+  totalBytes: number;
+  limitBytes: number;
+}
+
 export interface DiffViewActions {
   /**
    * Fetch the unified diff text via the bridge. Returns null when the
    * operation failed (the error has already been surfaced to the user).
+   * `limitKb` overrides the device-local budget for this one request.
    */
-  loadDiff(path: string, from: string, to: string): Promise<{ diff: string; truncated: boolean } | null>;
+  loadDiff(path: string, from: string, to: string, limitKb?: number): Promise<DiffLoadResult | null>;
+  /**
+   * Ask the user to accept a one-off larger budget. Resolves to the KB to use,
+   * or null when they declined.
+   */
+  confirmLargerDiff(notice: DiffBudgetNotice): Promise<number | null>;
   /** Shared preference: wrap long lines instead of scrolling horizontally. */
   wrapLines(): boolean;
   /** Shared preference: render whitespace glyphs (· → ␍). */
@@ -36,6 +61,17 @@ export interface DiffViewActions {
   colors(): Record<string, string> | null;
   /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
   progressText(): string;
+  /**
+   * Send one patch to the runner. Resolves true when it applied, so the pane
+   * knows to reload; the error has already been surfaced when it did not.
+   */
+  applyPatch(patch: string, target: "index" | "worktree", reverse: boolean): Promise<boolean>;
+  /**
+   * Confirm a destructive hunk action. Only discard is destructive: everything
+   * else moves a change between the index and the file and is undone by its
+   * opposite.
+   */
+  confirmDiscard(lines: number): Promise<boolean>;
 }
 
 /**
@@ -99,7 +135,13 @@ export function gutterWidthCh(root: ParentNode): number {
     if (t.length > digits) digits = t.length;
   }
   // two numbers side by side + one column for the prefix + cell padding
-  return 2 * digits + 4;
+  let width = 2 * digits + 4;
+  // Picking mode puts a checkbox first in the same cell. Measured rather than
+  // assumed, for the same reason the digits are: the wrapped layout gives this
+  // column a fixed width, and a guess that is too small pushes its contents
+  // past the cell border.
+  if (root.querySelector(".ngb-line-pick") !== null) width += 2;
+  return width;
 }
 
 /** Apply the measured gutter width to the pane (used by the wrapped layout). */
@@ -121,6 +163,8 @@ export class DiffView extends ItemView {
   private state: DiffViewState | null = null;
   /** Guards against a stale fetch rendering over a newer one. */
   private loadSeq = 0;
+  /** Interval behind the wait indicator; one per loaded diff. */
+  private waitTicker: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, private actions: DiffViewActions) {
     super(leaf);
@@ -146,19 +190,36 @@ export class DiffView extends ItemView {
   override async setState(state: unknown, result: unknown): Promise<void> {
     const s = state as Partial<DiffViewState> | null;
     if (s && typeof s.path === "string" && typeof s.from === "string" && typeof s.to === "string") {
+      const changed =
+        this.state === null ||
+        this.state.path !== s.path ||
+        this.state.from !== s.from ||
+        this.state.to !== s.to;
       this.state = {
         path: s.path,
         from: s.from,
         to: s.to,
         label: typeof s.label === "string" ? s.label : `${s.from} → ${s.to}`,
       };
+      // The pane is reused for every diff, so an override accepted for one file
+      // must not silently apply to the next.
+      if (changed) this.overrideKb = null;
       await this.loadAndRender();
     }
     return super.setState(state, result as never);
   }
 
   /** Last fetched diff, cached so display toggles re-render without a Termux round trip. */
-  private lastResult: { diff: string; truncated: boolean } | null = null;
+  private lastResult: DiffLoadResult | null = null;
+  /**
+   * Budget the user accepted for THIS diff, in KB. Reset whenever the pane is
+   * pointed at a different diff, so an override never leaks to the next one.
+   */
+  private overrideKb: number | null = null;
+  /** Line-picking mode: off by default, reset whenever the diff is reloaded. */
+  private picking = false;
+  /** Picked lines, as "<hunkIndex>:<lineIndex>" — the coordinate buildHunkPatch takes. */
+  private picked = new Set<string>();
 
   private async loadAndRender(): Promise<void> {
     const st = this.state;
@@ -173,7 +234,8 @@ export class DiffView extends ItemView {
     // Same wait indicator as the file-history panel: a spinning glyph and the
     // operation's own elapsed-time line, not a static sentence.
     this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
-    const res = await this.actions.loadDiff(st.path, st.from, st.to);
+    const res = await this.actions.loadDiff(st.path, st.from, st.to, this.overrideKb ?? undefined);
+    this.stopWaitTicker();
     if (seq !== this.loadSeq) return; // superseded by a newer setState
     this.lastResult = res;
     this.renderBody(box, res);
@@ -189,10 +251,20 @@ export class DiffView extends ItemView {
       text.setText(p === "" ? "Loading diff…" : p);
     };
     tick();
-    this.registerInterval(window.setInterval(tick, 500));
+    // See HistoryView.stopWaitTicker: registering alone left one timer per
+    // loaded diff, and this pane is reused for every diff the user opens.
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
   }
 
-  private renderBody(box: HTMLElement, res: { diff: string; truncated: boolean } | null): void {
+  private stopWaitTicker(): void {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
+  }
+
+  private renderBody(box: HTMLElement, res: DiffLoadResult | null): void {
     this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
     box.empty();
     if (res === null) {
@@ -203,15 +275,148 @@ export class DiffView extends ItemView {
       box.createEl("p", { cls: "ngb-ok", text: "No differences." });
       return;
     }
-    renderUnifiedDiff(box, res.diff);
+    const plans = hunkActionsFor(this.state?.from ?? "", this.state?.to ?? "");
+    renderUnifiedDiff(box, res.diff, {
+      hunkBar: plans.length === 0 ? undefined : (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
+      lineCheckbox: this.picking
+        ? (b, hunkIndex, lineIndex) => {
+            const key = `${hunkIndex}:${lineIndex}`;
+            b.checked = this.picked.has(key);
+            b.addEventListener("change", () => {
+              if (b.checked) this.picked.add(key);
+              else this.picked.delete(key);
+              // Only the labels and the disabled state change, so the diff is
+              // left alone: rebuilding it on every tap would lose the scroll
+              // position and, on a long diff, be felt.
+              this.refreshHunkBars();
+            });
+          }
+        : undefined,
+    });
     sizeGutter(box);
-    if (res.truncated) {
-      box.createDiv({
-        cls: "ngb-warning",
-        text: "Diff truncated (too large). The full diff is available via git in Termux.",
-      });
-    }
+    this.renderBudgetNotice(box, res);
     this.applyDisplayPrefs();
+  }
+
+  /**
+   * One hunk's controls: its actions, and the toggle that switches the pane
+   * between whole-hunk and picked-lines.
+   *
+   * The toggle sits beside the actions rather than in the pane header because it
+   * changes what those very buttons do, and a control that changes another
+   * control belongs next to it.
+   */
+  private renderHunkBar(
+    bar: HTMLElement,
+    hunk: DiffHunk,
+    hunkIndex: number,
+    plans: HunkActionPlan[]
+  ): void {
+    const selected = this.selectionFor(hunk, hunkIndex);
+    // In picking mode a button acts on the ticked lines, so it is dead until
+    // something is ticked. Disabled rather than hidden: the row must not reflow
+    // every time a checkbox changes.
+    const empty = this.picking && !selectionHasChanges(hunk, selected);
+
+    for (const plan of plans) {
+      const btn = bar.createEl("button", {
+        cls: plan.destructive ? "ngb-hunk-btn mod-warning" : "ngb-hunk-btn",
+        text: this.picking ? plan.selectedLabel : plan.label,
+      });
+      btn.disabled = empty;
+      btn.addEventListener("click", () => { void this.runHunkAction(plan, hunk, hunkIndex); });
+    }
+
+    if (!supportsLineSelection(this.state?.from ?? "", this.state?.to ?? "")) return;
+    const toggle = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-hunk-pick-toggle" });
+    toggle.setAttribute("aria-label", this.picking ? "Select hunk" : "Select lines");
+    setIcon(toggle, this.picking ? "square" : "list-checks");
+    if (!Platform.isPhone) toggle.createSpan({ text: this.picking ? "Select hunk" : "Select lines" });
+    toggle.addEventListener("click", () => {
+      this.picking = !this.picking;
+      // Leaving the mode drops the picks: keeping them invisible would mean a
+      // later "Stage hunk" quietly acting on a subset.
+      this.picked.clear();
+      const box = this.contentEl.querySelector<HTMLElement>(".ngb-diff-pane-body");
+      if (box) this.renderBody(box, this.lastResult);
+    });
+  }
+
+  /** Which lines of this hunk are picked. Whole hunk when not in picking mode. */
+  private selectionFor(hunk: DiffHunk, hunkIndex: number): Set<number> {
+    if (!this.picking) return new Set(selectableLines(hunk));
+    const out = new Set<number>();
+    for (const i of selectableLines(hunk)) {
+      if (this.picked.has(`${hunkIndex}:${i}`)) out.add(i);
+    }
+    return out;
+  }
+
+  /** Relabel and re-enable the bars after a checkbox changed, without rebuilding the diff. */
+  private refreshHunkBars(): void {
+    const box = this.contentEl.querySelector<HTMLElement>(".ngb-diff-pane-body");
+    if (!box || !this.lastResult) return;
+    const hunks = parseUnifiedDiff(this.lastResult.diff).flatMap((f) => f.hunks);
+    const bars = Array.from(box.querySelectorAll<HTMLElement>(".ngb-hunk-bar"));
+    bars.forEach((bar, i) => {
+      const hunk = hunks[i];
+      if (!hunk) return;
+      const empty = !selectionHasChanges(hunk, this.selectionFor(hunk, i));
+      for (const b of Array.from(bar.querySelectorAll<HTMLButtonElement>(".ngb-hunk-btn"))) {
+        b.disabled = empty;
+      }
+    });
+  }
+
+  /**
+   * Build the patch for one hunk and send it. Reloads afterwards, because the
+   * diff the pane is showing is exactly what the action changed.
+   */
+  private async runHunkAction(plan: HunkActionPlan, hunk: DiffHunk, hunkIndex: number): Promise<void> {
+    const st = this.state;
+    if (!st) return;
+    const selected = this.selectionFor(hunk, hunkIndex);
+    const patch = buildHunkPatch({
+      path: st.path,
+      hunk,
+      selected: this.picking ? selected : undefined,
+    });
+    if (patch === null) return; // nothing picked but context; the button was disabled
+    if (plan.destructive && !(await this.actions.confirmDiscard(selected.size))) return;
+    if (!(await this.actions.applyPatch(patch, plan.target, plan.reverse))) return;
+    // A successful action invalidates the picks: the line indices it described
+    // no longer point at the same lines.
+    this.picked.clear();
+    await this.loadAndRender();
+  }
+
+  /**
+   * What the budget left out, and the one-tap way to get it.
+   *
+   * Placed after the diff rather than before it: the user came to read the
+   * change, and a diff that fits says nothing here at all.
+   */
+  private renderBudgetNotice(box: HTMLElement, res: DiffLoadResult): void {
+    const notice = describeDiffBudget({
+      hunksShown: res.hunksShown,
+      hunksTotal: res.hunksTotal,
+      totalBytes: res.totalBytes,
+      limitBytes: res.limitBytes,
+      linesShown: box.querySelectorAll(".d2h-code-line-ctn").length,
+    });
+    if (!notice) return;
+    const wrap = box.createDiv({ cls: "ngb-warning ngb-diff-budget" });
+    wrap.createDiv({ text: notice.text });
+    if (notice.overrideLabel === null) return;
+    const btn = wrap.createEl("button", { text: notice.overrideLabel });
+    btn.addEventListener("click", () => { void (async () => {
+      const kb = await this.actions.confirmLargerDiff(notice);
+      if (kb === null) return;
+      // Held on the pane, not in settings: the next diff opened here starts
+      // from the configured budget again.
+      this.overrideKb = kb;
+      await this.loadAndRender();
+    })(); });
   }
 
   /**

@@ -32,7 +32,7 @@ var import_obsidian15 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
-var RUNNER_MIN_VERSION = 11;
+var RUNNER_MIN_VERSION = 12;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -92,7 +92,8 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["adopt-remote", 11],
   ["abort-rebase", 11],
   ["continue-rebase", 11],
-  ["unstage-protected", 11]
+  ["unstage-protected", 11],
+  ["apply-patch", 12]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -116,10 +117,14 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "adopt-remote",
   "abort-rebase",
   "continue-rebase",
-  "unstage-protected"
+  "unstage-protected",
+  "apply-patch"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
+var DIFF_LIMIT_CHOICES_KB = [50, 100, 200, 500, 1024];
+var DEFAULT_DIFF_LIMIT_KB = 100;
+var DIFF_LIMIT_ABSOLUTE_MAX_KB = 4096;
 var CURRENT_SCHEMA_VERSION = 1;
 var DEFAULT_DEVICE_SETTINGS = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -146,6 +151,7 @@ var DEFAULT_DEVICE_SETTINGS = {
   menuSparse: true,
   menuExclude: true,
   statusRefreshSeconds: 0,
+  diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
   previousRepoDismissed: []
 };
@@ -1365,6 +1371,20 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       })
     );
     this.renderColorSection(containerEl);
+    new import_obsidian4.Setting(containerEl).setName("Diff size limit").setDesc(
+      "How much of one diff the pane builds at a time. The runner keeps whole hunks within the limit and never a partial one, and the pane says how many it left out, with a one-tap way to fetch the rest for that diff alone. Every diff line costs about a dozen elements to draw, so this is a per-phone decision and stays device-local."
+    ).addDropdown((d) => {
+      for (const kb of DIFF_LIMIT_CHOICES_KB) {
+        d.addOption(String(kb), kb >= 1024 ? `${kb / 1024} MB` : `${kb} KB`);
+      }
+      d.setValue(String(s.diffLimitKb)).onChange((v) => {
+        void (async () => {
+          const n = parseInt(v, 10);
+          if (!Number.isFinite(n) || n <= 0) return;
+          await this.plugin.updateDeviceSettings({ diffLimitKb: n });
+        })();
+      });
+    });
     new import_obsidian4.Setting(containerEl).setName("Auto-refresh status (seconds)").setDesc(
       "While the status panel is open, run a status this often to pick up outside changes. 0 disables it. Each refresh wakes Termux \u2014 consider battery before choosing a small interval. Device-local."
     ).addText((t) => {
@@ -3181,6 +3201,21 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.savedScroll = 0;
     /** State line in the strip, mirroring the status panel's. */
     this.progressEl = null;
+    /**
+     * The refresh button, kept so its animation can follow `loading`.
+     *
+     * It used to be decided once, inside `renderShell`, from a flag that
+     * `loadMore` sets afterwards — so the button never span at all, no matter how
+     * long the runner took.
+     */
+    this.refreshBtn = null;
+    /**
+     * Interval behind the in-list wait indicator. One per load, cleared when the
+     * load ends: `registerInterval` ties an interval to the VIEW's lifetime, so
+     * without this every refresh left another timer ticking into a detached node
+     * until the panel was closed.
+     */
+    this.waitTicker = null;
   }
   getViewType() {
     return NGB_HISTORY_VIEW;
@@ -3225,12 +3260,12 @@ var HistoryView = class extends import_obsidian11.ItemView {
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Refresh history");
     (0, import_obsidian11.setIcon)(refreshBtn, "refresh-cw");
-    if (this.loading) refreshBtn.addClass("ngb-anim-spin", "ngb-sv-icon-active");
     refreshBtn.addEventListener("click", () => void this.refresh());
+    this.refreshBtn = refreshBtn;
     const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
     const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
-    this.applyStripState();
+    this.applyLoadingState();
     const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
     const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     const treeOn = this.actions.treeView();
@@ -3248,10 +3283,21 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.moreBtn.hide();
   }
   /**
-   * The strip's state line. "Idle" is the same word the status panel uses, so
-   * the two panels do not describe the same condition differently.
+   * The strip's state line and the refresh animation, both driven by `loading`.
+   *
+   * Called whenever `loading` changes rather than only at render time. An
+   * indicator that keeps moving after the work stopped is worse than no
+   * indicator: it says the runner is busy when it is not. The same rule applies
+   * to a refused operation, where the animation must never start.
+   *
+   * "Idle" is the word the status panel uses, so the two panels do not describe
+   * the same condition differently.
    */
-  applyStripState() {
+  applyLoadingState() {
+    if (this.refreshBtn) {
+      this.refreshBtn.toggleClass("ngb-anim-spin", this.loading);
+      this.refreshBtn.toggleClass("ngb-sv-icon-active", this.loading);
+    }
     if (!this.progressEl) return;
     const p = this.actions.progressText();
     const running = this.loading || p !== "";
@@ -3269,7 +3315,7 @@ var HistoryView = class extends import_obsidian11.ItemView {
   async loadMore() {
     if (this.loading) return;
     this.loading = true;
-    this.applyStripState();
+    this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading\u2026");
@@ -3278,8 +3324,9 @@ var HistoryView = class extends import_obsidian11.ItemView {
     if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(this.skip, this.pageSize);
     waiting?.remove();
+    this.stopWaitTicker();
     this.loading = false;
-    this.applyStripState();
+    this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
       this.moreBtn.setText("Load more");
@@ -3313,7 +3360,14 @@ var HistoryView = class extends import_obsidian11.ItemView {
       text.setText(p === "" ? `${what}\u2026` : p);
     };
     tick();
-    this.registerInterval(window.setInterval(tick, 500));
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+  }
+  stopWaitTicker() {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
   }
   renderCommit(e) {
     if (!this.listEl) return;
@@ -3483,6 +3537,9 @@ function parseUnifiedDiff(diff) {
   let hunk = null;
   let oldNo = 0;
   let newNo = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  const insideHunk = () => hunk !== null && oldLeft + newLeft > 0;
   const ensureFile = () => {
     if (!file) {
       file = { path: "", hunks: [] };
@@ -3497,11 +3554,7 @@ function parseUnifiedDiff(diff) {
       file = { path: "", hunks: [] };
       files.push(file);
       hunk = null;
-      continue;
-    }
-    if (line.startsWith("+++ ")) {
-      const p = line.slice(4).trim();
-      ensureFile().path = p === "/dev/null" ? "" : p.replace(/^[abciwo]\//, "");
+      oldLeft = newLeft = 0;
       continue;
     }
     const m = HUNK_RE.exec(line);
@@ -3510,14 +3563,24 @@ function parseUnifiedDiff(diff) {
       ensureFile().hunks.push(hunk);
       oldNo = Number(m[1]);
       newNo = Number(m[2]);
+      const counts = hunkCounts(line);
+      oldLeft = counts.old;
+      newLeft = counts.new;
+      continue;
+    }
+    if (!insideHunk() && line.startsWith("+++ ")) {
+      const p = line.slice(4).trim();
+      ensureFile().path = p === "/dev/null" ? "" : p.replace(/^[abciwo]\//, "");
       continue;
     }
     if (hunk === null) continue;
     if (line.startsWith("\\")) continue;
     if (line.startsWith("+")) {
       hunk.lines.push({ kind: "insert", text: line.slice(1), oldNumber: null, newNumber: newNo++ });
+      if (newLeft > 0) newLeft--;
     } else if (line.startsWith("-")) {
       hunk.lines.push({ kind: "delete", text: line.slice(1), oldNumber: oldNo++, newNumber: null });
+      if (oldLeft > 0) oldLeft--;
     } else if (line.startsWith(" ") || line === "") {
       hunk.lines.push({
         kind: "context",
@@ -3525,10 +3588,20 @@ function parseUnifiedDiff(diff) {
         oldNumber: oldNo++,
         newNumber: newNo++
       });
+      if (oldLeft > 0) oldLeft--;
+      if (newLeft > 0) newLeft--;
     }
   }
   for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines);
   return files;
+}
+function hunkCounts(header) {
+  const m = /@@+ -(\d+)(?:,(\d+))?(?: -\d+(?:,\d+)?)* \+(\d+)(?:,(\d+))? @@/.exec(header);
+  if (!m) return { old: 0, new: 0 };
+  return {
+    old: m[2] === void 0 ? 1 : Number(m[2]),
+    new: m[4] === void 0 ? 1 : Number(m[4])
+  };
 }
 function pairChangedLines(lines) {
   let i = 0;
@@ -3558,31 +3631,123 @@ function pairChangedLines(lines) {
   }
 }
 
+// src/git/hunkPatch.ts
+function buildHunkPatch(req) {
+  const { path, hunk, selected } = req;
+  const body = [];
+  let oldCount = 0;
+  let newCount = 0;
+  let changes = 0;
+  hunk.lines.forEach((line, i) => {
+    const picked = selected === void 0 || selected.has(i);
+    if (line.kind === "context") {
+      body.push(` ${line.text}`);
+      oldCount++;
+      newCount++;
+      return;
+    }
+    if (line.kind === "delete") {
+      if (picked) {
+        body.push(`-${line.text}`);
+        oldCount++;
+        changes++;
+      } else {
+        body.push(` ${line.text}`);
+        oldCount++;
+        newCount++;
+      }
+      return;
+    }
+    if (picked) {
+      body.push(`+${line.text}`);
+      newCount++;
+      changes++;
+    }
+  });
+  if (changes === 0) return null;
+  const oldStart = hunk.lines.find((l) => l.oldNumber !== null)?.oldNumber ?? 1;
+  const newStart = hunk.lines.find((l) => l.newNumber !== null)?.newNumber ?? 1;
+  return [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${range(oldStart, oldCount)} +${range(newStart, newCount)} @@`,
+    ...body,
+    ""
+  ].join("\n");
+}
+function range(start, count) {
+  const s = count === 0 ? 0 : start;
+  return count === 1 ? `${s}` : `${s},${count}`;
+}
+function selectableLines(hunk) {
+  const out = [];
+  hunk.lines.forEach((l, i) => {
+    if (l.kind !== "context") out.push(i);
+  });
+  return out;
+}
+function selectionHasChanges(hunk, selected) {
+  return hunk.lines.some((l, i) => l.kind !== "context" && selected.has(i));
+}
+function buildWholeFilePatch(path, before, after) {
+  if (before === after) return null;
+  const oldLines = splitKeepingShape(before);
+  const newLines = splitKeepingShape(after);
+  return [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${range(1, oldLines.length)} +${range(1, newLines.length)} @@`,
+    ...oldLines.map((l) => `-${l}`),
+    ...newLines.map((l) => `+${l}`),
+    ""
+  ].join("\n");
+}
+function splitKeepingShape(text) {
+  const lines = text.split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+function needsNoNewlineMarker(text) {
+  return text !== "" && !text.endsWith("\n");
+}
+
 // src/ui/diffDom.ts
 var NBSP = "\xA0";
-function renderUnifiedDiff(parent, diff) {
+function renderUnifiedDiff(parent, diff, opts = {}) {
   const wrapper = parent.createDiv({ cls: "d2h-wrapper" });
+  let hunkIndex = 0;
   for (const file of parseUnifiedDiff(diff)) {
     const fileWrap = wrapper.createDiv({ cls: "d2h-file-wrapper" });
     const table = fileWrap.createDiv({ cls: "d2h-file-diff" }).createDiv({ cls: "d2h-code-wrapper" }).createEl("table", { cls: "d2h-diff-table" });
     const tbody = table.createEl("tbody", { cls: "d2h-diff-tbody" });
     for (const hunk of file.hunks) {
-      renderHunkHeader(tbody, hunk.header);
-      for (const line of hunk.lines) renderLine(tbody, line);
+      renderHunkHeader(tbody, hunk.header, hunk, hunkIndex, opts);
+      const pickable = new Set(selectableLines(hunk));
+      hunk.lines.forEach((line, i) => {
+        renderLine(tbody, line, hunkIndex, i, pickable.has(i) ? opts : {});
+      });
+      hunkIndex++;
     }
   }
   return wrapper;
 }
-function renderHunkHeader(tbody, header) {
+function renderHunkHeader(tbody, header, hunk, hunkIndex, opts) {
   const tr = tbody.createEl("tr");
   tr.createEl("td", { cls: "d2h-code-linenumber d2h-info" });
-  tr.createEl("td", { cls: "d2h-info" }).createDiv({ cls: "d2h-code-line", text: header });
+  const cell = tr.createEl("td", { cls: "d2h-info" });
+  cell.createDiv({ cls: "d2h-code-line", text: header });
+  if (opts.hunkBar) opts.hunkBar(cell.createDiv({ cls: "ngb-hunk-bar" }), hunk, hunkIndex);
 }
-function renderLine(tbody, line) {
+function renderLine(tbody, line, hunkIndex, lineIndex, opts) {
   const kindCls = line.kind === "insert" ? "d2h-ins" : line.kind === "delete" ? "d2h-del" : "d2h-cntx";
   const cls = line.paired === true ? `${kindCls} d2h-change` : kindCls;
   const tr = tbody.createEl("tr");
   const gutter = tr.createEl("td", { cls: `d2h-code-linenumber ${cls}` });
+  if (opts.lineCheckbox) {
+    const box = gutter.createEl("input", { cls: "ngb-line-pick" });
+    box.type = "checkbox";
+    opts.lineCheckbox(box, hunkIndex, lineIndex);
+  }
   gutter.createDiv({ cls: "line-num1", text: line.oldNumber === null ? "" : String(line.oldNumber) });
   gutter.createDiv({ cls: "line-num2", text: line.newNumber === null ? "" : String(line.newNumber) });
   gutter.createSpan({
@@ -3600,6 +3765,82 @@ function renderRuns(ctn, runs, kind) {
     if (run.kind === "same") ctn.appendText(run.text);
     else if (run.kind === mark) ctn.createEl(kind === "insert" ? "ins" : "del", { text: run.text });
   }
+}
+
+// src/git/diffBudget.ts
+var DOM_NODES_PER_LINE = 12;
+var KB = 1024;
+function describeDiffBudget(f) {
+  if (f.hunksTotal === 0 || f.hunksShown >= f.hunksTotal) return null;
+  const bytesPerLine = f.linesShown > 0 ? Math.max(1, f.limitBytes / f.linesShown) : 40;
+  const estimatedLines = Math.round(f.totalBytes / bytesPerLine);
+  const wantKb = Math.ceil(f.totalBytes / KB);
+  const cappedByTransport = wantKb > DIFF_LIMIT_ABSOLUTE_MAX_KB;
+  const overrideKb = Math.min(wantKb, DIFF_LIMIT_ABSOLUTE_MAX_KB);
+  const shown = f.hunksShown === 0 ? `None of the ${f.hunksTotal} hunks fit in ${fmtKb(f.limitBytes)}` : `Showing ${f.hunksShown} of ${f.hunksTotal} hunks (${fmtKb(f.limitBytes)} limit)`;
+  return {
+    text: `${shown}. The whole diff is ${fmtKb(f.totalBytes)}.`,
+    overrideLabel: cappedByTransport ? `Show as much as possible (${DIFF_LIMIT_ABSOLUTE_MAX_KB / KB} MB)` : "Show the whole diff",
+    overrideKb,
+    estimatedLines,
+    cappedByTransport
+  };
+}
+function overrideWarning(n) {
+  const nodes = n.estimatedLines * DOM_NODES_PER_LINE;
+  const lines = [
+    `This diff is about ${n.estimatedLines.toLocaleString()} lines, which the panel renders as roughly ${approx(nodes)} elements.`,
+    "Building it can take a few seconds and the pane may scroll roughly afterwards. The limit in settings is unchanged; this applies to this diff only."
+  ];
+  if (n.cappedByTransport) {
+    lines.push(
+      `The diff is larger than one request can carry, so even this shows only the first ${DIFF_LIMIT_ABSOLUTE_MAX_KB / KB} MB of it.`
+    );
+  }
+  return lines;
+}
+function fmtKb(bytes) {
+  if (bytes >= KB * KB) return `${(bytes / (KB * KB)).toFixed(1)} MB`;
+  return `${Math.round(bytes / KB)} KB`;
+}
+function approx(n) {
+  if (n < 1e3) return String(n);
+  const rounded = n < 1e4 ? Math.round(n / 100) * 100 : Math.round(n / 1e3) * 1e3;
+  return rounded.toLocaleString();
+}
+
+// src/git/hunkActions.ts
+var STAGE = {
+  action: "stage",
+  label: "Stage hunk",
+  selectedLabel: "Stage selected",
+  target: "index",
+  reverse: false,
+  destructive: false
+};
+var UNSTAGE = {
+  action: "unstage",
+  label: "Unstage hunk",
+  selectedLabel: "Unstage selected",
+  target: "index",
+  reverse: true,
+  destructive: false
+};
+var DISCARD = {
+  action: "discard",
+  label: "Discard hunk",
+  selectedLabel: "Discard selected",
+  target: "worktree",
+  reverse: true,
+  destructive: true
+};
+function hunkActionsFor(from, to) {
+  if (to === "INDEX") return [UNSTAGE];
+  if (from === "INDEX" && to === "WORKTREE") return [STAGE, DISCARD];
+  return [];
+}
+function supportsLineSelection(from, to) {
+  return hunkActionsFor(from, to).length > 0;
 }
 
 // src/ui/DiffView.ts
@@ -3636,7 +3877,9 @@ function gutterWidthCh(root) {
     const t = (el.textContent ?? "").trim();
     if (t.length > digits) digits = t.length;
   }
-  return 2 * digits + 4;
+  let width = 2 * digits + 4;
+  if (root.querySelector(".ngb-line-pick") !== null) width += 2;
+  return width;
 }
 function sizeGutter(box) {
   const host = box.closest(".ngb-diff-view") ?? box;
@@ -3649,8 +3892,19 @@ var DiffView = class extends import_obsidian12.ItemView {
     this.state = null;
     /** Guards against a stale fetch rendering over a newer one. */
     this.loadSeq = 0;
+    /** Interval behind the wait indicator; one per loaded diff. */
+    this.waitTicker = null;
     /** Last fetched diff, cached so display toggles re-render without a Termux round trip. */
     this.lastResult = null;
+    /**
+     * Budget the user accepted for THIS diff, in KB. Reset whenever the pane is
+     * pointed at a different diff, so an override never leaks to the next one.
+     */
+    this.overrideKb = null;
+    /** Line-picking mode: off by default, reset whenever the diff is reloaded. */
+    this.picking = false;
+    /** Picked lines, as "<hunkIndex>:<lineIndex>" — the coordinate buildHunkPatch takes. */
+    this.picked = /* @__PURE__ */ new Set();
     this.navigation = true;
   }
   getViewType() {
@@ -3670,12 +3924,14 @@ var DiffView = class extends import_obsidian12.ItemView {
   async setState(state, result) {
     const s = state;
     if (s && typeof s.path === "string" && typeof s.from === "string" && typeof s.to === "string") {
+      const changed = this.state === null || this.state.path !== s.path || this.state.from !== s.from || this.state.to !== s.to;
       this.state = {
         path: s.path,
         from: s.from,
         to: s.to,
         label: typeof s.label === "string" ? s.label : `${s.from} \u2192 ${s.to}`
       };
+      if (changed) this.overrideKb = null;
       await this.loadAndRender();
     }
     return super.setState(state, result);
@@ -3691,7 +3947,8 @@ var DiffView = class extends import_obsidian12.ItemView {
     head.setAttribute("aria-label", `${st.path} \xB7 ${st.label}`);
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
     this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
-    const res = await this.actions.loadDiff(st.path, st.from, st.to);
+    const res = await this.actions.loadDiff(st.path, st.from, st.to, this.overrideKb ?? void 0);
+    this.stopWaitTicker();
     if (seq !== this.loadSeq) return;
     this.lastResult = res;
     this.renderBody(box, res);
@@ -3706,7 +3963,14 @@ var DiffView = class extends import_obsidian12.ItemView {
       text.setText(p === "" ? "Loading diff\u2026" : p);
     };
     tick();
-    this.registerInterval(window.setInterval(tick, 500));
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+  }
+  stopWaitTicker() {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
   }
   renderBody(box, res) {
     this.contentEl.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
@@ -3719,15 +3983,126 @@ var DiffView = class extends import_obsidian12.ItemView {
       box.createEl("p", { cls: "ngb-ok", text: "No differences." });
       return;
     }
-    renderUnifiedDiff(box, res.diff);
+    const plans = hunkActionsFor(this.state?.from ?? "", this.state?.to ?? "");
+    renderUnifiedDiff(box, res.diff, {
+      hunkBar: plans.length === 0 ? void 0 : (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
+      lineCheckbox: this.picking ? (b, hunkIndex, lineIndex) => {
+        const key = `${hunkIndex}:${lineIndex}`;
+        b.checked = this.picked.has(key);
+        b.addEventListener("change", () => {
+          if (b.checked) this.picked.add(key);
+          else this.picked.delete(key);
+          this.refreshHunkBars();
+        });
+      } : void 0
+    });
     sizeGutter(box);
-    if (res.truncated) {
-      box.createDiv({
-        cls: "ngb-warning",
-        text: "Diff truncated (too large). The full diff is available via git in Termux."
+    this.renderBudgetNotice(box, res);
+    this.applyDisplayPrefs();
+  }
+  /**
+   * One hunk's controls: its actions, and the toggle that switches the pane
+   * between whole-hunk and picked-lines.
+   *
+   * The toggle sits beside the actions rather than in the pane header because it
+   * changes what those very buttons do, and a control that changes another
+   * control belongs next to it.
+   */
+  renderHunkBar(bar, hunk, hunkIndex, plans) {
+    const selected = this.selectionFor(hunk, hunkIndex);
+    const empty = this.picking && !selectionHasChanges(hunk, selected);
+    for (const plan of plans) {
+      const btn = bar.createEl("button", {
+        cls: plan.destructive ? "ngb-hunk-btn mod-warning" : "ngb-hunk-btn",
+        text: this.picking ? plan.selectedLabel : plan.label
+      });
+      btn.disabled = empty;
+      btn.addEventListener("click", () => {
+        void this.runHunkAction(plan, hunk, hunkIndex);
       });
     }
-    this.applyDisplayPrefs();
+    if (!supportsLineSelection(this.state?.from ?? "", this.state?.to ?? "")) return;
+    const toggle = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-hunk-pick-toggle" });
+    toggle.setAttribute("aria-label", this.picking ? "Select hunk" : "Select lines");
+    (0, import_obsidian12.setIcon)(toggle, this.picking ? "square" : "list-checks");
+    if (!import_obsidian12.Platform.isPhone) toggle.createSpan({ text: this.picking ? "Select hunk" : "Select lines" });
+    toggle.addEventListener("click", () => {
+      this.picking = !this.picking;
+      this.picked.clear();
+      const box = this.contentEl.querySelector(".ngb-diff-pane-body");
+      if (box) this.renderBody(box, this.lastResult);
+    });
+  }
+  /** Which lines of this hunk are picked. Whole hunk when not in picking mode. */
+  selectionFor(hunk, hunkIndex) {
+    if (!this.picking) return new Set(selectableLines(hunk));
+    const out = /* @__PURE__ */ new Set();
+    for (const i of selectableLines(hunk)) {
+      if (this.picked.has(`${hunkIndex}:${i}`)) out.add(i);
+    }
+    return out;
+  }
+  /** Relabel and re-enable the bars after a checkbox changed, without rebuilding the diff. */
+  refreshHunkBars() {
+    const box = this.contentEl.querySelector(".ngb-diff-pane-body");
+    if (!box || !this.lastResult) return;
+    const hunks = parseUnifiedDiff(this.lastResult.diff).flatMap((f) => f.hunks);
+    const bars = Array.from(box.querySelectorAll(".ngb-hunk-bar"));
+    bars.forEach((bar, i) => {
+      const hunk = hunks[i];
+      if (!hunk) return;
+      const empty = !selectionHasChanges(hunk, this.selectionFor(hunk, i));
+      for (const b of Array.from(bar.querySelectorAll(".ngb-hunk-btn"))) {
+        b.disabled = empty;
+      }
+    });
+  }
+  /**
+   * Build the patch for one hunk and send it. Reloads afterwards, because the
+   * diff the pane is showing is exactly what the action changed.
+   */
+  async runHunkAction(plan, hunk, hunkIndex) {
+    const st = this.state;
+    if (!st) return;
+    const selected = this.selectionFor(hunk, hunkIndex);
+    const patch = buildHunkPatch({
+      path: st.path,
+      hunk,
+      selected: this.picking ? selected : void 0
+    });
+    if (patch === null) return;
+    if (plan.destructive && !await this.actions.confirmDiscard(selected.size)) return;
+    if (!await this.actions.applyPatch(patch, plan.target, plan.reverse)) return;
+    this.picked.clear();
+    await this.loadAndRender();
+  }
+  /**
+   * What the budget left out, and the one-tap way to get it.
+   *
+   * Placed after the diff rather than before it: the user came to read the
+   * change, and a diff that fits says nothing here at all.
+   */
+  renderBudgetNotice(box, res) {
+    const notice = describeDiffBudget({
+      hunksShown: res.hunksShown,
+      hunksTotal: res.hunksTotal,
+      totalBytes: res.totalBytes,
+      limitBytes: res.limitBytes,
+      linesShown: box.querySelectorAll(".d2h-code-line-ctn").length
+    });
+    if (!notice) return;
+    const wrap = box.createDiv({ cls: "ngb-warning ngb-diff-budget" });
+    wrap.createDiv({ text: notice.text });
+    if (notice.overrideLabel === null) return;
+    const btn = wrap.createEl("button", { text: notice.overrideLabel });
+    btn.addEventListener("click", () => {
+      void (async () => {
+        const kb = await this.actions.confirmLargerDiff(notice);
+        if (kb === null) return;
+        this.overrideKb = kb;
+        await this.loadAndRender();
+      })();
+    });
   }
   /**
    * Apply the display preferences to whatever is currently rendered. Kept
@@ -4112,6 +4487,8 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     this.pageSize = 30;
     this.exhausted = false;
     this.loading = false;
+    /** Interval behind the in-list wait indicator; one per load. */
+    this.waitTicker = null;
     this.expanded = /* @__PURE__ */ new Set();
     this.listEl = null;
     this.moreBtn = null;
@@ -4189,6 +4566,7 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     if (waiting) this.renderWaiting(waiting, "Loading history");
     const page = await this.actions.loadPage(path, this.skip, this.pageSize);
     waiting?.remove();
+    this.stopWaitTicker();
     this.loading = false;
     if (page === null) return;
     if (this.skip === 0 && page.length === 0) {
@@ -4219,7 +4597,14 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
       text.setText(p === "" ? `${what}\u2026` : p);
     };
     tick();
-    const id = this.registerInterval(window.setInterval(tick, 500));
+    this.stopWaitTicker();
+    this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+  }
+  stopWaitTicker() {
+    if (this.waitTicker !== null) {
+      window.clearInterval(this.waitTicker);
+      this.waitTicker = null;
+    }
   }
   renderCommit(e) {
     if (!this.listEl) return;
@@ -4352,8 +4737,18 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
       new import_obsidian14.Notice("This block already matches that commit.");
       return;
     }
+    const patch = needsNoNewlineMarker(current) || needsNoNewlineMarker(out.text) ? null : buildWholeFilePatch(path, current, out.text);
     await this.actions.writeFile(path, out.text);
-    new import_obsidian14.Notice(`Restored one block from ${e.hash.slice(0, 8)}.`);
+    const short = e.hash.slice(0, 8);
+    if (patch === null) {
+      new import_obsidian14.Notice(`Restored one block from ${short}. Stage it from the git panel.`);
+      return;
+    }
+    if (await this.actions.stagePatch(patch)) {
+      new import_obsidian14.Notice(`Restored one block from ${short} and staged it.`);
+    } else {
+      new import_obsidian14.Notice(`Restored one block from ${short}, but staging it failed.`);
+    }
   }
 };
 function wrapRow(bar, sibling) {
@@ -4624,7 +5019,35 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     this.registerView(
       NGB_DIFF_VIEW,
       (leaf) => new DiffView(leaf, {
-        loadDiff: (path, from, to) => this.loadDiffText(path, from, to),
+        loadDiff: (path, from, to, limitKb) => this.loadDiffText(path, from, to, limitKb),
+        applyPatch: (patch, target, reverse) => this.applyHunkPatch(patch, target, reverse),
+        confirmDiscard: (lines) => new Promise((resolve) => {
+          new ConfirmModal(
+            this.app,
+            {
+              title: lines === 1 ? "Discard this line?" : `Discard ${lines} lines?`,
+              body: [
+                "The change is removed from the file itself. Unlike staging, this is not a move between the index and the working tree, and there is no opposite action that brings it back.",
+                "Obsidian's own version history may still have the text; git will not."
+              ],
+              confirmLabel: "Discard",
+              danger: true
+            },
+            (ok) => resolve(ok)
+          ).open();
+        }),
+        confirmLargerDiff: (notice) => new Promise((resolve) => {
+          new ConfirmModal(
+            this.app,
+            {
+              title: "Show the whole diff?",
+              body: overrideWarning(notice),
+              confirmLabel: notice.overrideLabel ?? "Show it",
+              icon: "file-diff"
+            },
+            (ok) => resolve(ok ? notice.overrideKb : null)
+          ).open();
+        }),
         wrapLines: () => this.sharedPrefs.wrapDiffLines,
         showInvisibles: () => this.sharedPrefs.showInvisibles,
         colors: () => this.diffColorVars(),
@@ -4640,6 +5063,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         writeFile: async (p, text) => {
           await this.app.vault.adapter.write(p, text);
         },
+        stagePatch: (patch) => this.applyHunkPatch(patch, "index", false),
         restoreWholeFile: (p, e) => this.confirmRestore(p, e),
         viewAtCommit: (e) => void this.showFileAtCommit(e),
         progressText: () => this.progressText ?? "",
@@ -7077,17 +7501,58 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
    * "<hash>^" fails, the diff is retried against git's canonical empty tree,
    * so the first commit renders as all-additions instead of an error.
    */
-  async loadDiffText(path, from, to) {
-    let result = await this.runOperation("diff-file", { path, from, to });
+  async loadDiffText(path, from, to, limitKb) {
+    const maxBytes = (limitKb ?? this.deviceSettings.diffLimitKb) * 1024;
+    let result = await this.runOperation("diff-file", { path, from, to, maxBytes });
     if (result && !result.ok && from.endsWith("^")) {
-      result = await this.runOperation("diff-file", { path, from: EMPTY_TREE_HASH, to });
+      result = await this.runOperation("diff-file", {
+        path,
+        from: EMPTY_TREE_HASH,
+        to,
+        maxBytes
+      });
     }
     if (!result) return null;
     if (!result.ok) {
       this.renderMutationError("Native Git: diff failed", result);
       return null;
     }
-    return { diff: result.data?.diff ?? "", truncated: result.data?.truncated === "true" };
+    const d = result.data ?? {};
+    const num = (k) => {
+      const n = Number(d[k]);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return {
+      diff: d.diff ?? "",
+      truncated: d.truncated === "true",
+      hunksShown: num("hunksShown"),
+      hunksTotal: num("hunksTotal"),
+      totalBytes: num("diffBytesTotal"),
+      limitBytes: num("diffBytesLimit") || maxBytes
+    };
+  }
+  /**
+   * Send one hunk patch to the runner.
+   *
+   * The patch is built by `hunkPatch.ts` from the diff the pane is showing, and
+   * the runner checks independently that it names exactly one path, that the
+   * path is valid, and that it is not protected: the patch is what git acts on,
+   * so the patch is what has to be verified.
+   */
+  async applyHunkPatch(patch, target, reverse) {
+    const result = await this.runOperation("apply-patch", {
+      patch,
+      target,
+      reverse,
+      protectedPaths: this.effectiveProtectedPaths()
+    });
+    if (!result) return false;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: could not apply the hunk", result);
+      return false;
+    }
+    this.absorbStatusData(result.data ?? {});
+    return true;
   }
   /** Tick the elapsed-time label without rebuilding the panel. */
   updateProgressInView(text) {
