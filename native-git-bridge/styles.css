@@ -347,9 +347,6 @@
 @media (prefers-reduced-motion: reduce) {
   .ngb-sweep-down, .ngb-sweep-down > svg,
   .ngb-sweep-up, .ngb-sweep-up > svg { animation-duration: 2.4s; }
-}
-}
-@media (prefers-reduced-motion: reduce) {
   .ngb-anim-spin svg, .ngb-anim-pulse svg { animation-duration: 2.4s; }
 }
 /* Row currently being acted on by a per-file/folder operation (stage, unstage,
