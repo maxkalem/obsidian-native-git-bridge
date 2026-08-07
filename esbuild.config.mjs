@@ -20,6 +20,13 @@ function syncStaticFiles() {
   for (const f of ["manifest.json", "styles.css"]) {
     fs.copyFileSync(f, `native-git-bridge/${f}`);
   }
+  /*
+   * The Termux scripts are NOT build output: they live in
+   * native-git-bridge/termux/ and are edited there. That is the folder users
+   * copy into their vault, so a device can install and update the runner with
+   * no network at all — bootstrap.sh takes install.sh and the runner from the
+   * directory it is started from. Nothing to copy, nothing to keep in sync.
+   */
   // versions.json must know the manifest version (Obsidian update mechanism).
   const version = JSON.parse(fs.readFileSync("manifest.json", "utf8")).version;
   const versions = JSON.parse(fs.readFileSync("versions.json", "utf8"));

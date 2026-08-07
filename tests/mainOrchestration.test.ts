@@ -165,7 +165,7 @@ function okStatusResult(id: string, runnerVersion = 4) {
 
 // ------------------------------------------------------------- plugin setup
 
-function installGlobals(runner: FakeRunner, adapter: MemAdapter): void {
+function installGlobals(runner: FakeRunner): void {
   (globalThis as Any).window = {
     setInterval: (fn: Any, ms: Any) => setInterval(fn, ms),
     clearInterval: (id: Any) => clearInterval(id),
@@ -184,7 +184,7 @@ function installGlobals(runner: FakeRunner, adapter: MemAdapter): void {
     addEventListener: (ev: string, cb: () => void) => {
       if (ev === "visibilitychange") visListeners.add(cb);
     },
-    removeEventListener: (ev: string, cb: () => void) => {
+    removeEventListener: (_ev: string, cb: () => void) => {
       visListeners.delete(cb);
     },
     /** Test hook: simulate Android bringing another app to the front. */
@@ -195,7 +195,6 @@ function installGlobals(runner: FakeRunner, adapter: MemAdapter): void {
     createElement: () => ({ href: "", rel: "", click: () => undefined, remove: () => undefined }),
     body: { appendChild: () => undefined },
   };
-  void adapter;
 }
 
 interface Harness {
@@ -211,7 +210,7 @@ async function loadPlugin(): Promise<Harness> {
   const adapter = memAdapter();
   const app = makeApp(adapter);
   const runner: FakeRunner = { uris: [], onTrigger: null };
-  installGlobals(runner, adapter);
+  installGlobals(runner);
   const plugin = new (NativeGitBridgePlugin as Any)(app, {
     id: "native-git-bridge",
     name: "Native Git Bridge",

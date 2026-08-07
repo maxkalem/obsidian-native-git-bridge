@@ -1,5 +1,6 @@
 import type { RuntimeFS } from "./BridgeClient";
 import type { RuntimePaths } from "./runtimePaths";
+import { CLAIM_FILE, PAIRING_FILE, PROFILE_MARKER_FILE } from "../constants";
 
 export interface SelfCheckReport {
   runtimeDirExists: boolean;
@@ -50,11 +51,11 @@ export async function runSelfCheck(
       runnerLogTail = "(runner.log could not be read)";
     }
   }
-  const pairingFilePresent = await safeExists(fs, `${paths.root}/pairing.json`);
-  const claimPending = await safeExists(fs, `${paths.root}/claim.json`);
+  const pairingFilePresent = await safeExists(fs, `${paths.root}/${PAIRING_FILE}`);
+  const claimPending = await safeExists(fs, `${paths.root}/${CLAIM_FILE}`);
   let markerProfileId = "";
   try {
-    const raw = await fs.read(`${paths.root}/profile.json`);
+    const raw = await fs.read(`${paths.root}/${PROFILE_MARKER_FILE}`);
     const parsed = JSON.parse(raw) as { profileId?: unknown };
     if (typeof parsed.profileId === "string") markerProfileId = parsed.profileId;
   } catch {

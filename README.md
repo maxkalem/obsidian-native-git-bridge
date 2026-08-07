@@ -69,14 +69,18 @@ The community directory already has several Git plugins. On mobile they take one
 ## Install: two APKs and one pasted line
 
 1. Install **Termux** (from F-Droid) and the **Git Bridge Companion** APK (built by `.github/workflows/build-companion.yml`; grant it the "Run commands in Termux environment" permission).
-2. Paste one line into Termux (also available with a Copy button in the plugin settings):
+2. Paste one line into Termux:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/maxkalem/obsidian-native-git-bridge/main/termux/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
+curl -fsSL https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest/download/bootstrap.sh | bash -s -- "/storage/emulated/0/<YourVault>"
 ```
 
 > [!warning]
 > Be sure to replace \<YourVault\> in this command with the path to your vault! DO NOT COPY THE COMMAND AS-IS.
+
+Better: take the command from the plugin (**Settings → Copy command**) or from the companion app. Those are pinned to the release you are actually running, so the runner they install is the one your build was tested against — which is what the version handshake expects. The line above tracks the newest release instead. Neither fetches from the `main` branch: that is the development state and may be mid-change.
+
+No network, or GitHub having a bad day? The plugin folder already carries the same scripts — see [Installing without a network](#installing-without-a-network).
 
 The installer sets up everything inside Termux: packages (git, jq, openssh), storage access, `allow-external-apps` for the companion, an SSH key (it prints the public key to add as a repo deploy key), repo + sparse verification, the runner, a local `.git/info/exclude` entry, a self-test. It also drops a one-shot `pairing.json` that the plugin imports automatically, so the token never needs to be copied by hand. Credentials stay entirely inside Termux; the plugin never stores or sees them. Any auth you already use works unchanged: a GitHub PAT via the git credential helper (or embedded in the remote URL, which the installer offers to move into `~/.git-credentials`), or an SSH key (generated only for SSH remotes). The runner always runs git with `GIT_TERMINAL_PROMPT=0`, so an expired PAT fails fast with a clear error instead of hanging, and diagnostics reports the detected auth method.
 
@@ -121,6 +125,16 @@ npm run build     # type check + bundle to main.js
 ## Docs
 
 [Setup guide](docs/setup.md) · [Troubleshooting](docs/troubleshooting.md) · [Updating](docs/update.md) · [Release engineering](docs/release.md) · [Design notes for reviewers](docs/submission.md) · [ADR-001: why a companion app](docs/ADR-001-android-invocation.md) · [ADR-002: several repositories per device](docs/ADR-002-multiple-repositories.md) · [Threat model](docs/threat-model.md) · [Protocol](docs/protocol.md) · [Limitations](docs/limitations.md) · [Research notes](docs/research-notes.md)
+
+## Installing without a network
+
+The `native-git-bridge/` folder holds the Termux scripts next to the plugin files, so a device that has the folder needs nothing else:
+
+```
+bash "<vault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "<vault>"
+```
+
+`bootstrap.sh` takes `install.sh` and the runner from the directory it is started from. `NGB_BASE_URL` overrides that source and accepts an `https://` URL, a `file://` URL, or a plain directory path. See [setup.md](docs/setup.md).
 
 ## Installing the plugin manually
 

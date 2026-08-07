@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bootstrapCommand } from "../src/constants";
+import { bootstrapCommand, bootstrapCommandLocal } from "../src/constants";
 import { createRequest, isValidProfileId, makeRequestId, parseResult } from "../src/bridge/protocol";
 import { isValidRequestId } from "../src/settings/pathValidation";
 import { idTimestampMs } from "../src/bridge/BridgeClient";
@@ -52,6 +52,33 @@ describe("parseResult", () => {
   it("returns null for wrong shapes", () => {
     expect(parseResult('{"hello":"world"}')).toBeNull();
     expect(parseResult('[1,2,3]')).toBeNull();
+  });
+});
+
+describe("bootstrapCommandLocal", () => {
+  it("points at the copy that ships inside the plugin folder", () => {
+    const cmd = bootstrapCommandLocal("/storage/emulated/0/Documents/Kalem", ".obsidian");
+    expect(cmd).toBe(
+      'bash "/storage/emulated/0/Documents/Kalem/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" ' +
+        '"/storage/emulated/0/Documents/Kalem"'
+    );
+    // No network anywhere in it: that is the whole point.
+    expect(cmd).not.toContain("http");
+    expect(cmd).not.toContain("curl");
+  });
+
+  it("honours a custom Obsidian config directory", () => {
+    expect(bootstrapCommandLocal("/vaults/Work", ".config-obsidian")).toContain(
+      "/vaults/Work/.config-obsidian/plugins/native-git-bridge/termux/bootstrap.sh"
+    );
+  });
+
+  it("quotes the paths, because vault names have spaces", () => {
+    const cmd = bootstrapCommandLocal("/storage/emulated/0/My Vault", ".obsidian");
+    expect(cmd).toBe(
+      'bash "/storage/emulated/0/My Vault/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" ' +
+        '"/storage/emulated/0/My Vault"'
+    );
   });
 });
 

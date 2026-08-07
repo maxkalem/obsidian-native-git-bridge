@@ -59,4 +59,4 @@ jobs:
             main.js
             manifest.json
             styles.css
-            termux/
+            native-git-bridge/termux/

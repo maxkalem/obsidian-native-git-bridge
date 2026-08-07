@@ -113,6 +113,27 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         })(); })
       );
 
+    const localCmd = this.plugin.installCommandLocal();
+    if (localCmd !== null) {
+      const localBox = containerEl.createDiv({ cls: "ngb-cmd" });
+      localBox.setText(localCmd);
+      localBox.setAttribute("aria-label", "Offline install command");
+      new Setting(containerEl)
+        .setName("Install without a network")
+        .setDesc(
+          "The Termux scripts ship inside this plugin's folder, so the vault on this device already " +
+            "carries them. This command installs and updates the runner from there — no GitHub, no " +
+            "downloads. Useful on a bad connection, and when the runner is behind after the plugin " +
+            "arrived through vault sync."
+        )
+        .addButton((b) =>
+          b.setButtonText("Copy offline command").onClick(() => { void (async () => {
+            await navigator.clipboard.writeText(localCmd);
+            new Notice("Offline install command copied.");
+          })(); })
+        );
+    }
+
     new Setting(containerEl)
       .setName("Setup guide")
       .setDesc(
@@ -157,7 +178,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Pairing token")
       .setDesc(
-        "Paste the token printed by the Termux installer (termux/install.sh). " +
+        "Paste the token printed by the Termux installer. " +
           "It authenticates requests between this plugin and the runner. Stored locally; never logged."
       )
       .addText((t) => {

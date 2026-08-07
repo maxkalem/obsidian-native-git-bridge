@@ -12,7 +12,7 @@ check(){ if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 ROOT="$(mktemp -d)"
 trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RUNNER="$SCRIPT_DIR/termux/native-git-bridge-runner.sh"
+RUNNER="$SCRIPT_DIR/native-git-bridge/termux/native-git-bridge-runner.sh"
 
 # Hermetic HOME: git's global config and the runner's default config directory
 # both live under it, so the suite can set a commit identity (init-repo makes
@@ -1328,6 +1328,42 @@ NGB_CONFIG="$MCONF/config" NGB_SCAN_ROOTS="$MULTI" bash "$RUNNER" >/dev/null
 check 'jq -e ".ok == true" "$IN_RT/results/r-20260806T107000Z-nst01.json" >/dev/null' "init-repo works inside another repository"
 check 'grep -qxF "/Inner/" "$MULTI/VaultA/.git/info/exclude"' "the new repository is excluded from the outer one immediately"
 check '! git -C "$MULTI/VaultA" status --porcelain | grep -q "Inner"' "…so the outer repository never offers its files"
+
+# =============================================================================
+# phase 8: installing with no network at all
+# =============================================================================
+# Every build copies the Termux scripts into the plugin folder, so the vault on
+# the device already carries them. bootstrap.sh must then work from that copy
+# without a URL, without NGB_VERSION, and without touching the network — which
+# is also the only way to install while GitHub is unreachable.
+
+echo "# phase 8: bootstrap.sh takes the installer from the folder it lives in"
+PLUGDIR="$ROOT/vault/.obsidian/plugins/native-git-bridge/termux"
+mkdir -p "$PLUGDIR"
+cp "$SCRIPT_DIR/native-git-bridge/termux/bootstrap.sh" "$PLUGDIR/"
+check '[ -f "$SCRIPT_DIR/native-git-bridge/termux/install.sh" ] && [ -f "$SCRIPT_DIR/native-git-bridge/termux/native-git-bridge-runner.sh" ]' "install.sh and the runner ship inside the plugin folder"
+check '[ ! -d "$SCRIPT_DIR/termux" ]' "the scripts live in the plugin folder only — no second copy to drift"
+# Stand-ins for the two scripts: the real installer refuses to run outside
+# Termux, and what is under test here is which files bootstrap picks and with
+# which arguments — not the install itself.
+printf '#!/usr/bin/env bash\necho "INSTALLER ARGS: $*"\n' > "$PLUGDIR/install.sh"
+printf '#!/usr/bin/env bash\necho runner\n' > "$PLUGDIR/native-git-bridge-runner.sh"
+OUT="$(bash "$PLUGDIR/bootstrap.sh" "$ROOT/vault" 2>&1)"
+check 'printf %s "$OUT" | grep -q "INSTALLER ARGS: $ROOT/vault"' "running the copy needs no arguments beyond the vault, and no network"
+check 'printf %s "$OUT" | grep -q "Taking the Native Git Bridge installer from $PLUGDIR"' "…and it says where it took the files from"
+check '! printf %s "$OUT" | grep -qi "download"' "…without downloading anything"
+# NGB_BASE_URL as a plain directory: the documented way when the script is piped.
+OUT="$(cat "$PLUGDIR/bootstrap.sh" | NGB_BASE_URL="$PLUGDIR" bash -s -- "$ROOT/vault" 2>&1)"
+check 'printf %s "$OUT" | grep -q "INSTALLER ARGS: $ROOT/vault"' "NGB_BASE_URL may be a plain directory path, not only a URL"
+OUT="$(cat "$PLUGDIR/bootstrap.sh" | NGB_BASE_URL="file://$PLUGDIR" bash -s -- "$ROOT/vault" 2>&1)"
+check 'printf %s "$OUT" | grep -q "INSTALLER ARGS: $ROOT/vault"' "…or a file:// URL"
+# A folder that was copied incompletely must say so instead of running half of it.
+mkdir -p "$ROOT/half"
+cp "$PLUGDIR/bootstrap.sh" "$ROOT/half/"
+printf 'not a script\n' > "$ROOT/half/install.sh"
+printf '#!/usr/bin/env bash\n' > "$ROOT/half/native-git-bridge-runner.sh"
+OUT="$(NGB_BASE_URL="$ROOT/half" bash "$ROOT/half/bootstrap.sh" "$ROOT/vault" 2>&1 || true)"
+check 'printf %s "$OUT" | grep -q "does not look like a script"' "a truncated or wrong file is refused, not executed"
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

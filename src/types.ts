@@ -61,14 +61,6 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["adopt-remote", 11],
 ]);
 
-export const PHASE2_ACTIONS: ReadonlySet<string> = new Set([
-  "ping",
-  "status",
-  "verify-sparse-safety",
-  "sparse-reapply",
-  "diagnostics",
-]);
-
 /** Actions that may modify repository state; serialized behind the operation lock. */
 export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "sparse-reapply",

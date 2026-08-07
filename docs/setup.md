@@ -56,6 +56,35 @@ Two things to know before choosing this route:
 
 Git Credential Manager, the usual OAuth helper on desktop, has no Android build and is not an option here.
 
+### Installing without a network
+
+The Termux scripts live in the plugin folder, so the folder you put in the vault already carries them:
+
+```
+<vault>/.obsidian/plugins/native-git-bridge/
+  main.js  manifest.json  styles.css
+  termux/bootstrap.sh  termux/install.sh  termux/native-git-bridge-runner.sh
+```
+
+Copy that folder to the device and run, in Termux:
+
+```
+bash "/storage/emulated/0/<YourVault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "/storage/emulated/0/<YourVault>"
+```
+
+`bootstrap.sh` takes `install.sh` and the runner from the directory it is started from, so there is nothing to download, no version to pass and nothing that depends on GitHub being reachable. The plugin shows this exact command under *Settings → Install without a network* (and as *Copy offline command* in the setup guide) as soon as the repository path is set, because Termux addresses the vault by its absolute path.
+
+If you prefer to pipe the script instead of running it, the source has to be named explicitly, since a piped script cannot know where it came from:
+
+```
+curl -fsSL "file:///storage/emulated/0/<YourVault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" \
+  | NGB_BASE_URL="/storage/emulated/0/<YourVault>/.obsidian/plugins/native-git-bridge/termux" bash -s -- "/storage/emulated/0/<YourVault>"
+```
+
+**`NGB_BASE_URL`** is where the three scripts come from. It accepts an `https://` URL (a release, a mirror), a `file://` URL, or a plain directory path — on a device, that is the plugin's own `termux` folder inside the vault. It overrides everything else; without it, the order is: the folder the script lives in, then the release matching `NGB_VERSION`, then the newest release.
+
+This is also how to update the runner when the plugin arrived through vault sync but GitHub is unreachable: the new scripts came with it, so the offline command installs exactly the runner this plugin build expects.
+
 ## Step 3b: more than one vault on the device
 
 Each vault is a repository of its own and gets its own profile, its own token and its own runtime folder. One runner drains them all, so you never have to switch anything.

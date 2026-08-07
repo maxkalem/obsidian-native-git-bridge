@@ -409,3 +409,28 @@ export class StatusModal extends Modal {
     this.contentEl.empty();
   }
 }
+
+/** Plain-text preview of a file version (mono, scrollable). */
+export class TextPreviewModal extends Modal {
+  constructor(
+    app: App,
+    private title: string,
+    private meta: string,
+    private text: string
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.modalEl.addClass("ngb-modal");
+    this.titleEl.setText(this.title);
+    const c = this.contentEl;
+    c.createDiv({ cls: "ngb-settings-note", text: this.meta });
+    const box = c.createDiv({ cls: "ngb-output ngb-output-tall" });
+    box.createEl("pre", { text: this.text });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}

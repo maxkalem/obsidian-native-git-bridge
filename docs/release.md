@@ -4,6 +4,8 @@
 
 `manifest.json` and `styles.css` are edited at the repository **root** only (the layout the community-plugins review expects). Every `npm run build` copies them into `native-git-bridge/` next to the freshly bundled `main.js`, and CI fails when the committed copies differ from the build. The result: a manual copy of `native-git-bridge/`, a BRAT install from a release, and a community-plugins install all ship byte-identical files. Never edit the files inside `native-git-bridge/` by hand; they are build output.
 
+The Termux scripts live in `native-git-bridge/termux/` and are edited there — they are **not** build output and there is no second copy. That is deliberate: it is the folder users copy into their vault, so a device that has the plugin already has everything needed to install or update the runner with no network at all. The release workflow attaches the three files from that folder, so the asset names on a release are unchanged.
+
 `package-lock.json` is committed so `npm ci` pins the toolchain: without it, an esbuild patch release would change `main.js` bytes and turn the CI freshness check into noise.
 
 ## Version fields (all must move together)
@@ -13,7 +15,7 @@
 | `manifest.json`<br>(root; synced to `native-git-bridge/` by the build) | `version` | Obsidian (must equal the release tag) |
 | `package.json` | `version` | npm scripts / CI consistency check |
 | `versions.json` | new <br>`"x.y.z": "minAppVersion"`<br> entry | Obsidian update mechanism (the build fails if the manifest version is missing here) |
-| `termux/native-git-bridge-runner.sh` | `RUNNER_VERSION` | handshake (bump only when the runner changes) |
+| `native-git-bridge/termux/native-git-bridge-runner.sh` | `RUNNER_VERSION` | handshake (bump only when the runner changes) |
 | `src/constants.ts` | `RUNNER_MIN_VERSION` | handshake (bump together with `RUNNER_VERSION`) |
 | `companion/app/build.gradle.kts` | (none) | derived automatically from the root `manifest.json` (`versionName` = release version, `versionCode` = major×10000 + minor×100 + patch); nothing to bump by hand |
 

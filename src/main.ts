@@ -43,10 +43,11 @@ import {
   ChangedFilesModal,
   ConfirmModal,
   ResultModal,
-  type ResultModalAction,
   SparseSafetyModal,
-  type SparseSafetyFixes,
   StatusModal,
+  TextPreviewModal,
+  type ResultModalAction,
+  type SparseSafetyFixes,
 } from "./ui/modals";
 import { DiagnosticsModal, type DiagnosticsReport } from "./ui/DiagnosticsModal";
 import { CommitMessageModal, ConflictModal } from "./ui/gitModals";
@@ -60,7 +61,6 @@ import {
   type RepoLogEntry,
   type RepoLogFile,
 } from "./git/historyParsers";
-import { TextPreviewModal } from "./ui/historyViews";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
 import { buildMenuEntries, type MenuAction, type MenuScope } from "./ui/gitMenu";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
@@ -89,6 +89,7 @@ import {
   PAIRING_FILE,
   PAIRING_WAIT_MS,
   bootstrapCommand,
+  bootstrapCommandLocal,
   RUNNER_MIN_VERSION,
   RUNNER_OUTDATED_HINT,
   TERMUX_FDROID_URL,
@@ -2979,6 +2980,15 @@ export default class NativeGitBridgePlugin extends Plugin {
         onClick: () => this.copyCommandAndOpenTermux(),
       },
     ];
+    // The same install without a network, when the vault path is known: the
+    // scripts already ship inside this plugin's folder.
+    if (this.installCommandLocal() !== null) {
+      actions.push({
+        label: "Copy offline command",
+        keepOpen: true,
+        onClick: () => this.copyLocalCommandAndOpenTermux(),
+      });
+    }
     // A second vault on a device where Termux is already set up needs no
     // command at all: it can ask the existing runner for a profile of its own.
     if (!s.authToken) {
@@ -3061,6 +3071,29 @@ export default class NativeGitBridgePlugin extends Plugin {
   /** The one-line Termux install command (same one settings shows). */
   installCommand(): string {
     return bootstrapCommand(this.manifest.version, this.deviceSettings.repoPathHint);
+  }
+
+  /**
+   * The same install taken from the copy inside this vault instead of from a
+   * release. Only meaningful once the repository path is known, because Termux
+   * addresses the vault by its own absolute path.
+   */
+  installCommandLocal(): string | null {
+    const p = this.deviceSettings.repoPathHint.trim().replace(/\/+$/, "");
+    if (p === "" || !p.startsWith("/")) return null;
+    return bootstrapCommandLocal(p, this.app.vault.configDir);
+  }
+
+  /** Copy the offline install command, then bring Termux to the front. */
+  copyLocalCommandAndOpenTermux(): void {
+    const cmd = this.installCommandLocal();
+    if (cmd === null) {
+      new Notice("Set the repository path in settings first — Termux needs the vault's absolute path.");
+      return;
+    }
+    void navigator.clipboard.writeText(cmd);
+    new Notice("Offline install command copied - long-press in Termux to paste, then Enter.");
+    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
   }
 
   /** Open the latest release page (companion APK + plugin files live there). */

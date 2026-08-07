@@ -131,9 +131,9 @@ jobs:
             main.js
             manifest.json
             styles.css
-            termux/native-git-bridge-runner.sh
-            termux/install.sh
-            termux/bootstrap.sh
+            native-git-bridge/termux/native-git-bridge-runner.sh
+            native-git-bridge/termux/install.sh
+            native-git-bridge/termux/bootstrap.sh
             git-bridge-companion-*.apk
         # The signed APK is only present when signing ran; softprops tolerates
         # missing patterns with fail_on_unmatched_files unset.

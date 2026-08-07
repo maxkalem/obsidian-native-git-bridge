@@ -64,6 +64,21 @@ export function bootstrapCommand(pluginVersion: string, repoPathHint: string): s
   const cmd = `curl -fsSL ${base}/bootstrap.sh | NGB_VERSION=${pluginVersion} bash -s --`;
   return repoPathHint ? `${cmd} "${repoPathHint}"` : cmd;
 }
+/**
+ * The same install, without a network: the Termux scripts ship inside the
+ * plugin folder, so the vault on the device already carries them.
+ * bootstrap.sh takes install.sh and the runner from the directory it is
+ * started from, which is why nothing else has to be passed.
+ *
+ * `vaultPath` is the vault as TERMUX sees it (the repository path hint in
+ * settings, e.g. /storage/emulated/0/Documents/Kalem); `configDir` is
+ * Obsidian's config directory, usually `.obsidian` but not always.
+ */
+export function bootstrapCommandLocal(vaultPath: string, configDir: string): string {
+  const base = `${vaultPath}/${configDir}/plugins/${PLUGIN_ID}/termux`;
+  return `bash "${base}/bootstrap.sh" "${vaultPath}"`;
+}
+
 export const PAIRING_FILE = "pairing.json";
 
 /**
