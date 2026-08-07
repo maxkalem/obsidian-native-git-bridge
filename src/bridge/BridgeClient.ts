@@ -43,9 +43,15 @@ export class BridgeClient {
 
   private sleep(ms: number): Promise<void> {
     if (this.opts.sleep) return this.opts.sleep(ms);
-    // window.setTimeout, not the bare global: Obsidian popout windows have
-    // their own timer scope.
-    return new Promise((r) => activeWindow.setTimeout(r, ms));
+    // `window.setTimeout`, not the bare global and not `activeWindow`.
+    //
+    // Elsewhere the plugin uses `activeWindow`/`activeDocument`, because a
+    // popout window has its own document and an element created against the
+    // wrong one does not render. Obsidian makes timers the exception: they
+    // belong to `window`. A poll scheduled on whichever window happened to be
+    // focused is also cancelled when that window closes, and this timer is what
+    // drives waiting for Termux, so losing it hangs the operation.
+    return new Promise((r) => window.setTimeout(r, ms));
   }
 
   async ensureRuntimeDirs(): Promise<void> {

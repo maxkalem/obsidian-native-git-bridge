@@ -1704,7 +1704,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.runningAction = action;
     // Per-path actions carry their target so the status panel can animate the
     // acted row only, instead of every control sharing the action name.
-    this.runningPath = typeof args["path"] === "string" ? (args["path"] as string) : null;
+    this.runningPath = typeof args["path"] === "string" ? args["path"] : null;
     this.progressText = `${action}… 0s`;
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
@@ -2890,14 +2890,14 @@ export default class NativeGitBridgePlugin extends Plugin {
   async openStatusPanel(reveal = true): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
     if (existing.length > 0) {
-      if (reveal) this.app.workspace.revealLeaf(existing[0]!);
+      if (reveal) await this.app.workspace.revealLeaf(existing[0]!);
       this.pushStatusToView();
       return;
     }
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
     await leaf.setViewState({ type: NGB_STATUS_VIEW, active: reveal });
-    if (reveal) this.app.workspace.revealLeaf(leaf);
+    if (reveal) await this.app.workspace.revealLeaf(leaf);
     this.pushStatusToView();
   }
 
@@ -2907,7 +2907,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   async openHistoryPanel(): Promise<void> {
     const existing = this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW);
     if (existing.length > 0) {
-      this.app.workspace.revealLeaf(existing[0]!);
+      await this.app.workspace.revealLeaf(existing[0]!);
       const view = existing[0]!.view;
       if (view instanceof HistoryView) await view.refresh();
       return;
@@ -2915,7 +2915,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const leaf = this.app.workspace.getRightLeaf(false);
     if (!leaf) return;
     await leaf.setViewState({ type: NGB_HISTORY_VIEW, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   /** Open (or retarget) the history panel of ONE file. */
@@ -2923,7 +2923,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const existing = this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW);
     const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: NGB_FILE_HISTORY_VIEW, active: true, state: { path } });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   private async loadFileLogPage(
@@ -2984,7 +2984,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       active: true,
       state: state as unknown as Record<string, unknown>,
     });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   // ------------------------------------------------- conflict resolution
@@ -3010,7 +3010,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       const existing = this.app.workspace.getLeavesOfType(NGB_CONFLICT_VIEW);
       const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
       await leaf.setViewState({ type: NGB_CONFLICT_VIEW, active: true, state: { path } });
-      this.app.workspace.revealLeaf(leaf);
+      await this.app.workspace.revealLeaf(leaf);
       return;
     }
     const menu = new Menu();

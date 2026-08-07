@@ -242,63 +242,40 @@ Updating the plugin does **not** update the runner in Termux, so the two carry i
 | 8 | 0.5.9 | Per-path actions (`stage-file`, `unstage-file`, `discard-file`) exclude protected paths that lie UNDER the requested path, so acting on a parent folder can no longer stage or discard a sparse-protected subdirectory; `discard-file` on an untracked folder deletes the untracked files it contains instead of failing; new `discard-all` (drops unstaged work, keeps staged content and untracked files) and `reset-all` (index and worktree back to HEAD, expressed as a pathspec restore so protected paths stay excluded and untracked files survive) |
 | 9 | 0.5.10 | `file-log` uses `--raw --numstat`, so each commit reports the change letter, both sides of a rename and the added/deleted counts the file-history view shows |
 | 10 | 0.6.0 | Several repositories per device: `profiles/<id>.conf` (one per vault, own token), automatic migration of the single-repo config, one run drains every profile oldest-first, `profileId` in requests and results, `REPO_MISSING` for a dead profile, git pinned per profile (`GIT_CEILING_DIRECTORIES` + toplevel check) so nested vaults cannot leak into each other, nested-vault exclusion in the outer repository's `.git/info/exclude`, relocation of a moved vault and self-pairing of a new one (`claim.json` → `pairing.json`), global single-instance lock in the config directory; `verify-sparse-safety` and the safety gate run `git status -uall`, so a new folder under a protected path is reported file by file instead of as one collapsed `dir/` line (the plugin offers to trash exactly that list) |
-| 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin. **Also, still inside the unreleased 0.6.1:** `unstage-protected`, `abort-rebase`, `continue-rebase`, and `rebaseInProgress` in status — see below |
+| 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin. Later in the same unreleased 0.6.1: `unstage-protected`, `abort-rebase`, `continue-rebase`, and `rebaseInProgress` in status (see below) |
+
+### No runtime dependencies
+
+`package.json` declares no `dependencies`. The diff panes parse the unified diff and build their DOM in `src/git/unifiedDiff.ts`, `src/git/inlineDiff.ts` and `src/ui/diffDom.ts`. They previously used `diff2html`, which compiled Mustache templates with `new Function`.
+
+The plugin executes no generated code. All repository access goes through the git binary in Termux.
 
 ### Why v11 grew instead of becoming v12
 
-The rule above says a runner version number is never reused. `unstage-protected`,
-`abort-rebase`, `continue-rebase` and `rebaseInProgress` were added to v11 rather
-than to a new v12 because **0.6.1 has not been released**: no user has ever
-received a v11 runner from a release, so nothing in the field can be a stale v11.
-The one device that does have a v11 installed is the developer's own, and it is
-reinstalled by hand from the plugin folder alongside this change.
+The rule above says a runner version number is never reused. `unstage-protected`, `abort-rebase`, `continue-rebase` and `rebaseInProgress` were added to v11 anyway, because 0.6.1 has not been released: no release ever shipped a v11 runner, so no installed v11 can be stale. The only device carrying one is the developer's, and it is reinstalled by hand from the plugin folder alongside this change.
+The exception ends with 0.6.1. After that release the next runner change is v12.
 
-This is a deliberate exception with an expiry date. The moment 0.6.1 ships, the
-rule applies again without qualification: the next runner change is v12,
-whatever it is.
+### Leaving an unfinished operation (runner 11)
 
-### Getting out of a stuck state (runner 11)
+Both additions are exits from states the plugin could see but not leave.
 
-Three additions, all of them exits from states the plugin could observe but not
-leave.
+**`unstage-protected`** — `args.paths[]` + `args.protectedPaths[]`. Removes protected sparse paths from the index, and does nothing else. It is the only write the runner performs on a protected path. Three conditions are checked before anything is removed:
 
-- **`unstage-protected`** — `args.paths[]` + `args.protectedPaths[]`. Removes
-  protected sparse paths from the **index** and nothing else. It is the only
-  operation permitted on a protected path, and it is permitted because it is the
-  one that reduces exposure rather than increasing it. Three conditions, all
-  required: the path must BE protected (the inverse of the usual guard, so this
-  cannot be used as a general bypass), it must be in the index, and it must
-  **not** be in HEAD. The last one is what makes it safe: `HEAD` not containing
-  the path means dropping the entry undoes an addition, and there is no tracked
-  content that could turn into a staged deletion. The file on disk, if there is
-  one, is never touched.
+1. the path is protected (the inverse of the usual guard, so the action cannot serve as a general bypass);
+2. it has an exact index entry;
+3. it is **not** in HEAD.
 
-  The state it exists for: a file staged inside a directory that was added to
-  the sparse exclusions **afterwards**. `git sparse-checkout reapply` takes the
-  file off disk and leaves the index entry behind with skip-worktree set, so
-  `git status` reports a bare `A ` — the index says "added", and because
-  skip-worktree tells git not to look at the worktree, nothing says the file is
-  gone. The safety gate then blocked every commit, push and sync; the plugin's
-  "delete these files" repair moved nothing because there was no file; and
-  `unstage-file` was refused by the protected-path guard. There was no way out
-  short of Termux.
+Condition 3 is the safety argument. With no committed content at that path, dropping the index entry undoes an addition and cannot become a staged deletion.
+The file on disk, where there is one, is left alone.
 
-  Implementation note that cost a test run: `git rm --cached` **cannot** do this.
-  The path is outside the sparse-checkout definition by construction and git
-  refuses ("matched paths that exist outside of your sparse-checkout
-  definition") unless given `--sparse`, which only exists from git 2.35. The
-  runner uses `git update-index --force-remove`, which has no such guard and
-  works on every version.
+The state this addresses: a file staged inside a directory that was added to the sparse exclusions afterwards. `git sparse-checkout reapply` takes the file off disk and leaves the index entry, with skip-worktree set. `git status` then reports a bare `A `. Skip-worktree stops git looking at the worktree, so nothing in the output says the file is missing. The safety gate blocked commit, push and sync; the plugin's "delete these files" repair moved nothing, there being no file; and `unstage-file` was refused by the protected-path guard. Termux was the only way out.
 
-- **`abort-rebase` / `continue-rebase`** and **`rebaseInProgress`** in status.
-  Nothing in this plugin starts a rebase; one can only be here because it was
-  started in Termux by hand. An unfinished rebase looks nothing like an
-  unfinished merge — there is no `MERGE_HEAD`, only a state directory, and which
-  one depends on the backend git chose (`rebase-merge` for the merge/interactive
-  backend, `rebase-apply` for the older am backend), so both are checked.
-  `continue-rebase` refuses while anything is still unmerged and says how many:
-  `git rebase --continue` in that state opens an editor, and the runner has no
-  terminal, so it would hang until the request expired. When it does run,
-  `GIT_EDITOR=true` accepts the message git already prepared.
+`git rm --cached` cannot do the removal: the path lies outside the sparse-checkout definition, and git refuses ("matched paths that exist outside of your sparse-checkout definition") without `--sparse`, which requires git 2.35. The runner uses `git update-index --force-remove`, which has no such guard and works on every version.
+
+**`abort-rebase`, `continue-rebase`, and `rebaseInProgress` in status.** Nothing in the plugin starts a rebase; one reaches this state only by starting it in Termux. Detection differs from a merge: there is no `MERGE_HEAD`, only a state directory, whose name depends on the backend git chose: `rebase-merge` for the merge and interactive backends, `rebase-apply` for the older am backend. Both are checked.
+
+`continue-rebase` refuses while any path is unmerged, and reports how many.
+`git rebase --continue` in that state opens an editor, and the runner has no terminal, so it would hang until the request expired. When it does run,
+`GIT_EDITOR=true` accepts the message git prepared.
 
 Versions 1–3 predate the first tagged release: the oldest runner any published release shipped is v4. Actions introduced after v4 are additionally listed in the plugin's `ACTION_MIN_RUNNER` map, so requesting one against an older runner produces a named "runner too old for this action" message instead of a bare `BAD_REQUEST`. Capabilities that are argument-level rather than new actions (the `INDEX` ref, `stage-file` `mode`) are covered by the version handshake only, hence the strict `RUNNER_MIN_VERSION` bump for them.

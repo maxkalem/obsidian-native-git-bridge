@@ -26,8 +26,13 @@ export function placeModalAction(
     onClick: () => void;
   }
 ): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.className = `ngb-modal-action ${opts.danger ? "mod-warning" : "mod-cta"}`;
+  // `createEl` on the modal's own element rather than `document.createElement`:
+  // it uses the right document (a modal opened from a popout window belongs to
+  // that window) and it is what Obsidian's guidelines ask for. The button is
+  // detached again below and re-inserted where the platform wants it.
+  const b = modal.modalEl.createEl("button", {
+    cls: `ngb-modal-action ${opts.danger ? "mod-warning" : "mod-cta"}`,
+  });
   const ic = b.createSpan({ cls: "ngb-modal-action-icon" });
   setIcon(ic, opts.icon);
   b.createSpan({ text: opts.label });
@@ -154,7 +159,19 @@ export class ConfirmModal extends Modal {
       icon?: string;
       danger?: boolean;
     },
-    private onDecision: (confirmed: boolean) => void
+    /**
+     * The type admits `Promise<void>`. Almost every decision this modal reports
+     * leads to a Termux round trip, so nearly all callers pass an `async`
+     * function, and a callback typed `() => void` receiving one is what
+     * "Promise returned where a void return was expected" reports. Widening the
+     * contract here covers about thirty call sites. Adding `void` at each of
+     * them would silence the warning and leave the mismatch in place.
+     *
+     * The modal itself does not await the result: it has already closed, and
+     * there is nothing it could do with a rejection. Callers own their errors,
+     * which is what `runOperation` and `renderMutationError` are for.
+     */
+    private onDecision: (confirmed: boolean) => void | Promise<void>
   ) {
     super(app);
   }
@@ -172,13 +189,17 @@ export class ConfirmModal extends Modal {
       onClick: () => {
         this.decided = true;
         this.close();
-        this.onDecision(true);
+        // `void` here, and not at the ~30 call sites, is the point of typing
+        // `onDecision` as possibly async: the decision NOT to wait belongs to
+        // the modal. It has already closed and has nothing to do with a
+        // rejection; the caller owns its own errors.
+        void this.onDecision(true);
       },
     });
   }
 
   onClose(): void {
-    if (!this.decided) this.onDecision(false);
+    if (!this.decided) void this.onDecision(false);
     this.contentEl.empty();
   }
 }

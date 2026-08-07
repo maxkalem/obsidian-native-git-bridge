@@ -8,7 +8,8 @@ export class CommitMessageModal extends Modal {
   constructor(
     app: App,
     private opts: { title: string; placeholder: string; submitLabel: string; initial?: string },
-    private onDone: (message: string | null) => void
+    /** May be async. See the note on ConfirmModal's `onDecision`. */
+    private onDone: (message: string | null) => void | Promise<void>
   ) {
     super(app);
   }
@@ -34,7 +35,9 @@ export class CommitMessageModal extends Modal {
       }
       this.resolved = true;
       this.close();
-      this.onDone(msg);
+      // See ConfirmModal.onDecision: the modal does not wait for what the
+      // caller does with the message.
+      void this.onDone(msg);
     };
     // No Cancel button — the X closes and resolves null. The action button
     // carries the same check icon as the panel's commit button; top-left on
@@ -52,7 +55,7 @@ export class CommitMessageModal extends Modal {
   }
 
   onClose(): void {
-    if (!this.resolved) this.onDone(null);
+    if (!this.resolved) void this.onDone(null);
     this.contentEl.empty();
   }
 }
@@ -67,7 +70,8 @@ export class ConflictModal extends Modal {
     private conflicts: string[],
     private actions: {
       openFile: (path: string) => void;
-      abortMerge: () => void;
+      /** May be async. See the note on ConfirmModal's `onDecision`. */
+      abortMerge: () => void | Promise<void>;
     }
   ) {
     super(app);
@@ -98,7 +102,7 @@ export class ConflictModal extends Modal {
     const abort = btns.createEl("button", { text: "Abort merge…", cls: "mod-warning" });
     abort.addEventListener("click", () => {
       this.close();
-      this.actions.abortMerge();
+      void this.actions.abortMerge();
     });
     const close = btns.createEl("button", { text: "Close", cls: "mod-cta" });
     close.addEventListener("click", () => this.close());

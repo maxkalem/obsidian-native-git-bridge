@@ -2,7 +2,7 @@
  * What the status panel should say and offer while a merge or a rebase is
  * unfinished.
  *
- * This exists because the panel used to have no answer at all for that state.
+ * The panel previously had no answer for that state.
  * "Abort merge" lived only in the context menu of the Conflicts group, and that
  * group renders only when git reports unmerged index entries. A merge whose
  * conflicts were already resolved and staged therefore left MERGE_HEAD behind
@@ -28,16 +28,16 @@ export interface InProgressBanner {
   /** What each button will do, including what aborting costs. */
   detail: string;
   /**
-   * The same two lines for a phone, where the banner sits in the panel's fixed
-   * region and every line it takes is a line of file list nobody can see. The
-   * text is SHORTER, not smaller: shrinking the font on the one control that
-   * must not be missed is the wrong trade.
+   * The same two lines, shortened for a phone: the banner sits in the panel's
+   * fixed region, so each line it occupies is a line of file list. Fewer
+   * characters rather than a smaller font, since this is the control the user
+   * has to find.
    */
   shortTitle: string;
   shortDetail: string;
   /** The way forward. */
   finish: InProgressButton;
-  /** The way out. Never disabled: it is the escape hatch. */
+  /** The way out. Never disabled, whatever the state of the working tree. */
   abort: InProgressButton;
 }
 
@@ -53,8 +53,8 @@ function plural(n: number, one: string, many: string): string {
 }
 
 /**
- * `null` when nothing is in progress — the normal case, and the reason the
- * banner costs no screen space on a healthy repository.
+ * `null` when nothing is in progress, which is the usual case: on a healthy
+ * repository the banner occupies no space at all.
  *
  * Rebase takes precedence over merge when both look active. A rebase that stops
  * on a conflict can leave MERGE_HEAD behind from the replayed commit, so the
@@ -111,10 +111,10 @@ export function describeInProgressOp(s: InProgressState): InProgressBanner | nul
     detail,
     shortTitle,
     shortDetail,
-    // Disabled rather than hidden: the button is where the user will look, and
-    // a greyed one with the count above it explains itself. Enabling it would
-    // send a commit that git refuses, or a `rebase --continue` that opens an
-    // editor the runner has no terminal for.
+    // Disabled rather than hidden, so the button stays where the user looks for
+    // it and the count above explains why it is greyed. Enabled, it would send a
+    // commit git refuses, or a `rebase --continue` that opens an editor the
+    // runner has no terminal for.
     finish: {
       label: kind === "merge" ? "Commit merge" : "Continue rebase",
       enabled: clean,

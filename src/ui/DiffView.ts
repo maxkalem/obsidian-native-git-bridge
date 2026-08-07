@@ -1,6 +1,6 @@
-import { ItemView, sanitizeHTMLToDom, setIcon, WorkspaceLeaf } from "obsidian";
-import { html as diff2html } from "diff2html";
+import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
 import { DIFF_COLOR_VARS } from "./colors";
+import { renderUnifiedDiff } from "./diffDom";
 
 export const NGB_DIFF_VIEW = "native-git-bridge-diff";
 
@@ -41,13 +41,13 @@ export interface DiffViewActions {
 /**
  * Replace whitespace inside rendered code lines with visible glyphs (space →
  * ·, tab → →, CR → ␍), VSCode-style, wrapped in a muted span. Runs over text
- * nodes only, so diff2html's own <ins>/<del> char highlighting is preserved.
+ * nodes only, so the <ins>/<del> intra-line highlighting survives.
  * Trade-off (documented in the setting): copying from the diff copies the
  * glyphs, not the original whitespace.
  *
- * `selector` exists because the conflict pane renders its own rows rather than
- * diff2html's, and the setting is one setting: whitespace is either visible in
- * this plugin's file views or it is not.
+ * `selector` exists because the conflict pane renders rows of its own shape,
+ * and the setting is one setting: whitespace is either visible in this plugin's
+ * file views or it is not.
  */
 export function markInvisibles(root: HTMLElement, selector = ".d2h-code-line-ctn"): void {
   for (const ctn of Array.from(root.querySelectorAll(selector))) {
@@ -64,9 +64,14 @@ export function markInvisibles(root: HTMLElement, selector = ".d2h-code-line-ctn
       for (const part of text.split(/([ \t\r]+)/)) {
         if (part === "") continue;
         if (/^[ \t\r]+$/.test(part)) {
-          const span = ctn.ownerDocument.createElement("span");
-          span.className = "ngb-ws-glyph";
-          span.textContent = part.replace(/ /g, "·").replace(/\t/g, "→").replace(/\r/g, "␍");
+          // Built with Obsidian's `createSpan` (per its own guidelines, and it
+          // uses the container's document, which matters in a popout window),
+          // then MOVED into the fragment. `createSpan` has to attach somewhere
+          // to exist, and a fragment does not carry Obsidian's helpers.
+          const span = ctn.createSpan({
+            cls: "ngb-ws-glyph",
+            text: part.replace(/ /g, "·").replace(/\t/g, "→").replace(/\r/g, "␍"),
+          });
           frag.appendChild(span);
         } else {
           frag.appendChild(ctn.ownerDocument.createTextNode(part));
@@ -104,12 +109,13 @@ export function sizeGutter(box: HTMLElement): void {
 }
 
 /**
- * File diff in a regular Obsidian pane (like obsidian-git's diff view), but
- * rendered in the obsidian-version-history-diff style: diff2html line-by-line
- * output with character-level intra-line highlighting (diffStyle "char").
- * git produces the unified diff in Termux; diff2html only renders it — no JS
- * git implementation is involved, and the HTML goes through Obsidian's
- * sanitizeHTMLToDom.
+ * File diff in a regular Obsidian pane (like obsidian-git's diff view), in the
+ * obsidian-version-history-diff style: line-by-line, with word-level
+ * intra-line highlighting.
+ *
+ * git produces the unified diff in Termux; `diffDom.ts` only turns it into
+ * nodes. No JS git implementation is involved, and no HTML string is ever
+ * built, so there is nothing to sanitize.
  */
 export class DiffView extends ItemView {
   private state: DiffViewState | null = null;
@@ -197,20 +203,7 @@ export class DiffView extends ItemView {
       box.createEl("p", { cls: "ngb-ok", text: "No differences." });
       return;
     }
-    const rendered = diff2html(res.diff, {
-      drawFileList: false,
-      diffStyle: "char",
-      outputFormat: "line-by-line",
-    });
-    box.appendChild(sanitizeHTMLToDom(rendered));
-    // The +/- prefix belongs to the STICKY number gutter, not to the code: in
-    // the code cell it scrolled away horizontally and, when wrapping, read
-    // like content. One number per line, prefix beside it, everything compact.
-    for (const tr of Array.from(box.querySelectorAll("tr"))) {
-      const gutter = tr.querySelector(".d2h-code-linenumber");
-      const prefix = tr.querySelector(".d2h-code-line-prefix");
-      if (gutter && prefix) gutter.appendChild(prefix);
-    }
+    renderUnifiedDiff(box, res.diff);
     sizeGutter(box);
     if (res.truncated) {
       box.createDiv({
@@ -249,7 +242,7 @@ export class DiffView extends ItemView {
   private applyColors(): void {
     const c = this.actions.colors();
     for (const name of DIFF_COLOR_VARS) {
-      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]!);
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]);
       else this.contentEl.style.removeProperty(name);
     }
   }

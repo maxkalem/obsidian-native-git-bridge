@@ -84,7 +84,7 @@ export class ConflictView extends ItemView {
   private applyColors(): void {
     const c = this.actions.colors();
     for (const name of CONFLICT_COLOR_VARS) {
-      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]!);
+      if (c && c[name]) this.contentEl.style.setProperty(name, c[name]);
       else this.contentEl.style.removeProperty(name);
     }
   }

@@ -513,23 +513,38 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
   }
 
   /** One removable row: monospace text + a Remove button. */
-  private entryRow(listEl: HTMLElement, text: string, onRemove: (() => void) | null): void {
+  /**
+   * `onRemove` and `addRow`'s `onAdd` may be async: removing a path writes
+   * device-local settings and then re-renders. Same reasoning as
+   * ConfirmModal.onDecision: the contract admits the promise, and the single
+   * `void` lives at the call below rather than at every caller.
+   */
+  private entryRow(
+    listEl: HTMLElement,
+    text: string,
+    onRemove: (() => void | Promise<void>) | null
+  ): void {
     const row = listEl.createDiv({ cls: "ngb-entry-row" });
     row.createSpan({ cls: "ngb-entry-text", text });
     if (onRemove) {
       const btn = row.createEl("button", { text: "Remove" });
-      btn.addEventListener("click", onRemove);
+      btn.addEventListener("click", () => void onRemove());
     }
   }
 
-  /** Input + Add button; `onAdd` receives the trimmed value. */
-  private addRow(body: HTMLElement, placeholder: string, label: string, onAdd: (v: string) => void): void {
+  /** Input + Add button; `onAdd` receives the trimmed value. May be async. */
+  private addRow(
+    body: HTMLElement,
+    placeholder: string,
+    label: string,
+    onAdd: (v: string) => void | Promise<void>
+  ): void {
     const row = body.createDiv({ cls: "ngb-add-row" });
     const input = row.createEl("input", { type: "text", placeholder });
     const btn = row.createEl("button", { text: label });
     btn.addEventListener("click", () => {
       const v = input.value.trim();
-      if (v !== "") onAdd(v);
+      if (v !== "") void onAdd(v);
       input.value = "";
     });
   }

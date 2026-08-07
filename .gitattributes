@@ -1,26 +1,26 @@
 # Line endings.
 #
-# This repository ships shell scripts that are executed by bash inside Termux,
-# on Android. A CRLF script does not fail subtly there: bash reads the carriage
-# return as part of the last token on every line and the run dies with
-# `$'\r': command not found`, `syntax error near unexpected token $'{\r'`, and
-# an `umask: 077: octal number out of range` from the very first lines.
+# This repository ships shell scripts that bash executes inside Termux, on
+# Android. A CRLF script fails there immediately and confusingly: bash reads the
+# carriage return as part of the last token on every line, so the run dies with
+# `$'\r': command not found`, `syntax error near unexpected token $'{\r'` and
+# `umask: 077: octal number out of range` from the first few lines.
 #
-# The blobs in this repository are LF and must stay LF. Without this file, a
-# Windows checkout converts them on the way out, every one of them shows up as
-# a whole-file diff, and committing from that checkout would publish scripts
-# that cannot run on the device the plugin exists for. The same conversion is
-# what has been keeping LICENSE permanently "modified".
+# The blobs here are LF and need to stay LF. Without this file a Windows
+# checkout converts them on the way out, each one then shows up as a whole-file
+# diff, and committing from that checkout publishes scripts that cannot run on
+# the device the plugin targets. That conversion is also why LICENSE has been
+# permanently "modified".
 #
-# `text=auto eol=lf` means: decide text vs binary by content, and check text
-# out with LF on every platform.
+# `text=auto eol=lf`: decide text vs binary by content, check text out with LF
+# on every platform.
 * text=auto eol=lf
 
-# Belt and braces for the files where getting this wrong is fatal rather than
-# cosmetic: the three scripts that run in Termux, and the test that runs them.
+# Stated again for the files where the wrong ending is fatal rather than
+# cosmetic: the three Termux scripts and the suite that runs them.
 *.sh text eol=lf
 
-# Build output and images are compared byte for byte by CI; never touch them.
+# CI compares build output byte for byte; leave these alone.
 *.png binary
 *.jpg binary
 *.jar binary

@@ -30,6 +30,18 @@ There is no server, no listening port, no daemon, no polling loop at rest. The T
 
 ## Answers to the automated review's recommendations
 
+### Dynamic code execution
+
+An earlier build was flagged for `new Function()`. It came from `hogan.js`, the Mustache compiler inside `diff2html`, which was the plugin's only runtime dependency and built its output as an HTML string from compiled templates.
+
+That dependency has been removed. The diff panes parse the unified diff and build the DOM directly (`src/git/unifiedDiff.ts`, `src/git/inlineDiff.ts`, `src/ui/diffDom.ts`). This also removed the HTML-string round trip through `sanitizeHTMLToDom` and 92 KB of bundle. `package.json` now declares no `dependencies`, so the shipped `main.js` contains only this repository's own source, which is what the reproducible-build check compares against.
+
+The intra-line highlighting is a longest common subsequence over word tokens, written from the algorithm and unit-tested as a pure function. It compares words, not characters. `diff2html` was configured with `diffStyle: "char"` and rendered "brown" → "red" as `<del>b</del>r<del>own</del>`, the two sharing an `r`; for prose the useful unit is the word.
+
+### Inline CSS variables for the optional custom colours
+
+The diff and conflict panes write CSS custom properties onto their own root element with `element.style.setProperty`. These are not style declarations that could live in the stylesheet: they are how an opt-in user preference overrides the stylesheet's defaults on the same element, and removing the property returns control to the theme without a reload. Values are validated as hex before being written, the defaults come from theme variables, and with the toggle off (the default) no inline style is written.
+
 ### Clipboard access
 
 Used in exactly one direction, **writing**, for three things the user asked for: the Termux install command, a download link, and a "copy details" button on result windows (so a failure can be pasted into an issue). The plugin never reads the clipboard.
@@ -101,7 +113,7 @@ Full model, including accepted residual risks and a dated review log: [threat-mo
 
 ## Testing
 
-`npm test` runs 280 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; conflict-marker parsing and per-block resolution; path-tree grouping; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 317 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches, an expired PAT, and (v10) several profiles on one device: migration of a single-repo config, sibling and nested vaults, token and profile isolation, a moved repository, a deleted one, a corrupt profile file, and (v11) repository bootstrap: init, set-remote, and cloning into a vault that already holds files.
+`npm test` runs 407 unit tests (parsers with seeded fuzzing over unicode, quoted paths, CRLF and truncated output; the unified-diff parser and the word-level intra-line diff; the rendered diff DOM, asserted against the class names the stylesheet is keyed to; conflict-marker parsing and per-block resolution; path-tree grouping; panel layout, including which region each control lands in on a phone versus desktop; bridge recovery paths; plugin orchestration against an in-memory vault). `npm run test:e2e` runs 408 checks against a **real** Git repository with a non-cone sparse checkout, covering conflicts and their resolution, index-vs-worktree diffs, protected-path violations, payloads above the 128 KB `execve` limit, concurrency, interruption, detached HEAD, non-fast-forward rejection, unborn branches, an expired PAT, several profiles on one device (migration of a single-repo config, sibling and nested vaults, token and profile isolation, a moved repository, a deleted one, a corrupt profile file), repository bootstrap (init, set-remote, and cloning into a vault that already holds files), and the two states that had no exit before this release: a protected sparse path stranded in the index, and an unfinished rebase.
 
 What is **not** machine-verified: there is no Android device or emulator in CI. The APK builds are verified; RUN_COMMAND forwarding, storage permissions and the Termux round trip are verified by hand on a device. That is also why the companion ships a three-step verified checklist.
 

@@ -63,21 +63,21 @@ No credential is ever visible from the plugin side: remote URLs are redacted in 
 
 The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*.
 
-The repair button names what it will actually do, which depends on where the entry lives:
+The repair button is labelled for what it will do, which depends on where the blocking entry lives:
 
-- **Delete files locally** — the blocking paths are files that are only new here. All of them go to Obsidian's trash, folders included, file by file.
-- **Remove from index** — the blocking paths are staged additions with **no file on disk**. See below.
+- **Delete files locally** — the paths are files that are new here. All of them go to Obsidian's trash, folders included, file by file.
+- **Remove from index** — the paths are staged additions with no file on disk. See below.
 - **Delete and unstage** — a mix of the two.
 
-Either way the check re-runs immediately so you can see the state is clear, and anything that could not be dealt with is named with a reason instead of silently skipped.
+The check re-runs straight afterwards, so the result is visible without asking for it again. Anything the repair could not deal with is listed with a reason rather than skipped.
 
 ### "It says the file is added, but the file is not there"
 
-The one case that used to have no way out. A file staged inside a directory that was added to the sparse exclusions **afterwards** keeps its index entry when *Reapply sparse checkout* removes it from disk. Because sparse checkout sets skip-worktree, git stops looking at the worktree for that path and reports a bare `A` — the index says "added", and nothing says the file is gone. Deleting could not help (there was nothing to delete) and unstaging was refused (protected path).
+A file staged inside a directory that was added to the sparse exclusions afterwards keeps its index entry when *Reapply sparse checkout* removes it from disk. Sparse checkout sets skip-worktree, so git stops looking at the worktree for that path and reports a bare `A`: the index says "added", and nothing in the output says the file is missing. Deleting had nothing to delete, and unstaging was refused because the path is protected.
 
-**Remove from index** is the fix. It drops the index entry and only that: no file is touched, and it is refused outright for any path that exists in the last commit, because removing one of those would stage a deletion of committed content — the exact accident this check exists to prevent. Those still belong in Termux (`git restore --staged -- <path>`).
+**Remove from index** drops the index entry, and nothing else. No file is touched. It is refused for any path that exists in the last commit, since removing one of those would stage a deletion of committed content, which is the accident this check exists to prevent. Those belong in Termux: `git restore --staged -- <path>`.
 
-The bridge never auto-repairs here by design; every button above is one explicit, confirmed choice.
+Nothing here repairs itself. Each button is one explicit, confirmed action.
 
 ## CONFLICT: merge conflicts
 
@@ -93,14 +93,14 @@ When every conflict is resolved, **Commit** prefills git's own merge message (`M
 
 ## "A merge is already in progress" and no conflicts anywhere
 
-Every pull answers `CONFLICT: A merge is already in progress. Resolve or abort it first.`, but the Conflicts group is empty because you already resolved and staged everything. The merge is unfinished, not conflicted: `.git/MERGE_HEAD` still exists and git will not start another one until it is dealt with.
+Every pull answers `CONFLICT: A merge is already in progress. Resolve or abort it first.`, while the Conflicts group is empty because everything has already been resolved and staged. The merge is unfinished rather than conflicted: `.git/MERGE_HEAD` still exists, and git will not start another merge until it is gone.
 
-The status panel shows a **banner at the top** whenever this is the case, above the file list and outside the scrolling area, with both exits:
+The status panel shows a banner above the file list, in the fixed region, whenever a merge or rebase is unfinished. It offers both exits:
 
-- **Commit merge** — finishes it, prefilled with git's own merge message. Enabled only when nothing is still conflicted.
-- **Abort merge** — `git merge --abort`; the branch goes back to where it was before the pull, and conflict resolutions made during the merge are discarded.
+- **Commit merge** — finishes the merge, prefilled with git's own merge message. Enabled only when no path is still conflicted.
+- **Abort merge** — `git merge --abort`. The branch returns to where it was before the pull, and conflict resolutions made during the merge are discarded.
 
-The same banner appears for an unfinished **rebase**, with *Continue rebase* and *Abort rebase*. Nothing in the plugin starts a rebase, so one can only be here because it was started in Termux; before the banner existed the panel could not see that state at all. *Continue* is refused while any file is still conflicted and says how many — `git rebase --continue` in that state wants an editor, and the runner has no terminal.
+An unfinished rebase gets the same banner with *Continue rebase* and *Abort rebase*. Nothing in the plugin starts a rebase, so one arrives here only from Termux. *Continue* is refused while any path is still conflicted, and reports how many: `git rebase --continue` in that state wants an editor, and the runner has no terminal.
 
 ## "Runner too old" / an action the runner rejects
 

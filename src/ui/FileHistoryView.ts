@@ -1,8 +1,8 @@
-import { ItemView, Notice, sanitizeHTMLToDom, setIcon, WorkspaceLeaf } from "obsidian";
-import { html as diff2html } from "diff2html";
+import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
 import { describeFileChange, type FileLogEntry } from "../git/historyParsers";
 import { parseHunks, restoreHunk, type DiffHunk } from "../git/hunks";
 import { markInvisibles, sizeGutter } from "./DiffView";
+import { renderUnifiedDiff } from "./diffDom";
 import { DIFF_COLOR_VARS } from "./colors";
 
 export const NGB_FILE_HISTORY_VIEW = "native-git-bridge-file-history";
@@ -263,25 +263,15 @@ export class FileHistoryView extends ItemView {
       return;
     }
     const hunks = parseHunks(res.diff);
-    const rendered = diff2html(res.diff, {
-      drawFileList: false,
-      diffStyle: "char",
-      outputFormat: "line-by-line",
-    });
     const pane = body.createDiv({ cls: "ngb-diff-view ngb-filehist-diff" });
     pane.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
-    pane.appendChild(sanitizeHTMLToDom(rendered));
-    for (const tr of Array.from(pane.querySelectorAll("tr"))) {
-      const gutter = tr.querySelector(".d2h-code-linenumber");
-      const prefix = tr.querySelector(".d2h-code-line-prefix");
-      if (gutter && prefix) gutter.appendChild(prefix);
-    }
+    renderUnifiedDiff(pane, res.diff);
     // Same measured gutter and the same optional colours as the diff pane:
     // this IS a diff pane, just embedded in a commit row.
     sizeGutter(pane);
     const colors = this.actions.colors();
     for (const name of DIFF_COLOR_VARS) {
-      if (colors && colors[name]) pane.style.setProperty(name, colors[name]!);
+      if (colors && colors[name]) pane.style.setProperty(name, colors[name]);
       else pane.style.removeProperty(name);
     }
     if (this.actions.showInvisibles()) markInvisibles(pane);

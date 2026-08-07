@@ -61,6 +61,11 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
       el.textContent = String(t ?? "");
       return el;
     },
+    /** Obsidian's helper for appending a bare text node. */
+    appendText: (t: unknown) => {
+      adopt(el, fakeEl("#text", "", String(t ?? "")));
+      return el;
+    },
     setAttr: (k: string, v: unknown) => {
       el.attrs[k] = String(v);
       return el;

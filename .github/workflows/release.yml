@@ -124,9 +124,7 @@ jobs:
           draft: true
           generate_release_notes: true
           body: |
-            Plugin `${{ github.ref_name }}`. Remember: updating `main.js` in the
-            vault does **not** update the Termux runner — re-run the install
-            command in Termux after updating (see docs/update.md).
+            ## Update notes ${{ github.ref_name }}
           files: |
             main.js
             manifest.json

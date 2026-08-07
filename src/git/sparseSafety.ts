@@ -25,7 +25,7 @@ function label(code: string): string {
  * as plain "added", twice (once here and once from the staged diff). The modal
  * then offered "Delete files locally" for a file that was not on disk at all,
  * the delete silently moved nothing, and the check kept blocking. Saying what
- * git actually reported is what makes the state repairable.
+ * git actually reported is what leaves the state repairable.
  */
 function worktreeLabel(index: string, worktree: string): string {
   // "??" and "UU" put the SAME code in both columns; they describe one state,
@@ -103,8 +103,8 @@ export function evaluateSparseSafety(
  * - both      — added to the index AND still on disk. Doing only one of the
  *               two leaves the other half behind and the check still blocks.
  * - `blocked` — the path is tracked in HEAD. Deleting or unstaging it would
- *               create the very staged deletion this check exists to prevent.
- *               Named with a reason instead of silently dropped.
+ *               create the staged deletion this check exists to prevent.
+ *               Listed with a reason rather than dropped from the plan.
  */
 export interface SparseRepairPlan {
   /** Paths to move to Obsidian's trash. */
