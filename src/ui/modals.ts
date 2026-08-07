@@ -2,6 +2,7 @@ import { App, Modal, Platform, setIcon } from "obsidian";
 import { addCopyButton } from "./copyable";
 import { DISPLAY_OUTPUT_LIMIT } from "../constants";
 import type { GitStatusSummary, SparseSafetyReport, SparseStateSummary } from "../types";
+import { planSparseRepair, type SparseRepairPlan } from "../git/sparseSafety";
 
 /**
  * The ONE action button of an agree/decline modal. There is no Cancel button
@@ -230,8 +231,12 @@ export class ChangedFilesModal extends Modal {
 /** Sparse safety verdict modal, including the mandated warning on failure. */
 /** Recovery actions offered on a blocked safety check (both confirmed first). */
 export interface SparseSafetyFixes {
-  /** Move the listed files to Obsidian's trash, leaving git history alone. */
-  deleteLocally(paths: string[]): void;
+  /**
+   * Carry out the plan: trash the files that are on disk, drop the index-only
+   * entries, and report honestly on both halves. One call, because the user
+   * made one decision.
+   */
+  repair(plan: SparseRepairPlan): void;
   /** Drop the sparse exclusion for these directories, so they stop being protected. */
   unprotect(paths: string[]): void;
 }
@@ -283,37 +288,36 @@ export class SparseSafetyModal extends Modal {
    */
   private renderFixes(c: HTMLElement): void {
     if (!this.fixes) return;
-    // Deleting is offered ONLY for paths that are new here (untracked, or
-    // added to the index). Deleting a tracked protected file would turn the
-    // block into a staged deletion, which is the exact accident this plugin
-    // exists to prevent; those the user resolves in Termux.
-    const isNew = (s: string) => s === "untracked" || s === "added";
-    // A path counts as risky if ANY of its violations is something other than
-    // "new here"; the same path can appear twice (worktree and index).
-    const other = new Set(
-      this.report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
-    );
-    const paths = [
-      ...new Set(
-        this.report.violations
-          .filter((v) => isNew(v.status) && !other.has(v.path))
-          .map((v) => v.path)
-      ),
-    ];
+    // What each blocking path actually needs, decided from both porcelain
+    // columns rather than from the collapsed human label. The old version read
+    // only the index column, offered "delete the files" for an entry that had
+    // no file on disk, moved nothing, and left the block exactly where it was.
+    const plan = planSparseRepair(this.report);
     // Which protected directories the violations actually fall under; dropping
     // the exclusion for anything else would be unrelated collateral.
     const allPaths = [...new Set(this.report.violations.map((v) => v.path))];
     const dirs = this.report.protectedPaths.filter((p) =>
       allPaths.some((f) => f === p || f.startsWith(`${p}/`))
     );
-    if (paths.length === 0 && dirs.length === 0) return;
+    const repairable = plan.trash.length + plan.unstage.length;
+    if (repairable === 0 && dirs.length === 0) {
+      if (plan.blocked.length > 0) this.renderBlockedNote(c, plan);
+      return;
+    }
     const row = c.createDiv({ cls: "ngb-fix-row" });
-    if (paths.length > 0) {
-      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: "Delete files locally" });
-      b.setAttribute("aria-label", `Move ${paths.length} listed files to Obsidian's trash`);
+    if (repairable > 0) {
+      // ONE button, because it is one decision: "get these out of the way".
+      // Whether that means the file, the index entry or both is git's business,
+      // not something the user should have to diagnose from a status code.
+      const label = this.repairLabel(plan);
+      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: label });
+      b.setAttribute(
+        "aria-label",
+        `Clear ${repairable} blocking path${repairable === 1 ? "" : "s"} out of the way`
+      );
       b.addEventListener("click", () => {
         this.close();
-        this.fixes?.deleteLocally(paths);
+        this.fixes?.repair(plan);
       });
     }
     if (dirs.length > 0) {
@@ -325,14 +329,14 @@ export class SparseSafetyModal extends Modal {
       });
     }
     const notes: string[] = [];
-    if (paths.length > 0) {
+    if (plan.trash.length > 0) {
       notes.push(
-        `Delete: moves ${paths.length} new file${paths.length === 1 ? "" : "s"} to Obsidian's trash (reversible; git history untouched).`
+        `${plan.trash.length} file${plan.trash.length === 1 ? "" : "s"} go to Obsidian's trash (reversible; git history untouched).`
       );
     }
-    if (other.size > 0) {
+    if (plan.unstage.length > 0) {
       notes.push(
-        `${other.size} listed path${other.size === 1 ? " is" : "s are"} tracked here, so deleting would create the very deletion this check blocks. Resolve those in Termux.`
+        `${plan.unstage.length} entr${plan.unstage.length === 1 ? "y is" : "ies are"} removed from the index only — those are staged additions with no file on disk, which deleting alone cannot clear. Nothing committed is touched.`
       );
     }
     if (dirs.length > 0) {
@@ -341,6 +345,31 @@ export class SparseSafetyModal extends Modal {
       );
     }
     c.createDiv({ cls: "ngb-settings-note", text: notes.join(" ") });
+    if (plan.blocked.length > 0) this.renderBlockedNote(c, plan);
+  }
+
+  /** Button text names what will actually happen, not a fixed verb. */
+  private repairLabel(plan: SparseRepairPlan): string {
+    if (plan.trash.length === 0) return "Remove from index";
+    if (plan.unstage.length === 0) return "Delete files locally";
+    return "Delete and unstage";
+  }
+
+  /**
+   * The paths the plugin will not repair, and why. Listed rather than dropped:
+   * silently offering a button that covers three of five paths is how "the
+   * check still blocks after the fix" happens.
+   */
+  private renderBlockedNote(c: HTMLElement, plan: SparseRepairPlan): void {
+    const d = c.createDiv({ cls: "ngb-settings-note" });
+    d.createDiv({
+      text: `${plan.blocked.length} path${plan.blocked.length === 1 ? "" : "s"} cannot be repaired from here:`,
+    });
+    const ul = d.createEl("ul", { cls: "ngb-file-list" });
+    for (const b of plan.blocked.slice(0, 12)) ul.createEl("li", { text: `${b.path} — ${b.reason}` });
+    if (plan.blocked.length > 12) {
+      ul.createEl("li", { text: `…and ${plan.blocked.length - 12} more` });
+    }
   }
 
   onClose(): void {

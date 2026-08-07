@@ -11,6 +11,7 @@ import {
   NGB_ICON_UNSTAGE_ALL,
 } from "./icons";
 import { applySweepIcon } from "./animatedIcons";
+import { describeInProgressOp, type InProgressKind } from "../git/inProgressOp";
 
 export const NGB_STATUS_VIEW = "native-git-bridge-status";
 
@@ -47,6 +48,10 @@ export interface StatusViewData {
   bridge: string;
   /** Shared preference: render the file groups as a folder tree. */
   treeView?: boolean;
+  /** An unfinished merge (MERGE_HEAD present), regardless of conflict count. */
+  mergeInProgress?: boolean;
+  /** An unfinished rebase (a rebase-merge/rebase-apply state directory). */
+  rebaseInProgress?: boolean;
 }
 
 export interface StatusViewActions {
@@ -64,6 +69,13 @@ export interface StatusViewActions {
   toggleTree: () => void;
   /** Open the repository-wide history panel. */
   openHistory: () => void;
+  /**
+   * Finish the unfinished merge or rebase the banner is showing: commit the
+   * merge, or `rebase --continue`. Only called when the banner enabled it.
+   */
+  finishInProgressOp: (kind: InProgressKind) => void;
+  /** Abandon it: `merge --abort` / `rebase --abort`. */
+  abortInProgressOp: (kind: InProgressKind) => void;
   /**
    * Group-scoped folder action: applies to every file under `folderPath`
    * that is IN this group's state (stage in Changes stages tracked changes
@@ -179,6 +191,18 @@ export class StatusView extends ItemView {
    * must show the notes inside it as actionable rows.
    */
   private collapsedDirs = new Set<string>();
+  /**
+   * The scrolling half of the panel. The toolbar, the operation strip and the
+   * branch line stay put while this scrolls, so the controls are reachable
+   * without scrolling back up through a long file list.
+   */
+  private bodyEl: HTMLElement | null = null;
+  /**
+   * Scroll offset carried across re-renders. `render()` rebuilds the whole
+   * panel on every status refresh, and with auto-refresh on a timer that threw
+   * the user back to the top of the list mid-scroll.
+   */
+  private savedScroll = 0;
 
   constructor(leaf: WorkspaceLeaf, private actions: StatusViewActions) {
     super(leaf);
@@ -249,12 +273,30 @@ export class StatusView extends ItemView {
 
   private render(): void {
     const c = this.contentEl;
+    this.savedScroll = this.bodyEl?.scrollTop ?? this.savedScroll;
     c.empty();
     c.addClass("ngb-status-view");
     const d = this.data;
 
+    // Three regions: a fixed head, a scrolling body (the file groups and the
+    // details footer), and a fixed bottom bar. Both fixed regions size to their
+    // content and never scroll; only the list in the middle does.
+    //
+    // Where the git controls go is the one difference between platforms. On a
+    // phone they sit in the BOTTOM bar, within thumb reach and out of the way
+    // of the branch line; on desktop they stay at the top, where this panel has
+    // always had them. Everything else is identical, so there is one render
+    // path and one set of handlers.
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
+    const footBar = c.createDiv({ cls: "ngb-sv-footbar" });
+    this.bodyEl = body;
+    const mobile = Platform.isPhone;
+
     // --- toolbar: fixed order, animated while the matching action runs ---
-    const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
+    // Created before the strip and the branch line so that on desktop it comes
+    // first inside the head; on a phone it lands in the bottom bar instead.
+    const bar = (mobile ? footBar : headEl).createDiv({ cls: "ngb-sv-toolbar" });
     const running = d?.runningAction;
     const iconBtn = (
       icon: string,
@@ -292,7 +334,7 @@ export class StatusView extends ItemView {
 
     // --- operation strip: one operation runs at a time, so it lives here,
     // directly above the repository state. Cancel on the left, log on the right.
-    const strip = c.createDiv({ cls: "ngb-sv-strip" });
+    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
     const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
     // The cancel slot is ALWAYS created so the row never reflows and the button
     // cannot go missing when only the elapsed-time text is refreshed.
@@ -320,7 +362,7 @@ export class StatusView extends ItemView {
     histBtn.addEventListener("click", this.actions.openHistory);
 
     // --- header line ---
-    const head = c.createDiv({ cls: "ngb-sv-header" });
+    const head = headEl.createDiv({ cls: "ngb-sv-header" });
     head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
     head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
     if (d) {
@@ -330,27 +372,33 @@ export class StatusView extends ItemView {
       });
     }
 
+    // --- unfinished merge / rebase ---
+    // In the HEAD region, directly under the branch line it is about: this is
+    // the one state where every other control is refused until it is dealt
+    // with, so it must not be something the user can scroll past.
+    if (d) this.renderInProgressBanner(headEl, d, mobile);
+
     if (!d) {
-      c.createEl("p", { cls: "ngb-settings-note", text: "Press refresh to query native Git." });
+      body.createEl("p", { cls: "ngb-settings-note", text: "Press refresh to query native Git." });
       return;
     }
 
     // --- file groups ---
     const stageable = d.unstaged.length + d.untracked.length > 0;
-    this.renderGroup(c, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
+    this.renderGroup(body, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
     // Keep the staged group visible whenever something could be staged, so the
     // destination of the "+" buttons is always on screen.
     this.renderGroup(
-      c,
+      body,
       "staged",
       "Staged changes",
       d.staged.map((e) => entry(e, e.index)),
       false,
       stageable
     );
-    this.renderGroup(c, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
+    this.renderGroup(body, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
     this.renderGroup(
-      c,
+      body,
       "untracked",
       "Untracked",
       d.untracked.map((p) => ({ path: p, code: "?" })),
@@ -360,11 +408,11 @@ export class StatusView extends ItemView {
     if (
       d.conflicted.length + d.staged.length + d.unstaged.length + d.untracked.length === 0
     ) {
-      c.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
     }
 
     // --- footer: details + progress (bottom of the panel, never covering content) ---
-    const foot = c.createDiv({ cls: "ngb-sv-footer" });
+    const foot = body.createDiv({ cls: "ngb-sv-footer" });
     const kv = foot.createDiv({ cls: "ngb-sv-kv" });
     const row = (k: string, v: string) => {
       const line = kv.createDiv({ cls: "ngb-sv-kv-row" });
@@ -379,6 +427,40 @@ export class StatusView extends ItemView {
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
 
+    // Put the list back where the user left it. Clamped by the browser when the
+    // content shrank, which is the behaviour we want: never scrolled past the end.
+    if (this.savedScroll > 0) body.scrollTop = this.savedScroll;
+  }
+
+  /**
+   * The way out of an unfinished merge or rebase. Renders nothing at all when
+   * neither is running, which is the normal case.
+   */
+  private renderInProgressBanner(parent: HTMLElement, d: StatusViewData, mobile: boolean): void {
+    const b = describeInProgressOp({
+      mergeInProgress: d.mergeInProgress,
+      rebaseInProgress: d.rebaseInProgress,
+      conflictCount: d.conflicted.length,
+    });
+    if (!b) return;
+    const wrap = parent.createDiv({ cls: mobile ? "ngb-sv-banner ngb-sv-banner-compact" : "ngb-sv-banner" });
+    const head = wrap.createDiv({ cls: "ngb-sv-banner-title" });
+    // No icon on a phone: the coloured border already marks the banner, and the
+    // icon costs horizontal room the shortened title can use instead.
+    if (!mobile) {
+      const icon = head.createSpan({ cls: "ngb-sv-banner-icon" });
+      setIcon(icon, "git-merge");
+    }
+    head.createSpan({ text: mobile ? b.shortTitle : b.title });
+    wrap.createDiv({ cls: "ngb-sv-banner-detail", text: mobile ? b.shortDetail : b.detail });
+    const row = wrap.createDiv({ cls: "ngb-sv-banner-actions" });
+    const finish = row.createEl("button", { cls: "mod-cta", text: b.finish.label });
+    finish.disabled = !b.finish.enabled;
+    finish.addEventListener("click", () => this.actions.finishInProgressOp(b.kind));
+    // mod-warning is Obsidian's red TEXT; the escape hatch gets a red FILL so
+    // it reads as the destructive option at a glance on both platforms.
+    const abort = row.createEl("button", { cls: "ngb-sv-banner-abort", text: b.abort.label });
+    abort.addEventListener("click", () => this.actions.abortInProgressOp(b.kind));
   }
 
   private renderGroup(
@@ -766,6 +848,9 @@ export function summaryToViewData(
   >,
   state: string
 ): StatusViewData {
+  // `extra` carries mergeInProgress/rebaseInProgress through unchanged; they
+  // are not derivable from the porcelain summary, which knows about unmerged
+  // FILES but nothing about whether an operation is half-finished.
   return {
     state,
     branch: s.detached ? "(detached)" : s.branch,

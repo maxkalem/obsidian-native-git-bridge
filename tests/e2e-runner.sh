@@ -1365,6 +1365,208 @@ printf '#!/usr/bin/env bash\n' > "$ROOT/half/native-git-bridge-runner.sh"
 OUT="$(NGB_BASE_URL="$ROOT/half" bash "$ROOT/half/bootstrap.sh" "$ROOT/vault" 2>&1 || true)"
 check 'printf %s "$OUT" | grep -q "does not look like a script"' "a truncated or wrong file is refused, not executed"
 
+# ---------------------------------------------------------------------------
+# phase 9: getting OUT of states the plugin used to be unable to leave.
+#
+# Two dead ends were reported from a real device, and both are here because
+# neither is reproducible by reading the code:
+#   * a file staged inside a directory that was excluded from sparse checkout
+#     AFTERWARDS. `sparse-checkout reapply` takes the file off disk and leaves
+#     the index entry, git reports `AD`, the safety gate blocks every commit,
+#     push and sync, and every repair the plugin offered was a no-op.
+#   * an unfinished rebase, which the panel could not even see.
+# ---------------------------------------------------------------------------
+P9="$ROOT/p9"
+P9CONF="$ROOT/conf-p9"
+mkdir -p "$P9" "$P9CONF"
+p9run() { NGB_CONFIG="$P9CONF/config" NGB_SCAN_ROOTS="$P9" bash "$RUNNER" "$@"; }
+
+echo "# phase 9: a staged file inside a directory that became sparse-excluded"
+git init -q --bare "$P9/remote.git"
+git clone -q "$P9/remote.git" "$P9/vault" 2>/dev/null
+cd "$P9/vault"
+git config user.email test@example.com
+git config user.name Test
+mkdir -p Notes "Private/Mem"
+echo "note" > Notes/note.md
+git add -A && git commit -qm "initial" && git push -q origin HEAD
+P9_RT="$P9/vault/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$P9_RT/requests"
+echo ".obsidian/plugins/native-git-bridge/runtime/" >> .git/info/exclude
+P9_TOKEN="p9-token"
+cat > "$P9CONF/config" <<CONF
+NGB_REPO_DIR="$P9/vault"
+NGB_TOKEN="$P9_TOKEN"
+NGB_RUNTIME_DIR="$P9_RT"
+CONF
+p9req() { # $1 id, $2 action, $3 args
+  local args="${3:-}"; [ -z "$args" ] && args='{}'
+  cat > "$P9_RT/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$P9_TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":$args}
+REQ
+}
+P9PROT='["Private/Mem"]'
+
+# Reproduce the state exactly: stage the file first, exclude the directory
+# second. This ORDER is the whole bug; doing it the other way round never
+# produces an index entry.
+echo "handoff" > "Private/Mem/handoff.md"
+git add "Private/Mem/handoff.md"
+git sparse-checkout set --no-cone '/*' '!Private/Mem/' 2>/dev/null
+git sparse-checkout reapply 2>/dev/null
+check '[ ! -e "Private/Mem/handoff.md" ]' "the staged file is gone from the worktree after a sparse reapply"
+# The shape that made this hard to diagnose: because sparse-checkout sets
+# skip-worktree, git does NOT look at the worktree and reports a plain "A ",
+# not "AD". So the index says "added", the disk says nothing at all, and the
+# panel showed "added" twice with no hint that there was no file.
+check 'git status --porcelain=v1 -- Private/Mem | grep -q "^A  "' "git reports a bare A: skip-worktree hides the missing file"
+check 'git ls-files -v -- Private/Mem | grep -q "^S "' "…because the entry carries the skip-worktree bit"
+p9req "r-20260807T090000Z-p9saf1" verify-sparse-safety "{\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090000Z-p9saf1.json"
+check 'jq -er ".data.statusProtected" "$RES" | grep -q "Private/Mem/handoff.md"' "the safety check sees it"
+check 'jq -er ".data.stagedProtected" "$RES" | grep -q "^A.*handoff.md"' "…and so does the staged diff, which is why the gate blocks"
+
+# The same accident WITHOUT skip-worktree (the file was removed by hand rather
+# than by a sparse reapply) is the AD the parser now has to read correctly.
+mkdir -p "Private/Mem"   # sparse checkout removed the directory itself
+echo "loose" > "Private/Mem/loose.md"
+# `-c core.sparseCheckout=false` for this ONE call, rather than `git add
+# --sparse`: that flag only exists from git 2.35, so a fallback chain would run
+# a different branch on the developer's git than on CI's, and the untested one
+# would be CI's. Turning the guard off for a single invocation behaves the same
+# on every version.
+git -c core.sparseCheckout=false add "Private/Mem/loose.md"
+git update-index --no-skip-worktree "Private/Mem/loose.md" 2>/dev/null || true
+rm -f "Private/Mem/loose.md"
+check 'git status --porcelain=v1 -- Private/Mem | grep -q "^AD "' "a staged addition whose file was deleted by hand is AD"
+git update-index --force-remove "Private/Mem/loose.md" 2>/dev/null || true
+
+echo "# phase 9: the commit is blocked, and deleting files cannot unblock it"
+p9req "r-20260807T090001Z-p9cmt1" commit "{\"message\":\"e2e: blocked\",\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$P9_RT/results/r-20260807T090001Z-p9cmt1.json" >/dev/null' "commit is blocked by the sparse gate"
+check '[ ! -e "Private/Mem/handoff.md" ]' "there is no file to delete: the old repair could only ever move zero files"
+
+echo "# phase 9: unstage-protected clears the index entry, and only that"
+p9req "r-20260807T090002Z-p9uns1" unstage-protected "{\"paths\":[\"Private/Mem/handoff.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090002Z-p9uns1.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "unstage-protected ok"
+check '[ "$(jq -r .data.unstagedProtectedCount "$RES")" = "1" ]' "it reports what it actually removed"
+check '! git ls-files --cached -- "Private/Mem/handoff.md" | grep -q .' "the index entry is gone"
+check '[ -z "$(git status --porcelain=v1 -- Private/Mem)" ]' "the protected path no longer shows as a change"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "fresh status rides along"
+
+echo "# phase 9: …so the commit that was blocked now goes through"
+echo "more" >> Notes/note.md
+p9req "r-20260807T090003Z-p9cmt2" commit "{\"message\":\"e2e: unblocked\",\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check 'jq -e ".ok == true" "$P9_RT/results/r-20260807T090003Z-p9cmt2.json" >/dev/null' "commit succeeds once the index entry is gone"
+check '! git log -1 --name-only --format= | grep -q "Private/Mem"' "and the protected path is NOT in that commit"
+
+echo "# phase 9: unstage-protected is not a general bypass"
+p9req "r-20260807T090004Z-p9uns2" unstage-protected "{\"paths\":[\"Notes/note.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090004Z-p9uns2.json" >/dev/null' "a path that is NOT protected is refused"
+check 'git ls-files --cached -- Notes/note.md | grep -q .' "…and its index entry is untouched"
+p9req "r-20260807T090005Z-p9uns3" unstage-protected "{\"paths\":[\"../outside.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090005Z-p9uns3.json" >/dev/null' "a traversal path is refused"
+p9req "r-20260807T090005Z-p9uns6" unstage-protected '{"paths":["Private/Mem/x.md"],"protectedPaths":[]}'
+p9run >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090005Z-p9uns6.json" >/dev/null' "an empty protectedPaths list is refused: it IS the permission model"
+
+# The two guards depend on git parsing the path the same way in both commands,
+# and it does not: `ls-files`/`ls-tree` take a PATHSPEC, `update-index` takes a
+# literal path. Both guards therefore match the exact index entry, so neither a
+# glob nor a directory can pass as something it is not.
+mkdir -p "Private/Mem/Deep"
+echo "deep" > "Private/Mem/Deep/inner.md"
+git -c core.sparseCheckout=false add "Private/Mem/Deep/inner.md"
+p9req "r-20260807T090008Z-p9uns7" unstage-protected "{\"paths\":[\"Private/Mem/*\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090008Z-p9uns7.json"
+check '[ "$(jq -r ".ok" "$RES")" != "true" ] || [ "$(jq -r .data.unstagedProtectedCount "$RES")" = "0" ]' "a glob never counts as a removal it did not make"
+check 'git ls-files --cached -- "Private/Mem/Deep/inner.md" | grep -q .' "…and nothing was removed by it"
+p9req "r-20260807T090009Z-p9uns8" unstage-protected "{\"paths\":[\"Private/Mem/Deep\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090009Z-p9uns8.json"
+check '[ "$(jq -r .data.unstagedProtectedCount "$RES")" = "0" ]' "a DIRECTORY is not reported as an entry that was removed"
+check 'git ls-files --cached -- "Private/Mem/Deep/inner.md" | grep -q .' "…and its children keep their index entries"
+p9req "r-20260807T090009Z-p9uns9" unstage-protected "{\"paths\":[\"Private/Mem/Deep/inner.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check '[ "$(jq -r .data.unstagedProtectedCount "$P9_RT/results/r-20260807T090009Z-p9uns9.json")" = "1" ]' "the nested file itself is removed when named exactly"
+check '! git ls-files --cached -- "Private/Mem/Deep/inner.md" | grep -q .' "…and it is gone from the index"
+rm -rf "Private/Mem/Deep"
+
+# The constraint that makes the action safe: a protected path that IS in HEAD
+# would become a staged DELETION, which is the accident this plugin exists for.
+git sparse-checkout disable 2>/dev/null
+mkdir -p "Private/Mem"
+echo "committed" > "Private/Mem/tracked.md"
+git add "Private/Mem/tracked.md" && git commit -qm "e2e: protected file in HEAD"
+echo "edited" >> "Private/Mem/tracked.md"
+git add "Private/Mem/tracked.md"
+p9req "r-20260807T090006Z-p9uns4" unstage-protected "{\"paths\":[\"Private/Mem/tracked.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$P9_RT/results/r-20260807T090006Z-p9uns4.json" >/dev/null' "a protected path that is tracked in HEAD is refused"
+check 'git ls-files --cached -- "Private/Mem/tracked.md" | grep -q .' "…and nothing was removed from the index"
+check '[ -e "Private/Mem/tracked.md" ]' "…and the file is still on disk"
+
+echo "# phase 9: unstage-protected is idempotent"
+p9req "r-20260807T090007Z-p9uns5" unstage-protected "{\"paths\":[\"Private/Mem/handoff.md\"],\"protectedPaths\":$P9PROT}"
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090007Z-p9uns5.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "re-running it on an already-cleared path is not an error"
+check '[ "$(jq -r .data.unstagedProtectedCount "$RES")" = "0" ]' "…and it says it removed nothing"
+
+echo "# phase 9: an unfinished rebase is visible, and has both exits"
+git reset -q --hard HEAD
+git checkout -q -b side
+echo "side" > Notes/note.md && git commit -qam "e2e: side edit"
+git checkout -q -
+echo "trunk" > Notes/note.md && git commit -qam "e2e: trunk edit"
+git checkout -q side
+git rebase master >/dev/null 2>&1 || git rebase main >/dev/null 2>&1 || true
+check 'git status | grep -qi "rebase"' "a conflicting rebase is genuinely in progress"
+p9req "r-20260807T090010Z-p9reb1" status
+p9run >/dev/null
+RES="$P9_RT/results/r-20260807T090010Z-p9reb1.json"
+check '[ "$(jq -r .data.rebaseInProgress "$RES")" = "true" ]' "status reports the rebase, which the panel had no way to see before"
+p9req "r-20260807T090011Z-p9reb2" continue-rebase
+p9run >/dev/null
+check 'jq -e ".error.code == \"CONFLICT\"" "$P9_RT/results/r-20260807T090011Z-p9reb2.json" >/dev/null' "continue is refused while a file is still conflicted (it would open an editor)"
+check 'jq -er ".error.message" "$P9_RT/results/r-20260807T090011Z-p9reb2.json" | grep -q "still conflicted"' "…and says why"
+p9req "r-20260807T090012Z-p9reb3" abort-rebase
+p9run >/dev/null
+check 'jq -e ".ok == true" "$P9_RT/results/r-20260807T090012Z-p9reb3.json" >/dev/null' "abort-rebase ok"
+check '! git status | grep -qi "rebase in progress"' "the rebase state directory is gone"
+check '[ "$(jq -r .data.rebaseInProgress "$P9_RT/results/r-20260807T090012Z-p9reb3.json")" = "false" ]' "…and the result says so"
+p9req "r-20260807T090013Z-p9reb4" abort-rebase
+p9run >/dev/null
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090013Z-p9reb4.json" >/dev/null' "aborting when there is no rebase is a clear refusal, not a crash"
+
+echo "# phase 9: a rebase that CAN be continued, is"
+echo "base" > Notes/note.md && git commit -qam "e2e: rebase base"
+git checkout -q -b side2
+echo "own line" > Notes/other.md && git add Notes/other.md && git commit -qm "e2e: side2 commit"
+git checkout -q side
+echo "trunk again" > Notes/third.md && git add Notes/third.md && git commit -qm "e2e: side moves on"
+git checkout -q side2
+git rebase side >/dev/null 2>&1 || true
+if git status | grep -qi "rebase in progress"; then
+  p9req "r-20260807T090014Z-p9reb5" continue-rebase
+  p9run >/dev/null
+  check 'jq -e ".ok == true" "$P9_RT/results/r-20260807T090014Z-p9reb5.json" >/dev/null' "continue-rebase completes a rebase with nothing left to resolve"
+else
+  # A clean rebase finishes by itself; the interesting assertion is then that
+  # the runner does not claim there is something to continue.
+  p9req "r-20260807T090014Z-p9reb5" continue-rebase
+  p9run >/dev/null
+  check 'jq -e ".error.code == \"BAD_REQUEST\"" "$P9_RT/results/r-20260807T090014Z-p9reb5.json" >/dev/null' "a rebase that already finished cleanly reports nothing to continue"
+fi
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

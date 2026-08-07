@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSparseSafety, isPathProtected } from "../src/git/sparseSafety";
+import { evaluateSparseSafety, isPathProtected, planSparseRepair } from "../src/git/sparseSafety";
 
 describe("isPathProtected", () => {
   const prot = ["Private/Hidden", "Projects/Arch"];
@@ -59,41 +59,127 @@ describe("evaluateSparseSafety", () => {
   });
 });
 
-describe("safety-modal recovery eligibility", () => {
-  // The modal offers "delete locally" only for paths that are NEW here.
-  // Deleting a tracked protected file would create a staged deletion, which
-  // is precisely what the gate exists to stop, so those are excluded.
-  const isNew = (s: string) => s === "untracked" || s === "added";
-  const deletable = (report: ReturnType<typeof evaluateSparseSafety>) => {
-    const risky = new Set(
-      report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
+describe("evaluateSparseSafety label reads BOTH porcelain columns", () => {
+  const prot = ["Private/Mem"];
+
+  // The bug this test exists for: a file added to the index and then removed
+  // from the worktree by `sparse-checkout reapply` is `AD`. Reading only the
+  // index column called it "added", the modal offered to delete a file that
+  // was not on disk, the delete moved nothing, and the safety check kept
+  // blocking every commit, push and sync with no way out inside the plugin.
+  it("names an index entry whose file is missing from the worktree", () => {
+    const r = evaluateSparseSafety("AD Private/Mem/handoff.md\n", "", prot);
+    expect(r.violations[0]).toMatchObject({
+      path: "Private/Mem/handoff.md",
+      status: "added to the index, missing from the worktree",
+      index: "A",
+      worktree: "D",
+    });
+  });
+
+  it("keeps both columns on the violation for the repair planner", () => {
+    const r = evaluateSparseSafety("MM Private/Mem/a.md\n", "", prot);
+    expect(r.violations[0]).toMatchObject({ index: "M", worktree: "M", status: "modified" });
+  });
+
+  it("does not say a single-state code twice", () => {
+    const r = evaluateSparseSafety("?? Private/Mem/new.md\nUU Private/Mem/c.md\n", "", prot);
+    expect(r.violations.map((v) => v.status)).toEqual(["untracked", "unmerged"]);
+  });
+
+  it("reports two genuinely different columns as two states", () => {
+    const r = evaluateSparseSafety("MD Private/Mem/a.md\n", "", prot);
+    expect(r.violations[0]!.status).toBe("modified to the index, missing from the worktree");
+  });
+
+  it("a staged-diff violation has no worktree column to report", () => {
+    const r = evaluateSparseSafety("", "A\tPrivate/Mem/new.md\n", prot);
+    expect(r.violations[0]).toMatchObject({ index: "A", source: "staged" });
+    expect(r.violations[0]!.worktree).toBeUndefined();
+  });
+});
+
+describe("planSparseRepair", () => {
+  const prot = ["Private/Mem"];
+
+  it("trashes an untracked file inside a protected directory", () => {
+    const p = planSparseRepair(evaluateSparseSafety("?? Private/Mem/new.md\n", "", prot));
+    expect(p).toEqual({ trash: ["Private/Mem/new.md"], unstage: [], blocked: [] });
+  });
+
+  // The reported bug, end to end: nothing to delete, everything to unstage.
+  it("unstages an index entry whose file is not on disk, and trashes nothing", () => {
+    const p = planSparseRepair(
+      evaluateSparseSafety("AD Private/Mem/handoff.md\n", "A\tPrivate/Mem/handoff.md\n", prot)
     );
-    return [
-      ...new Set(
-        report.violations
-          .filter((v) => isNew(v.status) && !risky.has(v.path))
-          .map((v) => v.path)
-      ),
-    ];
-  };
-
-  it("offers deletion for an untracked file inside a protected directory", () => {
-    const r = evaluateSparseSafety("?? Private/Mem/new.md\n", "", ["Private/Mem"]);
-    expect(deletable(r)).toEqual(["Private/Mem/new.md"]);
+    expect(p.trash).toEqual([]);
+    expect(p.unstage).toEqual(["Private/Mem/handoff.md"]);
+    expect(p.blocked).toEqual([]);
   });
 
-  it("offers deletion for a newly added (staged) file", () => {
-    const r = evaluateSparseSafety("", "A\tPrivate/Mem/new.md\n", ["Private/Mem"]);
-    expect(deletable(r)).toEqual(["Private/Mem/new.md"]);
+  it("does both when the addition is staged AND the file is still on disk", () => {
+    const p = planSparseRepair(
+      evaluateSparseSafety("A  Private/Mem/new.md\n", "A\tPrivate/Mem/new.md\n", prot)
+    );
+    expect(p.trash).toEqual(["Private/Mem/new.md"]);
+    expect(p.unstage).toEqual(["Private/Mem/new.md"]);
   });
 
-  it("never offers deletion for a modified or deleted tracked path", () => {
-    const r = evaluateSparseSafety(" M Private/Mem/old.md\n", "D\tPrivate/Mem/gone.md\n", ["Private/Mem"]);
-    expect(deletable(r)).toEqual([]);
+  it("refuses anything tracked in HEAD, with a reason instead of silence", () => {
+    const p = planSparseRepair(
+      evaluateSparseSafety(" M Private/Mem/old.md\n", "D\tPrivate/Mem/gone.md\n", prot)
+    );
+    expect(p.trash).toEqual([]);
+    expect(p.unstage).toEqual([]);
+    expect(p.blocked.map((b) => b.path).sort()).toEqual(["Private/Mem/gone.md", "Private/Mem/old.md"]);
+    expect(p.blocked[0]!.reason).toContain("tracked in the last commit");
   });
 
-  it("excludes a path that is both added and modified (mixed states are not safe to delete)", () => {
-    const r = evaluateSparseSafety("?? Private/Mem/x.md\n", "M\tPrivate/Mem/x.md\n", ["Private/Mem"]);
-    expect(deletable(r)).toEqual([]);
+  it("decides per PATH, not per violation: one tracked column blocks the whole path", () => {
+    const p = planSparseRepair(
+      evaluateSparseSafety("?? Private/Mem/x.md\n", "M\tPrivate/Mem/x.md\n", prot)
+    );
+    expect(p.trash).toEqual([]);
+    expect(p.unstage).toEqual([]);
+    expect(p.blocked).toHaveLength(1);
+  });
+
+  it("lists the same path once even when both sources report it", () => {
+    const p = planSparseRepair(
+      evaluateSparseSafety("A  Private/Mem/a.md\n", "A\tPrivate/Mem/a.md\n", prot)
+    );
+    expect(p.unstage).toEqual(["Private/Mem/a.md"]);
+  });
+
+  // AA (both added) and AU (added by us) carry an "A" in the index column and
+  // would otherwise read as ordinary staged additions. Trashing the file and
+  // dropping the index entry of a path that is mid-conflict destroys the merge
+  // state, so every unmerged shape is blocked and named as a conflict.
+  it.each([
+    ["UU", "UU Private/Mem/c.md\n"],
+    ["AA", "AA Private/Mem/c.md\n"],
+    ["AU", "AU Private/Mem/c.md\n"],
+    ["UA", "UA Private/Mem/c.md\n"],
+    ["DU", "DU Private/Mem/c.md\n"],
+    ["UD", "UD Private/Mem/c.md\n"],
+    ["DD", "DD Private/Mem/c.md\n"],
+  ])("blocks the unmerged state %s", (_code, raw) => {
+    const p = planSparseRepair(evaluateSparseSafety(raw, "", prot));
+    expect(p.trash).toEqual([]);
+    expect(p.unstage).toEqual([]);
+    expect(p.blocked).toHaveLength(1);
+  });
+
+  it("says a conflict is a conflict, not 'tracked in the last commit'", () => {
+    const p = planSparseRepair(evaluateSparseSafety("AA Private/Mem/c.md\n", "", prot));
+    expect(p.blocked[0]!.reason).toContain("conflicted");
+  });
+
+  it("plans nothing for a safe report", () => {
+    expect(planSparseRepair(evaluateSparseSafety("", "", prot))).toEqual({
+      trash: [],
+      unstage: [],
+      blocked: [],
+    });
   });
 });

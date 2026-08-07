@@ -1,4 +1,4 @@
-import { ItemView, setIcon, WorkspaceLeaf } from "obsidian";
+import { ItemView, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { RepoLogEntry, RepoLogFile } from "../git/historyParsers";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
@@ -20,6 +20,8 @@ export interface HistoryViewActions {
   treeView(): boolean;
   /** Flip the shared tree/list preference. */
   toggleTree(): void;
+  /** Open (or focus) the status panel; the mirror of its "history" button. */
+  openStatusPanel(): void;
 }
 
 /**
@@ -39,6 +41,12 @@ export class HistoryView extends ItemView {
   private collapsedDirs = new Set<string>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
+  /** The scrolling middle of the panel; the head and the bottom bar do not move. */
+  private bodyEl: HTMLElement | null = null;
+  /** Scroll offset carried across shell rebuilds (layout toggle, re-render). */
+  private savedScroll = 0;
+  /** State line in the strip, mirroring the status panel's. */
+  private progressEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, private actions: HistoryViewActions) {
     super(leaf);
@@ -65,6 +73,11 @@ export class HistoryView extends ItemView {
     this.skip = 0;
     this.exhausted = false;
     this.renderShell();
+    // AFTER renderShell, which is what captures the current offset. Setting it
+    // before was dead code. A reload starts at the newest commit; carrying the
+    // old offset over would drop the user into the middle of a list they asked
+    // to rebuild.
+    this.savedScroll = 0;
     await this.loadMore();
   }
 
@@ -73,34 +86,86 @@ export class HistoryView extends ItemView {
     this.renderShell();
     for (const e of this.entries) this.renderCommit(e);
     if (this.moreBtn && this.entries.length > 0 && !this.exhausted) this.moreBtn.show();
+    this.restoreScroll();
   }
 
   private renderShell(): void {
     const c = this.contentEl;
+    this.savedScroll = this.bodyEl?.scrollTop ?? this.savedScroll;
     c.empty();
     c.addClass("ngb-status-view", "ngb-history-view");
-    const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
+    // The same three regions, in the same places, as the status panel: a fixed
+    // head, a scrolling commit list, and a fixed bottom bar. Two panels that
+    // sit side by side in the same sidebar must not put the same control in
+    // two different corners, so refresh lands where the status panel's refresh
+    // lands, and the layout toggle lands where its layout toggle lands.
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
+    const footBar = c.createDiv({ cls: "ngb-sv-footbar" });
+    this.bodyEl = body;
+    const mobile = Platform.isPhone;
+
+    const bar = (mobile ? footBar : headEl).createDiv({ cls: "ngb-sv-toolbar" });
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Refresh history");
     setIcon(refreshBtn, "refresh-cw");
     if (this.loading) refreshBtn.addClass("ngb-anim-spin", "ngb-sv-icon-active");
     refreshBtn.addEventListener("click", () => void this.refresh());
+
+    // The strip mirrors the status panel's: state on the left, the two view
+    // controls on the right.
+    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
+    this.applyStripState();
+    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
     // Same tree/list toggle as the status panel: icon = CURRENT layout.
-    const treeBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     const treeOn = this.actions.treeView();
     treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
     setIcon(treeBtn, treeOn ? "folder-tree" : "list");
     treeBtn.addEventListener("click", () => this.actions.toggleTree());
-    this.listEl = c.createDiv({ cls: "ngb-hist-list" });
-    const btns = c.createDiv({ cls: "ngb-buttons" });
+    // The counterpart of the status panel's history button, in the same slot:
+    // the two panels open each other from the same corner.
+    const statusBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    statusBtn.setAttribute("aria-label", "Git panel");
+    setIcon(statusBtn, "git-branch");
+    statusBtn.addEventListener("click", () => this.actions.openStatusPanel());
+
+    this.listEl = body.createDiv({ cls: "ngb-hist-list" });
+    // "Load more" belongs after the commits, inside the scrolled region: it is
+    // the end of the list, not a panel control.
+    const btns = body.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
     this.moreBtn.addEventListener("click", () => void this.loadMore());
     this.moreBtn.hide();
   }
 
+  /**
+   * The strip's state line. "Idle" is the same word the status panel uses, so
+   * the two panels do not describe the same condition differently.
+   */
+  private applyStripState(): void {
+    if (!this.progressEl) return;
+    const p = this.actions.progressText();
+    const running = this.loading || p !== "";
+    this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
+    this.progressEl.setText(this.loading ? "Loading history…" : p !== "" ? p : "Idle");
+  }
+
+  /**
+   * Put the list back where it was. Called AFTER the commits are re-added:
+   * setting scrollTop on a container that is still empty is a no-op, which is
+   * how the layout toggle used to jump back to the newest commit.
+   */
+  private restoreScroll(): void {
+    if (this.bodyEl && this.savedScroll > 0) this.bodyEl.scrollTop = this.savedScroll;
+  }
+
   private async loadMore(): Promise<void> {
     if (this.loading) return;
     this.loading = true;
+    this.applyStripState();
     if (this.moreBtn) {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading…");
@@ -112,6 +177,7 @@ export class HistoryView extends ItemView {
     const page = await this.actions.loadPage(this.skip, this.pageSize);
     waiting?.remove();
     this.loading = false;
+    this.applyStripState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
       this.moreBtn.setText("Load more");

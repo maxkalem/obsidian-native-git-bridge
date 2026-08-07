@@ -641,6 +641,15 @@ collect_status_fields() {
     merge_active=true
     merge_msg="$(cat "$(git rev-parse --git-path MERGE_MSG)" 2>/dev/null || true)"
   fi
+  # An unfinished rebase looks nothing like an unfinished merge: there is no
+  # MERGE_HEAD, only a state DIRECTORY, and which of the two it is depends on
+  # the backend git chose (rebase-merge for the interactive/merge backend,
+  # rebase-apply for the older am backend). Reported so the panel can offer the
+  # way out; nothing here starts a rebase.
+  local rebase_active=false
+  if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+    rebase_active=true
+  fi
   sparse_enabled="$(git config --get core.sparseCheckout 2>/dev/null || true)"
   sparse_cone="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
   sparse_list="$(git sparse-checkout list 2>/dev/null || true)"
@@ -659,7 +668,8 @@ collect_status_fields() {
     remoteUrl "$remote_url" \
     untrackedChildren "$UNTRACKED_CHILDREN" \
     mergeInProgress "$merge_active" \
-    mergeMsg "$merge_msg")
+    mergeMsg "$merge_msg" \
+    rebaseInProgress "$rebase_active")
 }
 
 action_status() { collect_status_fields; }
@@ -789,6 +799,9 @@ read_protected_paths() {
 conflicted_files() { git diff --name-only --diff-filter=U 2>/dev/null || true; }
 
 merge_in_progress() { [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; }
+rebase_in_progress() {
+  [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]
+}
 
 # Mandatory gate before commit/push/sync. Sets ERROR (SAFETY_BLOCKED) on violation.
 # Sparse-checkout omissions never appear here: git status only reports real
@@ -1039,6 +1052,39 @@ action_abort_merge() {
   collect_status_fields
 }
 
+# The two exits from an unfinished rebase. Nothing in this runner STARTS one:
+# a rebase can only arrive here because it was started in Termux by hand, and
+# before these existed the plugin could see that state but not leave it.
+action_abort_rebase() {
+  if ! rebase_in_progress; then
+    ERROR=$(err_json "BAD_REQUEST" "No rebase in progress; nothing to abort." "" ""); return 1
+  fi
+  if ! run_git rebase --abort; then
+    ERROR=$(err_json "GIT_FAILED" "git rebase --abort failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
+# Continue is refused while anything is still unmerged, and the message says
+# how many: `git rebase --continue` in that state opens an editor, and the
+# runner runs with no terminal, so it would hang until the request expired.
+action_continue_rebase() {
+  if ! rebase_in_progress; then
+    ERROR=$(err_json "BAD_REQUEST" "No rebase in progress; nothing to continue." "" ""); return 1
+  fi
+  local unmerged
+  unmerged="$(git ls-files -u 2>/dev/null | cut -f2 | sort -u | grep -c . || true)"
+  if [ "${unmerged:-0}" -gt 0 ]; then
+    ERROR=$(err_json "CONFLICT" "$unmerged file(s) are still conflicted. Resolve them first, then continue." "" "")
+    return 1
+  fi
+  # GIT_EDITOR=true: accept the message git already prepared, never prompt.
+  if ! GIT_EDITOR=true run_git rebase --continue; then
+    ERROR=$(err_json "GIT_FAILED" "git rebase --continue failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
 
 # ---- phase 4 actions: history / diff / restore --------------------------------
 
@@ -1183,6 +1229,89 @@ refuse_if_protected() { # $1 path
     esac
   done
   return 0
+}
+
+# The ONE operation permitted on a protected sparse path: taking it back OUT of
+# the index.
+#
+# Everything else on a protected path is refused by refuse_if_protected, and it
+# has to be — but that left a state with no way out. A file created inside a
+# protected directory and staged BEFORE the directory was excluded keeps its
+# index entry when `sparse-checkout reapply` removes it from the worktree.
+# git then reports `AD`: added to the index, absent from disk. The safety gate
+# blocked every commit, push and sync because of it, the plugin's "delete the
+# files" repair moved nothing (there was no file), and unstaging was refused.
+# The only exit was Termux.
+#
+# This is narrow on purpose and cannot be used as a general bypass:
+#   1. the path must BE protected (the inverse of the usual guard);
+#   2. it must be in the index;
+#   3. it must NOT be in HEAD.
+# (3) is what makes it safe. `git rm --cached` on a path that HEAD does not
+# contain removes an addition; there is no tracked content to turn into a
+# staged deletion. The file on disk, if any, is never touched — deleting it is
+# the plugin's job, through Obsidian's trash, and stays reversible.
+action_unstage_protected() {
+  local req_file="$1"
+  read_protected_paths "$req_file" || return 1
+  if [ "${#PPATHS[@]}" -eq 0 ]; then
+    ERROR=$(err_json BAD_REQUEST "No protectedPaths provided." "" ""); return 1
+  fi
+  local paths=() p path ok_path
+  mapfile -t paths < <(jq -r '.args.paths[]? // empty' "$req_file")
+  if [ "${#paths[@]}" -eq 0 ]; then
+    ERROR=$(err_json BAD_REQUEST "No paths provided." "" ""); return 1
+  fi
+  # Every path is checked BEFORE anything is removed, so a request that is
+  # partly illegal changes nothing at all.
+  local accepted=()
+  for path in "${paths[@]}"; do
+    valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+    ok_path=false
+    for p in "${PPATHS[@]}"; do
+      case "$path" in "$p"|"$p"/*) ok_path=true; break ;; esac
+    done
+    if [ "$ok_path" != true ]; then
+      ERROR=$(err_json BAD_REQUEST "Not a protected sparse path: $path. This action only clears protected paths out of the index." "" "")
+      return 1
+    fi
+    # An EXACT index entry, not a pathspec hit. `valid_rel_path` does not reject
+    # the glob characters `*`, `?` and `[`, so a bare `ls-files -- "$path"`
+    # would also accept a pattern, and a DIRECTORY would match its children —
+    # in both cases `update-index --force-remove` then removes nothing while
+    # the result claims a removal. Matching the printed path against the
+    # requested one closes both.
+    if ! git ls-files --cached -- "$path" 2>/dev/null | grep -qxF -- "$path"; then
+      # Already gone from the index (or never an entry in the first place):
+      # nothing to do and nothing to report as an error, so the repair stays
+      # idempotent when it is re-run.
+      continue
+    fi
+    # `ls-tree -- <pathspec>` is the wrong test: without -r it does not recurse,
+    # so a glob answers "empty" for content that IS committed, and the guard
+    # would pass on the strength of a coincidence. `cat-file -e HEAD:<path>`
+    # takes a literal path, resolves nested files, and fails cleanly on an
+    # unborn HEAD (correctly meaning "not in HEAD").
+    if git cat-file -e "HEAD:$path" 2>/dev/null; then
+      ERROR=$(err_json SAFETY_BLOCKED "$path is tracked in HEAD. Removing it from the index here would stage a deletion of committed content; resolve that one in Termux." "" "")
+      return 1
+    fi
+    accepted+=("$path")
+  done
+  if [ "${#accepted[@]}" -gt 0 ]; then
+    # `git rm --cached` is the obvious call and it does NOT work here: the path
+    # is outside the sparse-checkout definition by construction, and git refuses
+    # ("matched paths that exist outside of your sparse-checkout definition")
+    # unless given --sparse, which only exists from git 2.35. The plumbing has
+    # no such guard, works on every version, and does exactly one thing: drop
+    # the index entry. Nothing on disk is touched either way.
+    if ! run_git update-index --force-remove -- "${accepted[@]}"; then
+      ERROR=$(err_json GIT_FAILED "git update-index --force-remove failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
+  collect_status_fields
+  local list; list=$(printf '%s\n' ${accepted[@]+"${accepted[@]}"})
+  DATA=$(merge_data "$DATA" "$(obj_from_fields unstagedProtected "$list" unstagedProtectedCount "${#accepted[@]}")")
 }
 
 # Pathspec excludes for every protected path that lies UNDER $1.
@@ -1992,6 +2121,8 @@ process_request() {
     push)                  action_push "$req_file" || { ok=false; ec=1; } ;;
     sync)                  action_sync "$req_file" || { ok=false; ec=1; } ;;
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
+    abort-rebase)          action_abort_rebase || { ok=false; ec=1; } ;;
+    continue-rebase)       action_continue_rebase || { ok=false; ec=1; } ;;
     file-log)              action_file_log "$req_file" || { ok=false; ec=1; } ;;
     repo-log)              action_repo_log "$req_file" || { ok=false; ec=1; } ;;
     resolve-conflict)      action_resolve_conflict "$req_file" || { ok=false; ec=1; } ;;
@@ -2000,6 +2131,7 @@ process_request() {
     restore-file)          action_restore_file "$req_file" || { ok=false; ec=1; } ;;
     stage-file)            action_stage_file "$req_file" || { ok=false; ec=1; } ;;
     unstage-file)          action_unstage_file "$req_file" || { ok=false; ec=1; } ;;
+    unstage-protected)     action_unstage_protected "$req_file" || { ok=false; ec=1; } ;;
     discard-file)          action_discard_file "$req_file" || { ok=false; ec=1; } ;;
     stage-all)             action_stage_all "$req_file" || { ok=false; ec=1; } ;;
     unstage-all)           action_unstage_all "$req_file" || { ok=false; ec=1; } ;;

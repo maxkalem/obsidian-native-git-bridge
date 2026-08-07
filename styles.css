@@ -5,23 +5,193 @@
    belonged to two modals that panes replaced; see src/ui/historyViews.ts.) */
 
 /* Source-control style status panel (primary status surface on mobile) */
-.ngb-status-view { padding: var(--size-4-2) var(--size-4-2) var(--size-4-4); }
+
+/* Three regions, one scrollbar. `contentEl` of an ItemView IS `.view-content`,
+   which Obsidian scrolls by default; turning that off here and giving only the
+   middle region its own overflow is what keeps the controls on screen while a
+   long file or commit list scrolls between them.
+
+   `min-height: 0` on the middle is load-bearing: without it a flex item refuses
+   to shrink below its content, and the list would push the fixed regions off
+   the panel instead of scrolling. */
+/* `overflow-y: auto` here is the LAST-RESORT scrollbar, and the shrink order
+   below is what keeps it from ever appearing in normal use. See the two rules
+   that follow. */
+.ngb-status-view {
+  padding: var(--size-4-2) var(--size-4-2) 0;
+  display: flex; flex-direction: column;
+  height: 100%; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  box-sizing: border-box;
+}
+/* Obsidian gives `.view-content` a bottom padding on mobile so an editor's
+   text clears the on-screen keyboard; measured at 358px on a device with the
+   keyboard up. This panel has no text input at all — every field it owns lives
+   in a modal — and with `height: 100%` under border-box that padding is taken
+   OUT of the content box, so the whole layout was pushed up and a dead band
+   sat under the bottom bar.
+   It was invisible before only because the panel scrolled as one piece and the
+   band fell past the end of the scroll.
+   Written as `.view-content.ngb-status-view` rather than with `!important`:
+   that matches the specificity of the app's own `.mod-… .view-content` rule,
+   and a plugin's stylesheet is applied after the app's. */
+.view-content.ngb-status-view { padding-bottom: 0; }
+/* Both fixed regions size to their content and never scroll: everything in
+   them is a control or a state line, and a control you have to scroll to find
+   is a control you do not have. They grow when the merge banner appears and
+   shrink again when it goes; the list in between absorbs the difference.
+
+   `flex-shrink: 0` is doing two jobs. The obvious one: they keep their full
+   height. The one that matters: because they refuse to shrink and the body is
+   the only item that can, ALL shrinking lands on the body first. The panel
+   therefore degrades in a fixed order —
+
+     1. the list gives up its space, down to nothing (min-height: 0 below);
+     2. only then does the total exceed the panel, and only then does the
+        container's own scrollbar appear.
+
+   So the outer scrollbar shows up at exactly the moment the controls would
+   otherwise be clipped, and never one pixel before. A `max-height` on the head
+   cannot express that: it starts scrolling at a fixed fraction of the panel
+   whether or not there is a shortage, which is how the toolbar ended up
+   scrolled out of view while there was still room for it. */
+.ngb-sv-head, .ngb-sv-footbar { flex: 0 0 auto; }
+/* Sized against Obsidian's own bottom bars (the Outline panel's, for one), so
+   the plugin's bar does not read as a heavier, taller thing bolted underneath.
+   The icons were already the right size; the height was all padding.
+
+   The one gap left is deliberate. On mobile the drawer's tab pill ("Native
+   Git") floats OVER the bottom of the panel, and because it is an overlay no
+   layout query sees it: the geometry probe reports the panel ending exactly
+   where the bar ends, while on screen the pill covers the last rows of pixels.
+   The clearance was found by eye on the device, at 0.7 of an icon.
+
+   Expressed against `--icon-l` rather than as a number so it tracks the icon
+   size. On the phone this was tuned on, `--icon-l` measures 24px (the 20px
+   fallback here is desktop's), so this comes out at about 17px.
+
+   `overflow: hidden` is for the refresh spinner. A rotating box sweeps a
+   bounding box about 1.4x its width, transformed overflow counts toward a
+   scroll container's scrollable area, and this bar sits at the very bottom of
+   one — so a second scrollbar appeared on the panel for exactly as long as an
+   operation ran. The bar is a fixed row of controls with nothing to scroll, so
+   clipping it costs nothing, and the padding above means the spinner never
+   reaches the clip edge anyway. */
+.ngb-sv-footbar {
+  padding-bottom: calc(var(--icon-l, 20px) * 0.7);
+  overflow: hidden;
+}
+/* `min-height: 0` is what allows step 1 above: a flex item defaults to
+   min-height:auto and refuses to shrink below its content, which would push the
+   controls off the panel instead of scrolling the list. */
+.ngb-sv-body {
+  flex: 1 1 auto; min-height: 0;
+  overflow-y: auto; overflow-x: hidden;
+  /* Momentum scrolling and no scroll chaining into the panel's own last-resort
+     scrollbar, or into the workspace behind it — on Android an overscroll there
+     turned into a sidebar swipe. */
+  overscroll-behavior: contain;
+}
+/* No separator rules between the regions. Their own spacing already groups
+   them, and on a phone every horizontal line is a row of file list spent on
+   decoration. The bottom bar gets one, because there it separates the controls
+   from content that scrolls underneath and would otherwise touch them. */
 .ngb-sv-toolbar {
   display: flex; flex-wrap: wrap; gap: var(--size-4-1);
+  margin-bottom: var(--size-4-2);
+}
+.ngb-sv-footbar .ngb-sv-toolbar {
+  /* Breathing room between the separator rule and the buttons, a third of a
+     button. The buttons carry no vertical padding of their own down here (see
+     below), so their height IS the icon height, and the same custom property
+     drives both this and the clearance under the bar. */
+  padding-top: calc(var(--icon-l, 20px) / 3);
+  /* No padding under the last row: the bar's own bottom padding supplies the
+     clearance, and anything past that belongs to Obsidian's drawer chrome. */
+  padding-bottom: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  margin-bottom: 0;
+  flex-wrap: nowrap;
+}
+/* The history panel has ONE control where the status panel has eight. The
+   status toolbar is `space-between` across the full width on a phone, so its
+   refresh sits hard right — and a lone button under the same rule would sit
+   hard LEFT, which is the opposite corner. Pin it where the other panel's
+   refresh is, since the two sit in the same sidebar slot. */
+.ngb-history-view .ngb-sv-footbar .ngb-sv-toolbar { justify-content: flex-end; }
+.ngb-sv-icon { color: var(--text-muted); }
+.ngb-sv-icon:hover { color: var(--text-normal); }
+.ngb-sv-icon-warn:hover { color: var(--text-error); }
+/* The branch line closes the top region, so it carries the rule that separates
+   the panel's controls from its content. The rule sits at the height the top
+   region would end at with NO merge banner, and the banner hangs below it: the
+   banner is about the repository state, not another control, and anchoring the
+   line to the banner instead would make it jump every time a merge starts or
+   ends. */
+.ngb-sv-header {
+  display: flex; align-items: center; gap: var(--size-4-2); flex-wrap: wrap;
   padding-bottom: var(--size-4-2);
   border-bottom: 1px solid var(--background-modifier-border);
   margin-bottom: var(--size-4-2);
 }
-.ngb-sv-icon { color: var(--text-muted); }
-.ngb-sv-icon:hover { color: var(--text-normal); }
-.ngb-sv-icon-warn:hover { color: var(--text-error); }
-.ngb-sv-header { display: flex; align-items: center; gap: var(--size-4-2); margin-bottom: var(--size-4-2); flex-wrap: wrap; }
 .ngb-sv-state { font-weight: 600; }
 .ngb-sv-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); display: inline-block; flex: 0 0 auto; }
 .ngb-sv-clean { background: var(--text-success, #08b94e); }
 .ngb-sv-changed { background: var(--text-accent); }
 .ngb-sv-syncing, .ngb-sv-waiting-tap { background: var(--text-warning, #e0ac00); }
 .ngb-sv-conflict, .ngb-sv-error { background: var(--text-error); }
+
+/* Unfinished merge / rebase. Sits in the fixed head so it cannot be scrolled
+   past: while it is showing, pull, push and sync all refuse. */
+.ngb-sv-banner {
+  border: 1px solid var(--text-warning, #e0ac00);
+  border-left-width: 3px;
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  padding: var(--size-4-2);
+  margin-bottom: var(--size-4-2);
+}
+.ngb-sv-banner-title {
+  display: flex; align-items: center; gap: var(--size-4-1);
+  font-weight: 600;
+}
+.ngb-sv-banner-icon { display: inline-flex; flex: 0 0 auto; color: var(--text-warning, #e0ac00); }
+.ngb-sv-banner-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
+.ngb-sv-banner-detail {
+  color: var(--text-muted); font-size: var(--font-ui-smaller);
+  margin-top: var(--size-4-1);
+}
+/* Equal widths so neither exit looks like the default on a narrow phone, and
+   the labels truncate rather than wrap the row into two lines. */
+.ngb-sv-banner-actions {
+  display: flex; gap: var(--size-4-2); margin-top: var(--size-4-2);
+}
+.ngb-sv-banner-actions button {
+  flex: 1 1 0; min-width: 0;
+  font-size: var(--font-ui-smaller);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ngb-sv-banner-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Abort is destructive and is the one that undoes work, so it is filled red
+   rather than merely red-lettered. Same on both platforms. */
+.ngb-sv-banner-abort {
+  background: var(--text-error);
+  color: var(--text-on-accent, #fff);
+  border: none;
+}
+.ngb-sv-banner-abort:hover { background: var(--text-error); filter: brightness(1.1); }
+
+/* Phone: the banner lives in the panel's fixed region, so every line it takes
+   is a line of file list nobody can see. Tighter padding, shorter buttons, no
+   icon (removed in the view). The TEXT is shortened at the source rather than
+   set in a smaller font: this is the one control that must not be missed. */
+.ngb-sv-banner-compact { padding: var(--size-4-1) var(--size-4-2); }
+.ngb-sv-banner-compact .ngb-sv-banner-detail { margin-top: 2px; }
+.ngb-sv-banner-compact .ngb-sv-banner-actions { margin-top: var(--size-4-1); gap: var(--size-4-1); }
+.ngb-sv-banner-compact .ngb-sv-banner-actions button {
+  padding-top: var(--size-4-1); padding-bottom: var(--size-4-1);
+  height: auto; min-height: 0; line-height: 1.4;
+}
 
 .ngb-sv-group { margin-bottom: var(--size-4-2); }
 .ngb-sv-group-header {
@@ -108,9 +278,7 @@
 .ngb-sv-strip {
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--size-4-2); min-height: 2em;
-  padding-bottom: var(--size-4-2);
-  border-bottom: 1px solid var(--background-modifier-border);
-  margin-bottom: var(--size-4-2);
+  margin-bottom: var(--size-4-1);
 }
 .ngb-sv-strip-left { display: flex; align-items: center; gap: var(--size-4-1); min-width: 0; }
 .ngb-sv-strip-right { display: flex; align-items: center; gap: var(--size-4-1); flex: 0 0 auto; }
@@ -127,6 +295,13 @@
 /* Toolbar icon sizing + activity animation (matches obsidian-git's spinning refresh) */
 .ngb-sv-toolbar .ngb-sv-icon { padding: var(--size-4-1); }
 .ngb-sv-toolbar .ngb-sv-icon svg { width: var(--icon-l, 20px); height: var(--icon-l, 20px); }
+/* In the bottom bar the buttons carry no vertical padding of their own: the
+   bar supplies it once, for the whole row. Two sets of padding stacked is what
+   made it a third taller than Obsidian's built-in bars. */
+.ngb-sv-footbar .ngb-sv-toolbar .ngb-sv-icon {
+  padding-top: 0; padding-bottom: 0;
+  height: auto; min-height: 0;
+}
 .ngb-sv-icon-active { color: var(--text-accent); }
 /* Activity animations. Rotation is reserved for refresh; directional bobbing
    for pull/fetch (down) and push (up); gentle pulsing for everything else. */
@@ -251,6 +426,21 @@
 .ngb-textarea-full { width: 100%; }
 
 /* ---------------------------------------------------------------- history */
+
+/* The history panel's top region ends in the strip, not in a branch line, so
+   there is nothing to hang the separator on the way the status panel hangs it
+   on `.ngb-sv-header`. It goes on the region itself, the same distance below
+   the text as in the status panel, so the two draw one line in one place.
+
+   The file-history pane is excluded because its path line already carries a
+   rule of its own; two would read as a boxed header. */
+.ngb-history-view:not(.ngb-filehist-view) .ngb-sv-head {
+  padding-bottom: var(--size-4-2);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+/* …and the strip gives up its own bottom margin, so the gap above the line is
+   the region's padding alone rather than the two added together. */
+.ngb-history-view:not(.ngb-filehist-view) .ngb-sv-head .ngb-sv-strip { margin-bottom: 0; }
 
 .ngb-history-view .ngb-hist-list { margin-top: var(--size-4-2); }
 .ngb-hist-commit { margin-bottom: var(--size-4-1); }

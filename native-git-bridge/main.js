@@ -702,7 +702,10 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["init-repo", 11],
   ["set-remote", 11],
   ["clone-into-vault", 11],
-  ["adopt-remote", 11]
+  ["adopt-remote", 11],
+  ["abort-rebase", 11],
+  ["continue-rebase", 11],
+  ["unstage-protected", 11]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -723,7 +726,10 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "init-repo",
   "set-remote",
   "clone-into-vault",
-  "adopt-remote"
+  "adopt-remote",
+  "abort-rebase",
+  "continue-rebase",
+  "unstage-protected"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -935,6 +941,328 @@ function addCopyButton(parent, getText, label2 = "Copy", noticeText = "Copied to
   return btn;
 }
 
+// src/git/parsers.ts
+function unquoteGitPath(raw) {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  const bytes = [];
+  const enc = new TextEncoder();
+  let i = 0;
+  while (i < inner.length) {
+    const c = inner[i];
+    if (c !== "\\") {
+      for (const b of enc.encode(c)) bytes.push(b);
+      i++;
+      continue;
+    }
+    const n = inner[i + 1];
+    if (n === void 0) break;
+    const simple = {
+      a: 7,
+      b: 8,
+      f: 12,
+      n: 10,
+      r: 13,
+      t: 9,
+      v: 11,
+      "\\": 92,
+      '"': 34
+    };
+    if (simple[n] !== void 0) {
+      bytes.push(simple[n]);
+      i += 2;
+      continue;
+    }
+    if (n >= "0" && n <= "7") {
+      let oct = "";
+      let j = i + 1;
+      while (j < inner.length && oct.length < 3) {
+        const d = inner[j];
+        if (d < "0" || d > "7") break;
+        oct += d;
+        j++;
+      }
+      bytes.push(parseInt(oct, 8) & 255);
+      i = j;
+      continue;
+    }
+    for (const b of enc.encode(n)) bytes.push(b);
+    i += 2;
+  }
+  return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(bytes));
+}
+function parseStatusPorcelainV2(text) {
+  const s = {
+    ahead: 0,
+    behind: 0,
+    detached: false,
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    conflicted: []
+  };
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") continue;
+    if (line.startsWith("# branch.oid ")) {
+      const v = line.slice("# branch.oid ".length);
+      if (v !== "(initial)") s.oid = v;
+    } else if (line.startsWith("# branch.head ")) {
+      const v = line.slice("# branch.head ".length);
+      if (v === "(detached)") s.detached = true;
+      else s.branch = v;
+    } else if (line.startsWith("# branch.upstream ")) {
+      s.upstream = line.slice("# branch.upstream ".length);
+    } else if (line.startsWith("# branch.ab ")) {
+      const m = /\+(\d+) -(\d+)/.exec(line);
+      if (m) {
+        s.ahead = parseInt(m[1], 10);
+        s.behind = parseInt(m[2], 10);
+      }
+    } else if (line.startsWith("1 ")) {
+      const parts = splitN(line, " ", 8);
+      if (parts.length === 9) {
+        const xy = parts[1];
+        pushEntry(s, {
+          path: unquoteGitPath(parts[8]),
+          index: xy[0] ?? ".",
+          worktree: xy[1] ?? "."
+        });
+      }
+    } else if (line.startsWith("2 ")) {
+      const parts = splitN(line, " ", 9);
+      if (parts.length === 10) {
+        const xy = parts[1];
+        const [p, orig] = parts[9].split("	");
+        pushEntry(s, {
+          path: unquoteGitPath(p ?? ""),
+          origPath: orig !== void 0 ? unquoteGitPath(orig) : void 0,
+          index: xy[0] ?? ".",
+          worktree: xy[1] ?? "."
+        });
+      }
+    } else if (line.startsWith("u ")) {
+      const parts = splitN(line, " ", 10);
+      if (parts.length === 11) {
+        const xy = parts[1];
+        s.conflicted.push({
+          path: unquoteGitPath(parts[10]),
+          index: xy[0] ?? ".",
+          worktree: xy[1] ?? "."
+        });
+      }
+    } else if (line.startsWith("? ")) {
+      s.untracked.push(unquoteGitPath(line.slice(2)));
+    }
+  }
+  return s;
+}
+function groupUntrackedChildren(childrenText, untracked) {
+  const dirs = untracked.filter((u) => u.endsWith("/"));
+  const out = {};
+  if (dirs.length === 0) return out;
+  for (const rawLine of childrenText.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") continue;
+    const dir = dirs.find((d) => line.startsWith(d));
+    if (dir === void 0) continue;
+    if (line === dir) continue;
+    (out[dir] ??= []).push(line);
+  }
+  return out;
+}
+function pushEntry(s, e) {
+  if (e.index !== ".") s.staged.push(e);
+  if (e.worktree !== ".") s.unstaged.push(e);
+}
+function splitN(line, sep, n) {
+  const out = [];
+  let rest = line;
+  for (let k = 0; k < n; k++) {
+    const idx = rest.indexOf(sep);
+    if (idx < 0) break;
+    out.push(rest.slice(0, idx));
+    rest = rest.slice(idx + 1);
+  }
+  out.push(rest);
+  return out;
+}
+function parseStatusPorcelainV1(text) {
+  const entries = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line.length < 4) continue;
+    const x = line[0];
+    const y = line[1];
+    let rest = line.slice(3);
+    let orig;
+    if (x === "R" || x === "C") {
+      const arrow = rest.indexOf(" -> ");
+      if (arrow >= 0) {
+        orig = unquoteGitPath(rest.slice(0, arrow));
+        rest = rest.slice(arrow + 4);
+      }
+    }
+    entries.push({
+      path: unquoteGitPath(rest),
+      origPath: orig,
+      index: x === " " ? "." : x,
+      worktree: y === " " ? "." : y
+    });
+  }
+  return entries;
+}
+function parseNameStatus(text) {
+  const entries = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    if (line === "") continue;
+    const parts = line.split("	");
+    const code = parts[0] ?? "";
+    const kind = code[0] ?? "?";
+    if ((kind === "R" || kind === "C") && parts.length >= 3) {
+      entries.push({
+        path: unquoteGitPath(parts[2]),
+        origPath: unquoteGitPath(parts[1]),
+        index: kind,
+        worktree: "."
+      });
+    } else if (parts.length >= 2) {
+      entries.push({ path: unquoteGitPath(parts[1]), index: kind, worktree: "." });
+    }
+  }
+  return entries;
+}
+function countSkipWorktree(text) {
+  let n = 0;
+  for (const line of text.split("\n")) {
+    if (line.startsWith("S ")) n++;
+  }
+  return n;
+}
+function sparseExclusionPaths(patterns) {
+  const out = [];
+  for (const raw of patterns) {
+    let p = raw.trim();
+    if (!p.startsWith("!")) continue;
+    p = p.slice(1).trim();
+    if (p.startsWith("/")) p = p.slice(1);
+    p = p.replace(/\/+$/, "");
+    if (p === "" || /[*?[\]]/.test(p)) continue;
+    if (!out.includes(p)) out.push(p);
+  }
+  return out;
+}
+function parseSparseState(fields) {
+  const enabled = fields.sparseEnabled.trim() === "true";
+  const coneRaw = fields.sparseCone.trim();
+  return {
+    enabled,
+    coneMode: coneRaw === "" ? void 0 : coneRaw === "true",
+    patterns: fields.sparseList.split("\n").map((l) => l.trim()).filter((l) => l !== ""),
+    skipWorktreeCount: resolveSkipCount(fields.skipWorktreeCount, fields.lsFilesV)
+  };
+}
+function resolveSkipCount(count, lsFilesV) {
+  if (count !== void 0 && count.trim() !== "") {
+    const n = parseInt(count.trim(), 10);
+    if (!Number.isNaN(n)) return n;
+  }
+  return countSkipWorktree(lsFilesV ?? "");
+}
+function parseLastCommit(text) {
+  const line = text.split("\n")[0]?.trim();
+  if (!line) return void 0;
+  const [hash, date, ...subj] = line.split("	");
+  if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) return void 0;
+  return { hash, date: date ?? "", subject: subj.join("	") };
+}
+
+// src/git/sparseSafety.ts
+var STATUS_LABEL = {
+  D: "deleted",
+  M: "modified",
+  A: "added",
+  R: "renamed",
+  C: "copied",
+  T: "type-changed",
+  U: "unmerged",
+  "?": "untracked"
+};
+function label(code) {
+  return STATUS_LABEL[code] ?? `changed (${code})`;
+}
+function worktreeLabel(index, worktree) {
+  if (index === worktree) return label(index);
+  if (index !== "." && worktree === "D") return `${label(index)} to the index, missing from the worktree`;
+  if (index !== "." && worktree !== ".") return `${label(index)} (index), ${label(worktree)} (worktree)`;
+  return label(index !== "." ? index : worktree);
+}
+function evaluateSparseSafety(statusProtectedRaw, stagedProtectedRaw, protectedPaths, now = /* @__PURE__ */ new Date()) {
+  const violations = [];
+  for (const e of parseStatusPorcelainV1(statusProtectedRaw)) {
+    violations.push({
+      path: e.path,
+      status: worktreeLabel(e.index, e.worktree),
+      source: "worktree",
+      index: e.index,
+      worktree: e.worktree
+    });
+  }
+  for (const e of parseNameStatus(stagedProtectedRaw)) {
+    violations.push({ path: e.path, status: label(e.index), source: "staged", index: e.index });
+  }
+  return {
+    safe: violations.length === 0,
+    violations,
+    protectedPaths: [...protectedPaths],
+    checkedAt: now.toISOString()
+  };
+}
+function planSparseRepair(report) {
+  const byPath = /* @__PURE__ */ new Map();
+  for (const v of report.violations) {
+    const list = byPath.get(v.path);
+    if (list) list.push(v);
+    else byPath.set(v.path, [v]);
+  }
+  const plan = { trash: [], unstage: [], blocked: [] };
+  for (const [path, vs] of byPath) {
+    const untracked = vs.some((v) => v.index === "?" || v.worktree === "?");
+    const indexCodes = vs.map((v) => v.index).filter((c) => c !== void 0);
+    const worktreeOnly = vs.some(
+      (v) => v.source === "worktree" && v.index === "." && v.worktree !== "." && v.worktree !== "?"
+    );
+    const unmerged = vs.some(
+      (v) => v.index === "U" || v.worktree === "U" || v.index === "A" && v.worktree === "A"
+    );
+    const tracked = indexCodes.some((c) => c !== "?" && c !== "." && c !== "A") || !untracked && worktreeOnly;
+    if (unmerged) {
+      plan.blocked.push({
+        path,
+        reason: "conflicted (unmerged) \u2014 finish or abort the merge first"
+      });
+      continue;
+    }
+    if (tracked) {
+      plan.blocked.push({
+        path,
+        reason: "tracked in the last commit \u2014 removing it here would create the staged deletion this check blocks"
+      });
+      continue;
+    }
+    const inIndex = indexCodes.includes("A");
+    const wt = vs.find((v) => v.source === "worktree");
+    const onDisk = untracked || wt !== void 0 && wt.worktree !== "D";
+    if (onDisk) plan.trash.push(path);
+    if (inIndex) plan.unstage.push(path);
+    if (!onDisk && !inIndex) {
+      plan.blocked.push({ path, reason: "not on disk and not in the index \u2014 resolve it in Termux" });
+    }
+  }
+  return plan;
+}
+
 // src/ui/modals.ts
 function placeModalAction(modal, opts) {
   const b = document.createElement("button");
@@ -1122,27 +1450,27 @@ var SparseSafetyModal = class extends import_obsidian2.Modal {
    */
   renderFixes(c) {
     if (!this.fixes) return;
-    const isNew = (s) => s === "untracked" || s === "added";
-    const other = new Set(
-      this.report.violations.filter((v) => !isNew(v.status)).map((v) => v.path)
-    );
-    const paths = [
-      ...new Set(
-        this.report.violations.filter((v) => isNew(v.status) && !other.has(v.path)).map((v) => v.path)
-      )
-    ];
+    const plan = planSparseRepair(this.report);
     const allPaths = [...new Set(this.report.violations.map((v) => v.path))];
     const dirs = this.report.protectedPaths.filter(
       (p) => allPaths.some((f) => f === p || f.startsWith(`${p}/`))
     );
-    if (paths.length === 0 && dirs.length === 0) return;
+    const repairable = plan.trash.length + plan.unstage.length;
+    if (repairable === 0 && dirs.length === 0) {
+      if (plan.blocked.length > 0) this.renderBlockedNote(c, plan);
+      return;
+    }
     const row = c.createDiv({ cls: "ngb-fix-row" });
-    if (paths.length > 0) {
-      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: "Delete files locally" });
-      b.setAttribute("aria-label", `Move ${paths.length} listed files to Obsidian's trash`);
+    if (repairable > 0) {
+      const label2 = this.repairLabel(plan);
+      const b = row.createEl("button", { cls: "ngb-fix-btn mod-warning", text: label2 });
+      b.setAttribute(
+        "aria-label",
+        `Clear ${repairable} blocking path${repairable === 1 ? "" : "s"} out of the way`
+      );
       b.addEventListener("click", () => {
         this.close();
-        this.fixes?.deleteLocally(paths);
+        this.fixes?.repair(plan);
       });
     }
     if (dirs.length > 0) {
@@ -1154,14 +1482,14 @@ var SparseSafetyModal = class extends import_obsidian2.Modal {
       });
     }
     const notes = [];
-    if (paths.length > 0) {
+    if (plan.trash.length > 0) {
       notes.push(
-        `Delete: moves ${paths.length} new file${paths.length === 1 ? "" : "s"} to Obsidian's trash (reversible; git history untouched).`
+        `${plan.trash.length} file${plan.trash.length === 1 ? "" : "s"} go to Obsidian's trash (reversible; git history untouched).`
       );
     }
-    if (other.size > 0) {
+    if (plan.unstage.length > 0) {
       notes.push(
-        `${other.size} listed path${other.size === 1 ? " is" : "s are"} tracked here, so deleting would create the very deletion this check blocks. Resolve those in Termux.`
+        `${plan.unstage.length} entr${plan.unstage.length === 1 ? "y is" : "ies are"} removed from the index only \u2014 those are staged additions with no file on disk, which deleting alone cannot clear. Nothing committed is touched.`
       );
     }
     if (dirs.length > 0) {
@@ -1170,6 +1498,29 @@ var SparseSafetyModal = class extends import_obsidian2.Modal {
       );
     }
     c.createDiv({ cls: "ngb-settings-note", text: notes.join(" ") });
+    if (plan.blocked.length > 0) this.renderBlockedNote(c, plan);
+  }
+  /** Button text names what will actually happen, not a fixed verb. */
+  repairLabel(plan) {
+    if (plan.trash.length === 0) return "Remove from index";
+    if (plan.unstage.length === 0) return "Delete files locally";
+    return "Delete and unstage";
+  }
+  /**
+   * The paths the plugin will not repair, and why. Listed rather than dropped:
+   * silently offering a button that covers three of five paths is how "the
+   * check still blocks after the fix" happens.
+   */
+  renderBlockedNote(c, plan) {
+    const d = c.createDiv({ cls: "ngb-settings-note" });
+    d.createDiv({
+      text: `${plan.blocked.length} path${plan.blocked.length === 1 ? "" : "s"} cannot be repaired from here:`
+    });
+    const ul = d.createEl("ul", { cls: "ngb-file-list" });
+    for (const b of plan.blocked.slice(0, 12)) ul.createEl("li", { text: `${b.path} \u2014 ${b.reason}` });
+    if (plan.blocked.length > 12) {
+      ul.createEl("li", { text: `\u2026and ${plan.blocked.length - 12} more` });
+    }
   }
   onClose() {
     this.contentEl.empty();
@@ -2196,274 +2547,6 @@ var CompanionIntentTransport = class {
   }
 };
 
-// src/git/parsers.ts
-function unquoteGitPath(raw) {
-  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
-  const inner = raw.slice(1, -1);
-  const bytes = [];
-  const enc = new TextEncoder();
-  let i = 0;
-  while (i < inner.length) {
-    const c = inner[i];
-    if (c !== "\\") {
-      for (const b of enc.encode(c)) bytes.push(b);
-      i++;
-      continue;
-    }
-    const n = inner[i + 1];
-    if (n === void 0) break;
-    const simple = {
-      a: 7,
-      b: 8,
-      f: 12,
-      n: 10,
-      r: 13,
-      t: 9,
-      v: 11,
-      "\\": 92,
-      '"': 34
-    };
-    if (simple[n] !== void 0) {
-      bytes.push(simple[n]);
-      i += 2;
-      continue;
-    }
-    if (n >= "0" && n <= "7") {
-      let oct = "";
-      let j = i + 1;
-      while (j < inner.length && oct.length < 3) {
-        const d = inner[j];
-        if (d < "0" || d > "7") break;
-        oct += d;
-        j++;
-      }
-      bytes.push(parseInt(oct, 8) & 255);
-      i = j;
-      continue;
-    }
-    for (const b of enc.encode(n)) bytes.push(b);
-    i += 2;
-  }
-  return new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(bytes));
-}
-function parseStatusPorcelainV2(text) {
-  const s = {
-    ahead: 0,
-    behind: 0,
-    detached: false,
-    staged: [],
-    unstaged: [],
-    untracked: [],
-    conflicted: []
-  };
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (line === "") continue;
-    if (line.startsWith("# branch.oid ")) {
-      const v = line.slice("# branch.oid ".length);
-      if (v !== "(initial)") s.oid = v;
-    } else if (line.startsWith("# branch.head ")) {
-      const v = line.slice("# branch.head ".length);
-      if (v === "(detached)") s.detached = true;
-      else s.branch = v;
-    } else if (line.startsWith("# branch.upstream ")) {
-      s.upstream = line.slice("# branch.upstream ".length);
-    } else if (line.startsWith("# branch.ab ")) {
-      const m = /\+(\d+) -(\d+)/.exec(line);
-      if (m) {
-        s.ahead = parseInt(m[1], 10);
-        s.behind = parseInt(m[2], 10);
-      }
-    } else if (line.startsWith("1 ")) {
-      const parts = splitN(line, " ", 8);
-      if (parts.length === 9) {
-        const xy = parts[1];
-        pushEntry(s, {
-          path: unquoteGitPath(parts[8]),
-          index: xy[0] ?? ".",
-          worktree: xy[1] ?? "."
-        });
-      }
-    } else if (line.startsWith("2 ")) {
-      const parts = splitN(line, " ", 9);
-      if (parts.length === 10) {
-        const xy = parts[1];
-        const [p, orig] = parts[9].split("	");
-        pushEntry(s, {
-          path: unquoteGitPath(p ?? ""),
-          origPath: orig !== void 0 ? unquoteGitPath(orig) : void 0,
-          index: xy[0] ?? ".",
-          worktree: xy[1] ?? "."
-        });
-      }
-    } else if (line.startsWith("u ")) {
-      const parts = splitN(line, " ", 10);
-      if (parts.length === 11) {
-        const xy = parts[1];
-        s.conflicted.push({
-          path: unquoteGitPath(parts[10]),
-          index: xy[0] ?? ".",
-          worktree: xy[1] ?? "."
-        });
-      }
-    } else if (line.startsWith("? ")) {
-      s.untracked.push(unquoteGitPath(line.slice(2)));
-    }
-  }
-  return s;
-}
-function groupUntrackedChildren(childrenText, untracked) {
-  const dirs = untracked.filter((u) => u.endsWith("/"));
-  const out = {};
-  if (dirs.length === 0) return out;
-  for (const rawLine of childrenText.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (line === "") continue;
-    const dir = dirs.find((d) => line.startsWith(d));
-    if (dir === void 0) continue;
-    if (line === dir) continue;
-    (out[dir] ??= []).push(line);
-  }
-  return out;
-}
-function pushEntry(s, e) {
-  if (e.index !== ".") s.staged.push(e);
-  if (e.worktree !== ".") s.unstaged.push(e);
-}
-function splitN(line, sep, n) {
-  const out = [];
-  let rest = line;
-  for (let k = 0; k < n; k++) {
-    const idx = rest.indexOf(sep);
-    if (idx < 0) break;
-    out.push(rest.slice(0, idx));
-    rest = rest.slice(idx + 1);
-  }
-  out.push(rest);
-  return out;
-}
-function parseStatusPorcelainV1(text) {
-  const entries = [];
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (line.length < 4) continue;
-    const x = line[0];
-    const y = line[1];
-    let rest = line.slice(3);
-    let orig;
-    if (x === "R" || x === "C") {
-      const arrow = rest.indexOf(" -> ");
-      if (arrow >= 0) {
-        orig = unquoteGitPath(rest.slice(0, arrow));
-        rest = rest.slice(arrow + 4);
-      }
-    }
-    entries.push({
-      path: unquoteGitPath(rest),
-      origPath: orig,
-      index: x === " " ? "." : x,
-      worktree: y === " " ? "." : y
-    });
-  }
-  return entries;
-}
-function parseNameStatus(text) {
-  const entries = [];
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.replace(/\r$/, "");
-    if (line === "") continue;
-    const parts = line.split("	");
-    const code = parts[0] ?? "";
-    const kind = code[0] ?? "?";
-    if ((kind === "R" || kind === "C") && parts.length >= 3) {
-      entries.push({
-        path: unquoteGitPath(parts[2]),
-        origPath: unquoteGitPath(parts[1]),
-        index: kind,
-        worktree: "."
-      });
-    } else if (parts.length >= 2) {
-      entries.push({ path: unquoteGitPath(parts[1]), index: kind, worktree: "." });
-    }
-  }
-  return entries;
-}
-function countSkipWorktree(text) {
-  let n = 0;
-  for (const line of text.split("\n")) {
-    if (line.startsWith("S ")) n++;
-  }
-  return n;
-}
-function sparseExclusionPaths(patterns) {
-  const out = [];
-  for (const raw of patterns) {
-    let p = raw.trim();
-    if (!p.startsWith("!")) continue;
-    p = p.slice(1).trim();
-    if (p.startsWith("/")) p = p.slice(1);
-    p = p.replace(/\/+$/, "");
-    if (p === "" || /[*?[\]]/.test(p)) continue;
-    if (!out.includes(p)) out.push(p);
-  }
-  return out;
-}
-function parseSparseState(fields) {
-  const enabled = fields.sparseEnabled.trim() === "true";
-  const coneRaw = fields.sparseCone.trim();
-  return {
-    enabled,
-    coneMode: coneRaw === "" ? void 0 : coneRaw === "true",
-    patterns: fields.sparseList.split("\n").map((l) => l.trim()).filter((l) => l !== ""),
-    skipWorktreeCount: resolveSkipCount(fields.skipWorktreeCount, fields.lsFilesV)
-  };
-}
-function resolveSkipCount(count, lsFilesV) {
-  if (count !== void 0 && count.trim() !== "") {
-    const n = parseInt(count.trim(), 10);
-    if (!Number.isNaN(n)) return n;
-  }
-  return countSkipWorktree(lsFilesV ?? "");
-}
-function parseLastCommit(text) {
-  const line = text.split("\n")[0]?.trim();
-  if (!line) return void 0;
-  const [hash, date, ...subj] = line.split("	");
-  if (!hash || !/^[0-9a-f]{7,40}$/i.test(hash)) return void 0;
-  return { hash, date: date ?? "", subject: subj.join("	") };
-}
-
-// src/git/sparseSafety.ts
-var STATUS_LABEL = {
-  D: "deleted",
-  M: "modified",
-  A: "added",
-  R: "renamed",
-  C: "copied",
-  T: "type-changed",
-  U: "unmerged",
-  "?": "untracked"
-};
-function label(code) {
-  return STATUS_LABEL[code] ?? `changed (${code})`;
-}
-function evaluateSparseSafety(statusProtectedRaw, stagedProtectedRaw, protectedPaths, now = /* @__PURE__ */ new Date()) {
-  const violations = [];
-  for (const e of parseStatusPorcelainV1(statusProtectedRaw)) {
-    const code = e.index !== "." ? e.index : e.worktree;
-    violations.push({ path: e.path, status: label(code), source: "worktree" });
-  }
-  for (const e of parseNameStatus(stagedProtectedRaw)) {
-    violations.push({ path: e.path, status: label(e.index), source: "staged" });
-  }
-  return {
-    safe: violations.length === 0,
-    violations,
-    protectedPaths: [...protectedPaths],
-    checkedAt: now.toISOString()
-  };
-}
-
 // src/ops/OperationLock.ts
 var OperationLock = class {
   constructor(onChange) {
@@ -3028,6 +3111,39 @@ function applySweepIcon(button, iconName, direction) {
   (0, import_obsidian9.setIcon)(lit, iconName);
 }
 
+// src/git/inProgressOp.ts
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
+function describeInProgressOp(s) {
+  const kind = s.rebaseInProgress ? "rebase" : s.mergeInProgress ? "merge" : null;
+  if (kind === null) return null;
+  const n = Math.max(0, s.conflictCount);
+  const clean = n === 0;
+  const noun2 = kind === "merge" ? "Merge" : "Rebase";
+  const undoes = kind === "merge" ? "Aborting puts the branch back where it was before the pull." : "Aborting puts the branch back where it was before the rebase started.";
+  const title = clean ? `${noun2} in progress \u2014 everything is resolved` : `${noun2} in progress \u2014 ${plural(n, "file is", "files are")} still conflicted`;
+  const detail = clean ? kind === "merge" ? `Nothing is left to resolve. Commit the merge to finish it. ${undoes}` : `Nothing is left to resolve. Continue to replay the remaining commits. ${undoes}` : kind === "merge" ? `Resolve the conflicted files listed below, then commit the merge. ${undoes}` : `Resolve the conflicted files listed below, then continue. ${undoes}`;
+  const shortTitle = clean ? kind === "merge" ? "Merge ready to commit" : "Rebase ready to continue" : `${noun2}: ${plural(n, "conflict", "conflicts")} left`;
+  const shortDetail = clean ? kind === "merge" ? "Commit to finish, or abort to undo the pull." : "Continue to replay the rest, or abort." : kind === "merge" ? "Resolve them below, then commit." : "Resolve them below, then continue.";
+  return {
+    kind,
+    title,
+    detail,
+    shortTitle,
+    shortDetail,
+    // Disabled rather than hidden: the button is where the user will look, and
+    // a greyed one with the count above it explains itself. Enabling it would
+    // send a commit that git refuses, or a `rebase --continue` that opens an
+    // editor the runner has no terminal for.
+    finish: {
+      label: kind === "merge" ? "Commit merge" : "Continue rebase",
+      enabled: clean
+    },
+    abort: { label: kind === "merge" ? "Abort merge" : "Abort rebase", enabled: true }
+  };
+}
+
 // src/ui/StatusView.ts
 var NGB_STATUS_VIEW = "native-git-bridge-status";
 function actionSlots(scope, group, hasItems = true) {
@@ -3089,6 +3205,18 @@ var StatusView = class extends import_obsidian10.ItemView {
      * must show the notes inside it as actionable rows.
      */
     this.collapsedDirs = /* @__PURE__ */ new Set();
+    /**
+     * The scrolling half of the panel. The toolbar, the operation strip and the
+     * branch line stay put while this scrolls, so the controls are reachable
+     * without scrolling back up through a long file list.
+     */
+    this.bodyEl = null;
+    /**
+     * Scroll offset carried across re-renders. `render()` rebuilds the whole
+     * panel on every status refresh, and with auto-refresh on a timer that threw
+     * the user back to the top of the list mid-scroll.
+     */
+    this.savedScroll = 0;
   }
   getViewType() {
     return NGB_STATUS_VIEW;
@@ -3143,10 +3271,16 @@ var StatusView = class extends import_obsidian10.ItemView {
   }
   render() {
     const c = this.contentEl;
+    this.savedScroll = this.bodyEl?.scrollTop ?? this.savedScroll;
     c.empty();
     c.addClass("ngb-status-view");
     const d = this.data;
-    const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
+    const footBar = c.createDiv({ cls: "ngb-sv-footbar" });
+    this.bodyEl = body;
+    const mobile = import_obsidian10.Platform.isPhone;
+    const bar = (mobile ? footBar : headEl).createDiv({ cls: "ngb-sv-toolbar" });
     const running = d?.runningAction;
     const iconBtn = (icon, tooltip, cb, actionName, anim = "pulse") => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
@@ -3172,7 +3306,7 @@ var StatusView = class extends import_obsidian10.ItemView {
     iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
     iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
     iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
-    const strip = c.createDiv({ cls: "ngb-sv-strip" });
+    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
     const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
     const cancel = stripLeft.createEl("button", {
       cls: "clickable-icon ngb-sv-icon ngb-sv-icon-warn ngb-sv-cancel-slot"
@@ -3193,7 +3327,7 @@ var StatusView = class extends import_obsidian10.ItemView {
     histBtn.setAttribute("aria-label", "Repository history");
     (0, import_obsidian10.setIcon)(histBtn, "history");
     histBtn.addEventListener("click", this.actions.openHistory);
-    const head = c.createDiv({ cls: "ngb-sv-header" });
+    const head = headEl.createDiv({ cls: "ngb-sv-header" });
     head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
     head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
     if (d) {
@@ -3202,32 +3336,33 @@ var StatusView = class extends import_obsidian10.ItemView {
         text: ` ${d.branch ?? "\u2014"} \u2191${d.ahead} \u2193${d.behind}`
       });
     }
+    if (d) this.renderInProgressBanner(headEl, d, mobile);
     if (!d) {
-      c.createEl("p", { cls: "ngb-settings-note", text: "Press refresh to query native Git." });
+      body.createEl("p", { cls: "ngb-settings-note", text: "Press refresh to query native Git." });
       return;
     }
     const stageable = d.unstaged.length + d.untracked.length > 0;
-    this.renderGroup(c, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
+    this.renderGroup(body, "conflicted", "Conflicts", d.conflicted.map((e) => entry(e, "U")), true);
     this.renderGroup(
-      c,
+      body,
       "staged",
       "Staged changes",
       d.staged.map((e) => entry(e, e.index)),
       false,
       stageable
     );
-    this.renderGroup(c, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
+    this.renderGroup(body, "unstaged", "Changes", d.unstaged.map((e) => entry(e, e.worktree)), false);
     this.renderGroup(
-      c,
+      body,
       "untracked",
       "Untracked",
       d.untracked.map((p) => ({ path: p, code: "?" })),
       false
     );
     if (d.conflicted.length + d.staged.length + d.unstaged.length + d.untracked.length === 0) {
-      c.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
     }
-    const foot = c.createDiv({ cls: "ngb-sv-footer" });
+    const foot = body.createDiv({ cls: "ngb-sv-footer" });
     const kv = foot.createDiv({ cls: "ngb-sv-kv" });
     const row = (k, v) => {
       const line = kv.createDiv({ cls: "ngb-sv-kv-row" });
@@ -3241,6 +3376,33 @@ var StatusView = class extends import_obsidian10.ItemView {
     row("Bridge", d.bridge);
     row("Last sync", d.lastSyncAt ?? "never");
     if (d.fetchedAt) row("Updated", d.fetchedAt);
+    if (this.savedScroll > 0) body.scrollTop = this.savedScroll;
+  }
+  /**
+   * The way out of an unfinished merge or rebase. Renders nothing at all when
+   * neither is running, which is the normal case.
+   */
+  renderInProgressBanner(parent, d, mobile) {
+    const b = describeInProgressOp({
+      mergeInProgress: d.mergeInProgress,
+      rebaseInProgress: d.rebaseInProgress,
+      conflictCount: d.conflicted.length
+    });
+    if (!b) return;
+    const wrap = parent.createDiv({ cls: mobile ? "ngb-sv-banner ngb-sv-banner-compact" : "ngb-sv-banner" });
+    const head = wrap.createDiv({ cls: "ngb-sv-banner-title" });
+    if (!mobile) {
+      const icon = head.createSpan({ cls: "ngb-sv-banner-icon" });
+      (0, import_obsidian10.setIcon)(icon, "git-merge");
+    }
+    head.createSpan({ text: mobile ? b.shortTitle : b.title });
+    wrap.createDiv({ cls: "ngb-sv-banner-detail", text: mobile ? b.shortDetail : b.detail });
+    const row = wrap.createDiv({ cls: "ngb-sv-banner-actions" });
+    const finish = row.createEl("button", { cls: "mod-cta", text: b.finish.label });
+    finish.disabled = !b.finish.enabled;
+    finish.addEventListener("click", () => this.actions.finishInProgressOp(b.kind));
+    const abort = row.createEl("button", { cls: "ngb-sv-banner-abort", text: b.abort.label });
+    abort.addEventListener("click", () => this.actions.abortInProgressOp(b.kind));
   }
   renderGroup(parent, group, title, items, danger, showWhenEmpty = false) {
     if (items.length === 0 && !showWhenEmpty) return;
@@ -3619,6 +3781,12 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.collapsedDirs = /* @__PURE__ */ new Set();
     this.listEl = null;
     this.moreBtn = null;
+    /** The scrolling middle of the panel; the head and the bottom bar do not move. */
+    this.bodyEl = null;
+    /** Scroll offset carried across shell rebuilds (layout toggle, re-render). */
+    this.savedScroll = 0;
+    /** State line in the strip, mirroring the status panel's. */
+    this.progressEl = null;
   }
   getViewType() {
     return NGB_HISTORY_VIEW;
@@ -3639,6 +3807,7 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.skip = 0;
     this.exhausted = false;
     this.renderShell();
+    this.savedScroll = 0;
     await this.loadMore();
   }
   /** Redraw from the already-loaded commits (layout toggles; no round trip). */
@@ -3646,31 +3815,67 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.renderShell();
     for (const e of this.entries) this.renderCommit(e);
     if (this.moreBtn && this.entries.length > 0 && !this.exhausted) this.moreBtn.show();
+    this.restoreScroll();
   }
   renderShell() {
     const c = this.contentEl;
+    this.savedScroll = this.bodyEl?.scrollTop ?? this.savedScroll;
     c.empty();
     c.addClass("ngb-status-view", "ngb-history-view");
-    const bar = c.createDiv({ cls: "ngb-sv-toolbar" });
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
+    const footBar = c.createDiv({ cls: "ngb-sv-footbar" });
+    this.bodyEl = body;
+    const mobile = import_obsidian11.Platform.isPhone;
+    const bar = (mobile ? footBar : headEl).createDiv({ cls: "ngb-sv-toolbar" });
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Refresh history");
     (0, import_obsidian11.setIcon)(refreshBtn, "refresh-cw");
     if (this.loading) refreshBtn.addClass("ngb-anim-spin", "ngb-sv-icon-active");
     refreshBtn.addEventListener("click", () => void this.refresh());
-    const treeBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
+    this.applyStripState();
+    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
+    const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     const treeOn = this.actions.treeView();
     treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
     (0, import_obsidian11.setIcon)(treeBtn, treeOn ? "folder-tree" : "list");
     treeBtn.addEventListener("click", () => this.actions.toggleTree());
-    this.listEl = c.createDiv({ cls: "ngb-hist-list" });
-    const btns = c.createDiv({ cls: "ngb-buttons" });
+    const statusBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    statusBtn.setAttribute("aria-label", "Git panel");
+    (0, import_obsidian11.setIcon)(statusBtn, "git-branch");
+    statusBtn.addEventListener("click", () => this.actions.openStatusPanel());
+    this.listEl = body.createDiv({ cls: "ngb-hist-list" });
+    const btns = body.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
     this.moreBtn.addEventListener("click", () => void this.loadMore());
     this.moreBtn.hide();
   }
+  /**
+   * The strip's state line. "Idle" is the same word the status panel uses, so
+   * the two panels do not describe the same condition differently.
+   */
+  applyStripState() {
+    if (!this.progressEl) return;
+    const p = this.actions.progressText();
+    const running = this.loading || p !== "";
+    this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
+    this.progressEl.setText(this.loading ? "Loading history\u2026" : p !== "" ? p : "Idle");
+  }
+  /**
+   * Put the list back where it was. Called AFTER the commits are re-added:
+   * setting scrollTop on a container that is still empty is a no-op, which is
+   * how the layout toggle used to jump back to the newest commit.
+   */
+  restoreScroll() {
+    if (this.bodyEl && this.savedScroll > 0) this.bodyEl.scrollTop = this.savedScroll;
+  }
   async loadMore() {
     if (this.loading) return;
     this.loading = true;
+    this.applyStripState();
     if (this.moreBtn) {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading\u2026");
@@ -3680,6 +3885,7 @@ var HistoryView = class extends import_obsidian11.ItemView {
     const page = await this.actions.loadPage(this.skip, this.pageSize);
     waiting?.remove();
     this.loading = false;
+    this.applyStripState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
       this.moreBtn.setText("Load more");
@@ -6333,11 +6539,13 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-status-view", "ngb-history-view", "ngb-filehist-view");
-    const head = c.createDiv({ cls: "ngb-filehist-path ngb-mono" });
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
+    const head = headEl.createDiv({ cls: "ngb-filehist-path ngb-mono" });
     head.setText(this.path ?? "");
     head.setAttribute("aria-label", this.path ?? "");
-    this.listEl = c.createDiv({ cls: "ngb-hist-list" });
-    const btns = c.createDiv({ cls: "ngb-buttons" });
+    this.listEl = body.createDiv({ cls: "ngb-hist-list" });
+    const btns = body.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
     this.moreBtn.addEventListener("click", () => void this.loadMore());
     this.moreBtn.hide();
@@ -6758,6 +6966,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
         folderAction: (group, folderPath, kind) => this.folderAction(group, folderPath, kind),
         openHistory: () => void this.openHistoryPanel(),
+        finishInProgressOp: (kind) => kind === "merge" ? void this.cmdCommit() : void this.cmdContinueRebase(),
+        abortInProgressOp: (kind) => kind === "merge" ? void this.cmdAbortMerge() : void this.cmdAbortRebase(),
         cancel: () => void this.cmdCancel(),
         openFile: (p) => this.openVaultFile(p),
         openDiff: (p, group) => void this.openStatusDiff(p, group),
@@ -6786,7 +6996,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         openFile: (p) => this.openVaultFile(p),
         progressText: () => this.progressText ?? "",
         treeView: () => this.sharedPrefs.treeView,
-        toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView })
+        toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
+        openStatusPanel: () => void this.openStatusPanel()
       })
     );
     this.registerView(
@@ -7562,6 +7773,70 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     }
     new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
   }
+  /**
+   * Shared precondition for the two direct commands: Android, and paired with
+   * Termux. Pairing is checked because neither command can do anything without
+   * a runner, and the guided setup is the only place that can fix that.
+   */
+  async setupPrecondition() {
+    if (!import_obsidian15.Platform.isAndroidApp) {
+      new import_obsidian15.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return false;
+    }
+    if (this.deviceSettings.authToken === "") {
+      new ResultModal(
+        this.app,
+        "Not paired with Termux yet",
+        [
+          "Termux has to know this vault before it can create or clone anything here.",
+          "Pairing works even before the repository exists."
+        ],
+        {
+          actions: [
+            { label: "Pair this vault", cta: true, keepOpen: true, onClick: () => void this.cmdPairThisVault() }
+          ]
+        }
+      ).open();
+      return false;
+    }
+    return true;
+  }
+  /**
+   * "Create a new repository in this vault", straight from the palette.
+   * Refuses when the vault already is a repository rather than offering to
+   * replace it: re-initialising over an existing history is not a thing this
+   * plugin does silently, and "Clone" is the command that handles replacement.
+   */
+  async cmdCreateRepository() {
+    if (!await this.setupPrecondition()) return;
+    if (await this.vaultHasRepository()) {
+      new ResultModal(
+        this.app,
+        "This vault is already a repository",
+        [
+          "Nothing was changed. Creating a second repository over an existing one would hide its history rather than remove it.",
+          "To point it somewhere else, set the remote; to start from a remote instead, use 'Clone an existing remote into this vault'."
+        ],
+        {
+          actions: [
+            { label: "Set the remote", cta: true, keepOpen: true, onClick: () => this.promptSetRemote() },
+            { label: "Clone instead", keepOpen: true, onClick: () => this.promptClone(true) }
+          ]
+        }
+      ).open();
+      return;
+    }
+    this.promptInitRepo();
+  }
+  /**
+   * "Clone an existing remote into this vault", straight from the palette.
+   * A vault that already has a repository goes through the replace
+   * confirmation, which is the same path the setup modal uses.
+   */
+  async cmdCloneRepository() {
+    if (!await this.setupPrecondition()) return;
+    this.promptClone(await this.vaultHasRepository());
+  }
   promptInitRepo() {
     new CommitMessageModal(
       this.app,
@@ -7869,7 +8144,12 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   }
   applyStatusToStatusBar(s) {
     if (!this.statusBar) return;
-    if (s.conflicted.length > 0) this.statusBar.set("conflict", `(${s.conflicted.length})`);
+    if (this.lastStatus?.mergeInProgress || this.lastStatus?.rebaseInProgress) {
+      this.statusBar.set(
+        "conflict",
+        s.conflicted.length > 0 ? `(${s.conflicted.length})` : void 0
+      );
+    } else if (s.conflicted.length > 0) this.statusBar.set("conflict", `(${s.conflicted.length})`);
     else if (s.staged.length + s.unstaged.length + s.untracked.length > 0)
       this.statusBar.set("changed", `(${s.staged.length + s.unstaged.length + s.untracked.length})`);
     else this.statusBar.set("clean", s.ahead > 0 ? `\u2191${s.ahead}` : void 0);
@@ -7910,6 +8190,13 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
       { id: "pair-this-vault", name: "Pair this vault with Termux", cb: () => void this.cmdPairThisVault() },
       { id: "setup-repository", name: "Set up the repository for this vault", cb: () => void this.cmdSetupRepository() },
+      // The two halves of "set up" as their own commands. They were only ever
+      // reachable as buttons inside the setup modal, so the palette offered a
+      // single "Set up" and no way to say which of the two very different
+      // things you meant. Both still route through the same prompts, and both
+      // refuse for the same reasons the modal would.
+      { id: "create-repository", name: "Create a new repository in this vault", cb: () => void this.cmdCreateRepository() },
+      { id: "clone-repository", name: "Clone an existing remote into this vault", cb: () => void this.cmdCloneRepository() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -8241,22 +8528,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       ).open();
       return;
     }
-    const d = result.data ?? {};
-    const status = parseStatusPorcelainV2(d.branchInfo ?? "");
-    if (d.untrackedChildren !== void 0)
-      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
-    const sparse = parseSparseState({
-      sparseEnabled: d.sparseEnabled ?? "",
-      sparseCone: d.sparseCone ?? "",
-      sparseList: d.sparseList ?? "",
-      skipWorktreeCount: d.skipWorktreeCount,
-      lsFilesV: d.lsFilesV
-    });
-    const lastCommit = parseLastCommit(d.lastCommit ?? "");
-    this.absorbSparsePatterns(sparse);
-    this.lastStatus = { status, sparse, lastCommit, fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString() };
-    this.applyStatusToStatusBar(status);
-    this.pushStatusToView();
+    this.absorbStatusData(result.data ?? {});
     if (!silent) this.openStatusModal();
   }
   openStatusModal() {
@@ -8314,6 +8586,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   async trashAll(paths) {
     const adapter = this.app.vault.adapter;
     let moved = 0;
+    let absent = 0;
     const failed = [];
     const expand = async (raw) => {
       const p = raw.replace(/\/+$/, "");
@@ -8355,56 +8628,118 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         if (stillThere) {
           failed.push(t);
           this.log.add("error", "sparse", `Trash failed for ${t}: ${String(e)}`);
+        } else {
+          absent++;
+          this.log.add("info", "sparse", `Nothing to trash at ${t}: it is not on disk.`);
         }
       }
     }
-    return { moved, failed };
+    return { moved, failed, absent };
+  }
+  /**
+   * Carry out a sparse repair plan and say exactly what happened.
+   *
+   * The order matters. The index entries go first: `git rm --cached` needs
+   * nothing from the worktree, while trashing a file that is still in the index
+   * turns a staged addition into a staged addition of a missing file — the
+   * precise state this repair exists to clear.
+   *
+   * Every branch reports. The old code counted a trash failure as "not a
+   * failure" whenever the file turned out not to exist, so a plan that could do
+   * nothing at all announced "Moved 0 files to the trash" and left the user to
+   * re-run the same dead end.
+   */
+  async runSparseRepair(plan) {
+    const done = [];
+    const problems = [];
+    if (plan.unstage.length > 0) {
+      const result = await this.runOperation("unstage-protected", {
+        paths: plan.unstage,
+        protectedPaths: this.effectiveProtectedPaths()
+      });
+      if (!result) return;
+      if (!result.ok) {
+        this.renderMutationError("Native Git: could not clear the index entries", result);
+        return;
+      }
+      const n = Number(result.data?.unstagedProtectedCount ?? plan.unstage.length);
+      this.absorbStatusData(result.data ?? {});
+      if (n > 0) {
+        done.push(`${n} index entr${n === 1 ? "y" : "ies"} removed (nothing was deleted from disk).`);
+      }
+    }
+    if (plan.trash.length > 0) {
+      const { moved, failed, absent } = await this.trashAll(plan.trash);
+      if (moved > 0) done.push(`${moved} file${moved === 1 ? "" : "s"} moved to the trash.`);
+      if (absent > 0) {
+        done.push(
+          `${absent} listed path${absent === 1 ? " was" : "s were"} not on disk (sparse checkout had already removed ${absent === 1 ? "it" : "them"}); the index entr${absent === 1 ? "y" : "ies"} above ${absent === 1 ? "was" : "were"} the real blocker.`
+        );
+      }
+      if (failed.length > 0) {
+        this.log.add(
+          "error",
+          "sparse",
+          `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
+        );
+        problems.push(
+          `${failed.length} could not be moved:`,
+          ...failed.slice(0, 12),
+          failed.length > 12 ? `\u2026and ${failed.length - 12} more` : ""
+        );
+      }
+    }
+    if (problems.length > 0) {
+      new ResultModal(
+        this.app,
+        "Partly repaired",
+        [...done, ...problems.filter((l) => l !== ""), "The safety check below shows what is left."],
+        { isError: true }
+      ).open();
+    } else if (done.length > 0) {
+      this.notify(done.join(" "));
+    }
   }
   /**
    * The two recoveries the safety modal offers. Both are explicit, confirmed
    * and reversible in the sense that matters: deleting goes to Obsidian's
-   * trash rather than to `rm`, and unprotecting only edits sparse config, so
-   * git history is never touched here.
+   * trash rather than to `rm`, unstaging only removes index entries that HEAD
+   * does not contain, and unprotecting only edits sparse config. Git history is
+   * never touched here.
    */
   sparseSafetyFixes() {
     return {
-      deleteLocally: (paths) => {
+      repair: (plan) => {
+        const body = [];
+        if (plan.trash.length > 0) {
+          body.push(
+            `Move to Obsidian's trash (${plan.trash.length}):`,
+            ...plan.trash.slice(0, 8),
+            plan.trash.length > 8 ? `\u2026and ${plan.trash.length - 8} more` : ""
+          );
+        }
+        if (plan.unstage.length > 0) {
+          body.push(
+            `Remove from the index only (${plan.unstage.length}) \u2014 staged additions with no file on disk:`,
+            ...plan.unstage.slice(0, 8),
+            plan.unstage.length > 8 ? `\u2026and ${plan.unstage.length - 8} more` : ""
+          );
+        }
+        body.push(
+          "Trashed files go to .trash in the vault and can be restored from there. Index entries are removed with 'git rm --cached', which only undoes a staged addition \u2014 nothing in the last commit is touched, and no file is deleted by it."
+        );
         new ConfirmModal(
           this.app,
           {
-            title: "Move these files to the trash?",
-            body: [
-              ...paths.slice(0, 12),
-              paths.length > 12 ? `\u2026and ${paths.length - 12} more` : "",
-              "They go to Obsidian's trash (.trash in the vault), so you can restore them from there. Git history is not touched."
-            ].filter((l) => l !== ""),
-            confirmLabel: "Move to trash",
+            title: "Clear these out of the way?",
+            body: body.filter((l) => l !== ""),
+            confirmLabel: "Clear them",
             icon: "trash",
             danger: true
           },
           async (confirmed) => {
             if (!confirmed) return;
-            const { moved, failed } = await this.trashAll(paths);
-            if (failed.length > 0) {
-              this.log.add(
-                "error",
-                "sparse",
-                `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
-              );
-              new ResultModal(
-                this.app,
-                "Some files could not be moved",
-                [
-                  `Moved ${moved} file${moved === 1 ? "" : "s"} to the trash; ${failed.length} could not be moved.`,
-                  ...failed.slice(0, 12),
-                  failed.length > 12 ? `\u2026and ${failed.length - 12} more` : "",
-                  "The safety check below shows what is still there."
-                ].filter((l) => l !== ""),
-                { isError: true }
-              ).open();
-            } else {
-              this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
-            }
+            await this.runSparseRepair(plan);
             await this.cmdVerifySparseSafety();
           }
         ).open();
@@ -8658,7 +8993,11 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       lastCommit: parseLastCommit(d.lastCommit ?? ""),
       fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString(),
       mergeInProgress: d.mergeInProgress === "true",
-      mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : void 0
+      mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : void 0,
+      // Absent on runners older than this one, which is exactly "no rebase":
+      // an old runner cannot report a state it does not look for, and treating
+      // the missing field as `true` would put a banner on every panel.
+      rebaseInProgress: d.rebaseInProgress === "true"
     };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -8829,6 +9168,41 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         this.notify("Merge aborted; repository restored.");
       }
     ).open();
+  }
+  /**
+   * The two exits from an unfinished rebase. Nothing in this plugin starts a
+   * rebase; one can only be here because it was started in Termux. Before the
+   * panel banner existed, that state was invisible and inescapable from inside
+   * Obsidian, exactly like the unfinished merge it sits next to.
+   */
+  async cmdAbortRebase() {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Abort rebase?",
+        body: [
+          "This runs 'git rebase --abort' and returns the branch to where it was before the rebase started.",
+          "Conflict resolutions you already made during the rebase will be discarded."
+        ],
+        confirmLabel: "Abort rebase",
+        danger: true
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("abort-rebase");
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: abort rebase failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify("Rebase aborted; branch restored.");
+      }
+    ).open();
+  }
+  async cmdContinueRebase() {
+    const result = await this.runOperation("continue-rebase");
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: continue rebase failed", result);
+    this.absorbStatusData(result.data ?? {});
+    this.notify("Rebase continued.");
   }
   // ---------------------------------------------------- phase 4: history/diff
   activeFilePath() {
@@ -9105,9 +9479,12 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   pushStatusToView() {
     const leaves = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
     if (leaves.length === 0) return;
-    const state = this.statusBar?.current ?? (this.lock.active ? "syncing" : "clean");
+    const inProgress = this.lastStatus?.rebaseInProgress || this.lastStatus?.mergeInProgress;
+    const state = inProgress ? "conflict" : this.statusBar?.current ?? (this.lock.active ? "syncing" : "clean");
     const extra = {
       sparse: this.lastStatus?.sparse,
+      mergeInProgress: this.lastStatus?.mergeInProgress,
+      rebaseInProgress: this.lastStatus?.rebaseInProgress,
       activeOperation: this.lock.active ? this.lock.active.action : void 0,
       progress: this.progressText ?? void 0,
       runningAction: this.runningAction ?? void 0,

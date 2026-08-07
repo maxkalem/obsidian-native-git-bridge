@@ -143,7 +143,12 @@ interface FakeRunner {
   onTrigger: ((id: string) => void) | null;
 }
 
-function okStatusResult(id: string, runnerVersion = 4) {
+function okStatusResult(
+  id: string,
+  runnerVersion = 4,
+  /** Extra result fields, for actions that attach their own on top of status. */
+  extraData: Record<string, string> = {}
+) {
   return JSON.stringify({
     protocolVersion: 1,
     id,
@@ -152,6 +157,7 @@ function okStatusResult(id: string, runnerVersion = 4) {
     exitCode: 0,
     runnerVersion,
     data: {
+      ...extraData,
       branchInfo: "# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0",
       sparseEnabled: "true",
       sparseCone: "false",
@@ -826,6 +832,121 @@ describe("sparse safety: moving the listed files to the trash", () => {
     ]);
     expect(res.failed).toEqual([]);
     expect(h.adapter.trashed.filter((p: string) => p === "Private/Hidden/New/one.md")).toHaveLength(1);
+  });
+});
+
+describe("an unfinished merge survives a status refresh", () => {
+  /**
+   * Reported from the device: the "merge in progress" banner appeared after a
+   * pull failed, and vanished the moment the status was refreshed — while git
+   * was still mid-merge and still refusing to pull.
+   *
+   * Cause: cmdStatus assigned `lastStatus` itself, duplicating absorbStatusData
+   * minus the merge and rebase fields, so every refresh dropped them. The same
+   * omission cost the commit modal its prefilled MERGE_MSG.
+   */
+  it("keeps mergeInProgress and mergeMsg across cmdStatus", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id: string) => {
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, undefined, {
+          mergeInProgress: "true",
+          mergeMsg: "Merge branch 'origin/main'\n\n# Conflicts:\n#\tNotes/note.md",
+        })
+      );
+    };
+    await h.plugin.cmdStatus(true);
+    expect((h.plugin as Any).lastStatus.mergeInProgress).toBe(true);
+    expect((h.plugin as Any).lastStatus.mergeMsg).toContain("Merge branch");
+    // A second refresh must not lose it either.
+    await h.plugin.cmdStatus(true);
+    expect((h.plugin as Any).lastStatus.mergeInProgress).toBe(true);
+  });
+
+  it("clears it once the runner stops reporting a merge", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id: string) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, undefined, { mergeInProgress: "true" }));
+    };
+    await h.plugin.cmdStatus(true);
+    expect((h.plugin as Any).lastStatus.mergeInProgress).toBe(true);
+    h.runner.onTrigger = (id: string) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, undefined, { mergeInProgress: "false" }));
+    };
+    await h.plugin.cmdStatus(true);
+    expect((h.plugin as Any).lastStatus.mergeInProgress).toBe(false);
+  });
+
+  it("a rebase reported by the runner survives a refresh too", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.runner.onTrigger = (id: string) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, undefined, { rebaseInProgress: "true" }));
+    };
+    await h.plugin.cmdStatus(true);
+    expect((h.plugin as Any).lastStatus.rebaseInProgress).toBe(true);
+  });
+});
+
+describe("sparse safety: clearing an index entry that has no file on disk", () => {
+  /**
+   * The state a real device got stuck in: a note staged inside a directory
+   * that was sparse-excluded afterwards. The file is gone from disk, the index
+   * entry is not, and the safety gate blocks every commit, push and sync.
+   *
+   * The repair is one runner round trip, and its request has to carry
+   * `protectedPaths`: the runner checks every path against that list and
+   * refuses the request outright when it is empty, because "which paths are
+   * protected" IS the permission model for the only write it will ever perform
+   * on a protected path. Omitting it made the repair fail every single time,
+   * and the e2e suite could not catch it because it writes its own request JSON.
+   */
+  it("sends protectedPaths with the request, or the runner refuses it", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Private/Mem"] });
+    const seen: Any[] = [];
+    h.runner.onTrigger = (id: string) => {
+      seen.push(JSON.parse(h.adapter.files.get(paths.requestFile(id)) as string));
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id));
+    };
+    await (h.plugin as Any).runSparseRepair({
+      trash: [],
+      unstage: ["Private/Mem/handoff.md"],
+      blocked: [],
+    });
+    const req = seen.find((r) => r.action === "unstage-protected");
+    expect(req).toBeDefined();
+    expect(req.args.paths).toEqual(["Private/Mem/handoff.md"]);
+    expect(req.args.protectedPaths).toEqual(["Private/Mem"]);
+  });
+
+  it("says nothing happened rather than announcing zero", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Private/Mem"] });
+    // The runner is idempotent: a path already cleared answers ok with 0.
+    h.runner.onTrigger = (id: string) => {
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, undefined, { unstagedProtectedCount: "0" })
+      );
+    };
+    __notices.length = 0;
+    await (h.plugin as Any).runSparseRepair({
+      trash: [],
+      unstage: ["Private/Mem/handoff.md"],
+      blocked: [],
+    });
+    expect(__notices.join(" ")).not.toMatch(/0 index entr/);
   });
 });
 

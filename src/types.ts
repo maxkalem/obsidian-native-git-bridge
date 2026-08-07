@@ -35,7 +35,19 @@ export type BridgeAction =
   | "init-repo"
   | "set-remote"
   | "clone-into-vault"
-  | "adopt-remote";
+  | "adopt-remote"
+  // The rebase state machine. Only the two exits are implemented: nothing in
+  // the plugin STARTS a rebase yet. They exist because an unfinished rebase can
+  // arrive from Termux, and until now the panel had no way out of one — the
+  // same dead end that unfinished merges were in.
+  | "abort-rebase"
+  | "continue-rebase"
+  /**
+   * Clear protected sparse paths out of the INDEX. The one thing the runner
+   * will do to a protected path, and only for paths that HEAD does not
+   * contain — see the runner for why that constraint is what makes it safe.
+   */
+  | "unstage-protected";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -59,6 +71,9 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["set-remote", 11],
   ["clone-into-vault", 11],
   ["adopt-remote", 11],
+  ["abort-rebase", 11],
+  ["continue-rebase", 11],
+  ["unstage-protected", 11],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -82,6 +97,9 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "set-remote",
   "clone-into-vault",
   "adopt-remote",
+  "abort-rebase",
+  "continue-rebase",
+  "unstage-protected",
 ]);
 
 export interface BridgeRequest {
@@ -187,6 +205,14 @@ export interface SparseSafetyViolation {
   path: string;
   status: string;
   source: "worktree" | "staged";
+  /**
+   * The two porcelain columns as git reported them, "." for a blank one.
+   * Kept because the human-readable `status` collapses them and loses the fact
+   * that decides what can be repaired: `AD` is an index entry whose file is
+   * NOT on disk, and no amount of deleting files will clear it.
+   */
+  index?: string;
+  worktree?: string;
 }
 
 export interface SparseSafetyReport {

@@ -43,7 +43,7 @@ Termux side (runner ≥ 10), mode 600, never inside a vault:
 
 - `id`: `^r-[0-9TZ.-]+-[a-z0-9]+$`, unique per request.
 - `profileId` (runner ≥ 10, optional): which paired vault the request belongs to, `^p-[0-9a-f]{8,32}$`. It is **looked up** in `profiles/`, never used as a path, and a request naming a profile other than the one that owns the request directory is rejected with `BAD_REQUEST`. Omitted while a vault has not learned its id yet (pairings from before v10); the token then carries the whole burden, as before.
-- `action` (implemented): `ping` | `status` | `verify-sparse-safety` | `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` | `abort-merge`.
+- `action` (implemented): `ping` | `status` | `verify-sparse-safety` | `sparse-reapply` | `diagnostics` | `fetch` | `pull` | `commit` | `push` | `sync` | `abort-merge` | `abort-rebase` | `continue-rebase` | `unstage-protected`.
   - **Runner v4**: `file-log` (paginated, rename-aware via `--follow --name-status`), `show-file-at-commit` (base64 content, 1 MB cap, `FILE_ABSENT`/`TOO_LARGE` errors), `diff-file` (commit→commit or commit→WORKTREE, 200 KB cap with `truncated` flag; a commit-ish may carry a single trailing `^` so the history panel can diff a commit against its parent), `restore-file` (worktree-only `git restore --source`, blocked for protected paths).
   - **Runner v5**: `repo-log` (repository-wide paginated log for the history panel, same `\x1e`/`\x1f` record format as `file-log` with a `--name-status` block per commit, no `--follow`).
   - **Runner v6**: `resolve-conflict` (`args.path` + `args.side` = `ours`|`theirs`; refuses non-conflicted paths and protected paths, then `git checkout --<side>` + `git add` to mark the file resolved, only ever on an explicit user choice; the bridge never picks a side by itself).
@@ -242,6 +242,63 @@ Updating the plugin does **not** update the runner in Termux, so the two carry i
 | 8 | 0.5.9 | Per-path actions (`stage-file`, `unstage-file`, `discard-file`) exclude protected paths that lie UNDER the requested path, so acting on a parent folder can no longer stage or discard a sparse-protected subdirectory; `discard-file` on an untracked folder deletes the untracked files it contains instead of failing; new `discard-all` (drops unstaged work, keeps staged content and untracked files) and `reset-all` (index and worktree back to HEAD, expressed as a pathspec restore so protected paths stay excluded and untracked files survive) |
 | 9 | 0.5.10 | `file-log` uses `--raw --numstat`, so each commit reports the change letter, both sides of a rename and the added/deleted counts the file-history view shows |
 | 10 | 0.6.0 | Several repositories per device: `profiles/<id>.conf` (one per vault, own token), automatic migration of the single-repo config, one run drains every profile oldest-first, `profileId` in requests and results, `REPO_MISSING` for a dead profile, git pinned per profile (`GIT_CEILING_DIRECTORIES` + toplevel check) so nested vaults cannot leak into each other, nested-vault exclusion in the outer repository's `.git/info/exclude`, relocation of a moved vault and self-pairing of a new one (`claim.json` → `pairing.json`), global single-instance lock in the config directory; `verify-sparse-safety` and the safety gate run `git status -uall`, so a new folder under a protected path is reported file by file instead of as one collapsed `dir/` line (the plugin offers to trash exactly that list) |
-| 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin |
+| 11 | 0.6.1 | Repository bootstrap: `init-repo`, `set-remote`, `clone-into-vault` (clones into a vault that already holds files without overwriting any of them; the overlap becomes ordinary local changes), `REPO_EXISTS`, the `bootstrap` profile state and `"bootstrap": true` claims, remote-URL validation shared with the plugin. **Also, still inside the unreleased 0.6.1:** `unstage-protected`, `abort-rebase`, `continue-rebase`, and `rebaseInProgress` in status — see below |
+
+### Why v11 grew instead of becoming v12
+
+The rule above says a runner version number is never reused. `unstage-protected`,
+`abort-rebase`, `continue-rebase` and `rebaseInProgress` were added to v11 rather
+than to a new v12 because **0.6.1 has not been released**: no user has ever
+received a v11 runner from a release, so nothing in the field can be a stale v11.
+The one device that does have a v11 installed is the developer's own, and it is
+reinstalled by hand from the plugin folder alongside this change.
+
+This is a deliberate exception with an expiry date. The moment 0.6.1 ships, the
+rule applies again without qualification: the next runner change is v12,
+whatever it is.
+
+### Getting out of a stuck state (runner 11)
+
+Three additions, all of them exits from states the plugin could observe but not
+leave.
+
+- **`unstage-protected`** — `args.paths[]` + `args.protectedPaths[]`. Removes
+  protected sparse paths from the **index** and nothing else. It is the only
+  operation permitted on a protected path, and it is permitted because it is the
+  one that reduces exposure rather than increasing it. Three conditions, all
+  required: the path must BE protected (the inverse of the usual guard, so this
+  cannot be used as a general bypass), it must be in the index, and it must
+  **not** be in HEAD. The last one is what makes it safe: `HEAD` not containing
+  the path means dropping the entry undoes an addition, and there is no tracked
+  content that could turn into a staged deletion. The file on disk, if there is
+  one, is never touched.
+
+  The state it exists for: a file staged inside a directory that was added to
+  the sparse exclusions **afterwards**. `git sparse-checkout reapply` takes the
+  file off disk and leaves the index entry behind with skip-worktree set, so
+  `git status` reports a bare `A ` — the index says "added", and because
+  skip-worktree tells git not to look at the worktree, nothing says the file is
+  gone. The safety gate then blocked every commit, push and sync; the plugin's
+  "delete these files" repair moved nothing because there was no file; and
+  `unstage-file` was refused by the protected-path guard. There was no way out
+  short of Termux.
+
+  Implementation note that cost a test run: `git rm --cached` **cannot** do this.
+  The path is outside the sparse-checkout definition by construction and git
+  refuses ("matched paths that exist outside of your sparse-checkout
+  definition") unless given `--sparse`, which only exists from git 2.35. The
+  runner uses `git update-index --force-remove`, which has no such guard and
+  works on every version.
+
+- **`abort-rebase` / `continue-rebase`** and **`rebaseInProgress`** in status.
+  Nothing in this plugin starts a rebase; one can only be here because it was
+  started in Termux by hand. An unfinished rebase looks nothing like an
+  unfinished merge — there is no `MERGE_HEAD`, only a state directory, and which
+  one depends on the backend git chose (`rebase-merge` for the merge/interactive
+  backend, `rebase-apply` for the older am backend), so both are checked.
+  `continue-rebase` refuses while anything is still unmerged and says how many:
+  `git rebase --continue` in that state opens an editor, and the runner has no
+  terminal, so it would hang until the request expired. When it does run,
+  `GIT_EDITOR=true` accepts the message git already prepared.
 
 Versions 1–3 predate the first tagged release: the oldest runner any published release shipped is v4. Actions introduced after v4 are additionally listed in the plugin's `ACTION_MIN_RUNNER` map, so requesting one against an older runner produces a named "runner too old for this action" message instead of a bare `BAD_REQUEST`. Capabilities that are argument-level rather than new actions (the `INDEX` ref, `stage-file` `mode`) are covered by the version handshake only, hence the strict `RUNNER_MIN_VERSION` bump for them.

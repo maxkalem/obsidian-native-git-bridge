@@ -1,0 +1,26 @@
+# Line endings.
+#
+# This repository ships shell scripts that are executed by bash inside Termux,
+# on Android. A CRLF script does not fail subtly there: bash reads the carriage
+# return as part of the last token on every line and the run dies with
+# `$'\r': command not found`, `syntax error near unexpected token $'{\r'`, and
+# an `umask: 077: octal number out of range` from the very first lines.
+#
+# The blobs in this repository are LF and must stay LF. Without this file, a
+# Windows checkout converts them on the way out, every one of them shows up as
+# a whole-file diff, and committing from that checkout would publish scripts
+# that cannot run on the device the plugin exists for. The same conversion is
+# what has been keeping LICENSE permanently "modified".
+#
+# `text=auto eol=lf` means: decide text vs binary by content, and check text
+# out with LF on every platform.
+* text=auto eol=lf
+
+# Belt and braces for the files where getting this wrong is fatal rather than
+# cosmetic: the three scripts that run in Termux, and the test that runs them.
+*.sh text eol=lf
+
+# Build output and images are compared byte for byte by CI; never touch them.
+*.png binary
+*.jpg binary
+*.jar binary

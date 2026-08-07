@@ -30,7 +30,7 @@ import {
   parseStatusPorcelainV2,
   sparseExclusionPaths,
 } from "./git/parsers";
-import { evaluateSparseSafety } from "./git/sparseSafety";
+import { evaluateSparseSafety, type SparseRepairPlan } from "./git/sparseSafety";
 import {
   hasControlChars,
   validateProtectedPaths,
@@ -163,6 +163,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     /** git's prepared MERGE_MSG while a merge is being resolved. */
     mergeMsg?: string;
     mergeInProgress?: boolean;
+    /** An unfinished rebase (started in Termux; nothing here starts one). */
+    rebaseInProgress?: boolean;
   } | null = null;
 
   async onload(): Promise<void> {
@@ -212,6 +214,10 @@ export default class NativeGitBridgePlugin extends Plugin {
           toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
           folderAction: (group, folderPath, kind) => this.folderAction(group, folderPath, kind),
           openHistory: () => void this.openHistoryPanel(),
+          finishInProgressOp: (kind) =>
+            kind === "merge" ? void this.cmdCommit() : void this.cmdContinueRebase(),
+          abortInProgressOp: (kind) =>
+            kind === "merge" ? void this.cmdAbortMerge() : void this.cmdAbortRebase(),
           cancel: () => void this.cmdCancel(),
           openFile: (p) => this.openVaultFile(p),
           openDiff: (p, group) => void this.openStatusDiff(p, group),
@@ -243,6 +249,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           progressText: () => this.progressText ?? "",
           treeView: () => this.sharedPrefs.treeView,
           toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
+          openStatusPanel: () => void this.openStatusPanel(),
         })
     );
 
@@ -1137,6 +1144,73 @@ export default class NativeGitBridgePlugin extends Plugin {
     new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
   }
 
+  /**
+   * Shared precondition for the two direct commands: Android, and paired with
+   * Termux. Pairing is checked because neither command can do anything without
+   * a runner, and the guided setup is the only place that can fix that.
+   */
+  private async setupPrecondition(): Promise<boolean> {
+    if (!Platform.isAndroidApp) {
+      new Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
+      return false;
+    }
+    if (this.deviceSettings.authToken === "") {
+      new ResultModal(
+        this.app,
+        "Not paired with Termux yet",
+        [
+          "Termux has to know this vault before it can create or clone anything here.",
+          "Pairing works even before the repository exists.",
+        ],
+        {
+          actions: [
+            { label: "Pair this vault", cta: true, keepOpen: true, onClick: () => void this.cmdPairThisVault() },
+          ],
+        }
+      ).open();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * "Create a new repository in this vault", straight from the palette.
+   * Refuses when the vault already is a repository rather than offering to
+   * replace it: re-initialising over an existing history is not a thing this
+   * plugin does silently, and "Clone" is the command that handles replacement.
+   */
+  async cmdCreateRepository(): Promise<void> {
+    if (!(await this.setupPrecondition())) return;
+    if (await this.vaultHasRepository()) {
+      new ResultModal(
+        this.app,
+        "This vault is already a repository",
+        [
+          "Nothing was changed. Creating a second repository over an existing one would hide its history rather than remove it.",
+          "To point it somewhere else, set the remote; to start from a remote instead, use 'Clone an existing remote into this vault'.",
+        ],
+        {
+          actions: [
+            { label: "Set the remote", cta: true, keepOpen: true, onClick: () => this.promptSetRemote() },
+            { label: "Clone instead", keepOpen: true, onClick: () => this.promptClone(true) },
+          ],
+        }
+      ).open();
+      return;
+    }
+    this.promptInitRepo();
+  }
+
+  /**
+   * "Clone an existing remote into this vault", straight from the palette.
+   * A vault that already has a repository goes through the replace
+   * confirmation, which is the same path the setup modal uses.
+   */
+  async cmdCloneRepository(): Promise<void> {
+    if (!(await this.setupPrecondition())) return;
+    this.promptClone(await this.vaultHasRepository());
+  }
+
   /** Remote URL of the repository as of the last status (already redacted by the runner). */
   lastRemoteUrl = "";
 
@@ -1464,7 +1538,15 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   private applyStatusToStatusBar(s: GitStatusSummary): void {
     if (!this.statusBar) return;
-    if (s.conflicted.length > 0) this.statusBar.set("conflict", `(${s.conflicted.length})`);
+    // A half-finished merge or rebase with every conflict already resolved is
+    // still a repository that refuses to pull. It reads as "conflict" here so
+    // the indicator cannot go green on a state nothing else will work from.
+    if (this.lastStatus?.mergeInProgress || this.lastStatus?.rebaseInProgress) {
+      this.statusBar.set(
+        "conflict",
+        s.conflicted.length > 0 ? `(${s.conflicted.length})` : undefined
+      );
+    } else if (s.conflicted.length > 0) this.statusBar.set("conflict", `(${s.conflicted.length})`);
     else if (s.staged.length + s.unstaged.length + s.untracked.length > 0)
       this.statusBar.set("changed", `(${s.staged.length + s.unstaged.length + s.untracked.length})`);
     else this.statusBar.set("clean", s.ahead > 0 ? `↑${s.ahead}` : undefined);
@@ -1507,6 +1589,13 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "setup-guide", name: "Setup guide (Termux, companion, pairing)", cb: () => this.openSetupGuide("Setup guide.") },
       { id: "pair-this-vault", name: "Pair this vault with Termux", cb: () => void this.cmdPairThisVault() },
       { id: "setup-repository", name: "Set up the repository for this vault", cb: () => void this.cmdSetupRepository() },
+      // The two halves of "set up" as their own commands. They were only ever
+      // reachable as buttons inside the setup modal, so the palette offered a
+      // single "Set up" and no way to say which of the two very different
+      // things you meant. Both still route through the same prompts, and both
+      // refuse for the same reasons the modal would.
+      { id: "create-repository", name: "Create a new repository in this vault", cb: () => void this.cmdCreateRepository() },
+      { id: "clone-repository", name: "Clone an existing remote into this vault", cb: () => void this.cmdCloneRepository() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
@@ -1917,22 +2006,14 @@ export default class NativeGitBridgePlugin extends Plugin {
       ).open();
       return;
     }
-    const d = result.data ?? {};
-    const status = parseStatusPorcelainV2(d.branchInfo ?? "");
-    if (d.untrackedChildren !== undefined)
-      status.untrackedChildren = groupUntrackedChildren(d.untrackedChildren, status.untracked);
-    const sparse = parseSparseState({
-      sparseEnabled: d.sparseEnabled ?? "",
-      sparseCone: d.sparseCone ?? "",
-      sparseList: d.sparseList ?? "",
-      skipWorktreeCount: d.skipWorktreeCount,
-      lsFilesV: d.lsFilesV,
-    });
-    const lastCommit = parseLastCommit(d.lastCommit ?? "");
-    this.absorbSparsePatterns(sparse);
-    this.lastStatus = { status, sparse, lastCommit, fetchedAt: new Date().toLocaleString() };
-    this.applyStatusToStatusBar(status);
-    this.pushStatusToView();
+    // ONE path into lastStatus. This used to parse and assign the fields here,
+    // duplicating absorbStatusData minus the merge/rebase ones — so a refresh
+    // silently dropped them. The visible symptom: a failed pull (which goes
+    // through absorbStatusData) raised the "merge in progress" banner, and the
+    // very next status refresh made it disappear again while git was still
+    // mid-merge and still refusing to pull. The same omission also cost the
+    // commit modal its prefilled MERGE_MSG after any refresh.
+    this.absorbStatusData(result.data ?? {});
     if (!silent) this.openStatusModal();
   }
 
@@ -1991,9 +2072,16 @@ export default class NativeGitBridgePlugin extends Plugin {
    * old loop therefore trashed the first entry and quietly logged failures for
    * the rest, which looked like "only one file was deleted".
    */
-  private async trashAll(paths: string[]): Promise<{ moved: number; failed: string[] }> {
+  private async trashAll(
+    paths: string[]
+  ): Promise<{ moved: number; failed: string[]; absent: number }> {
     const adapter = this.app.vault.adapter;
     let moved = 0;
+    // Paths that were not on disk to begin with. Counted separately because
+    // they are neither a success nor a failure, and calling them either is what
+    // produced "Moved 0 files to the trash" for a repair that could not
+    // possibly have moved anything.
+    let absent = 0;
     const failed: string[] = [];
     const expand = async (raw: string): Promise<string[]> => {
       const p = raw.replace(/\/+$/, "");
@@ -2039,57 +2127,133 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (stillThere) {
           failed.push(t);
           this.log.add("error", "sparse", `Trash failed for ${t}: ${String(e)}`);
+        } else {
+          absent++;
+          this.log.add("info", "sparse", `Nothing to trash at ${t}: it is not on disk.`);
         }
       }
     }
-    return { moved, failed };
+    return { moved, failed, absent };
+  }
+
+  /**
+   * Carry out a sparse repair plan and say exactly what happened.
+   *
+   * The order matters. The index entries go first: `git rm --cached` needs
+   * nothing from the worktree, while trashing a file that is still in the index
+   * turns a staged addition into a staged addition of a missing file — the
+   * precise state this repair exists to clear.
+   *
+   * Every branch reports. The old code counted a trash failure as "not a
+   * failure" whenever the file turned out not to exist, so a plan that could do
+   * nothing at all announced "Moved 0 files to the trash" and left the user to
+   * re-run the same dead end.
+   */
+  private async runSparseRepair(plan: SparseRepairPlan): Promise<void> {
+    const done: string[] = [];
+    const problems: string[] = [];
+
+    if (plan.unstage.length > 0) {
+      // protectedPaths is NOT optional here: the runner checks each path
+      // against it and refuses the request outright when the list is empty,
+      // because "which paths are protected" is the whole permission model for
+      // this action. Omitting it made the repair fail every single time.
+      const result = await this.runOperation("unstage-protected", {
+        paths: plan.unstage,
+        protectedPaths: this.effectiveProtectedPaths(),
+      });
+      if (!result) return;
+      if (!result.ok) {
+        this.renderMutationError("Native Git: could not clear the index entries", result);
+        return;
+      }
+      const n = Number(result.data?.unstagedProtectedCount ?? plan.unstage.length);
+      this.absorbStatusData(result.data ?? {});
+      // The runner is idempotent and answers 0 when the entries were already
+      // gone. Saying "0 index entries removed" would be the same empty
+      // reassurance as the "Moved 0 files to the trash" this replaced.
+      if (n > 0) {
+        done.push(`${n} index entr${n === 1 ? "y" : "ies"} removed (nothing was deleted from disk).`);
+      }
+    }
+
+    if (plan.trash.length > 0) {
+      const { moved, failed, absent } = await this.trashAll(plan.trash);
+      if (moved > 0) done.push(`${moved} file${moved === 1 ? "" : "s"} moved to the trash.`);
+      // Sparse checkout sets skip-worktree, so git reports a staged addition as
+      // a plain "A" and never mentions that the file is gone. Being told so
+      // plainly here beats a count of zero that looks like a failure.
+      if (absent > 0) {
+        done.push(
+          `${absent} listed path${absent === 1 ? " was" : "s were"} not on disk (sparse checkout had already removed ${absent === 1 ? "it" : "them"}); the index entr${absent === 1 ? "y" : "ies"} above ${absent === 1 ? "was" : "were"} the real blocker.`
+        );
+      }
+      if (failed.length > 0) {
+        this.log.add(
+          "error",
+          "sparse",
+          `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
+        );
+        problems.push(
+          `${failed.length} could not be moved:`,
+          ...failed.slice(0, 12),
+          failed.length > 12 ? `…and ${failed.length - 12} more` : ""
+        );
+      }
+    }
+
+    if (problems.length > 0) {
+      new ResultModal(
+        this.app,
+        "Partly repaired",
+        [...done, ...problems.filter((l) => l !== ""), "The safety check below shows what is left."],
+        { isError: true }
+      ).open();
+    } else if (done.length > 0) {
+      this.notify(done.join(" "));
+    }
   }
 
   /**
    * The two recoveries the safety modal offers. Both are explicit, confirmed
    * and reversible in the sense that matters: deleting goes to Obsidian's
-   * trash rather than to `rm`, and unprotecting only edits sparse config, so
-   * git history is never touched here.
+   * trash rather than to `rm`, unstaging only removes index entries that HEAD
+   * does not contain, and unprotecting only edits sparse config. Git history is
+   * never touched here.
    */
   private sparseSafetyFixes(): SparseSafetyFixes {
     return {
-      deleteLocally: (paths) => {
+      repair: (plan) => {
+        const body: string[] = [];
+        if (plan.trash.length > 0) {
+          body.push(
+            `Move to Obsidian's trash (${plan.trash.length}):`,
+            ...plan.trash.slice(0, 8),
+            plan.trash.length > 8 ? `…and ${plan.trash.length - 8} more` : ""
+          );
+        }
+        if (plan.unstage.length > 0) {
+          body.push(
+            `Remove from the index only (${plan.unstage.length}) — staged additions with no file on disk:`,
+            ...plan.unstage.slice(0, 8),
+            plan.unstage.length > 8 ? `…and ${plan.unstage.length - 8} more` : ""
+          );
+        }
+        body.push(
+          "Trashed files go to .trash in the vault and can be restored from there. Index entries are removed with 'git rm --cached', which only undoes a staged addition — nothing in the last commit is touched, and no file is deleted by it."
+        );
         new ConfirmModal(
           this.app,
           {
-            title: "Move these files to the trash?",
-            body: [
-              ...paths.slice(0, 12),
-              paths.length > 12 ? `…and ${paths.length - 12} more` : "",
-              "They go to Obsidian's trash (.trash in the vault), so you can restore them from there. Git history is not touched.",
-            ].filter((l) => l !== ""),
-            confirmLabel: "Move to trash",
+            title: "Clear these out of the way?",
+            body: body.filter((l) => l !== ""),
+            confirmLabel: "Clear them",
             icon: "trash",
             danger: true,
           },
           async (confirmed) => {
             if (!confirmed) return;
-            const { moved, failed } = await this.trashAll(paths);
-            if (failed.length > 0) {
-              this.log.add(
-                "error",
-                "sparse",
-                `${failed.length} path(s) could not be moved to the trash: ${failed.join(", ")}`
-              );
-              new ResultModal(
-                this.app,
-                "Some files could not be moved",
-                [
-                  `Moved ${moved} file${moved === 1 ? "" : "s"} to the trash; ${failed.length} could not be moved.`,
-                  ...failed.slice(0, 12),
-                  failed.length > 12 ? `…and ${failed.length - 12} more` : "",
-                  "The safety check below shows what is still there.",
-                ].filter((l) => l !== ""),
-                { isError: true }
-              ).open();
-            } else {
-              this.notify(`Moved ${moved} file${moved === 1 ? "" : "s"} to the trash.`);
-            }
+            await this.runSparseRepair(plan);
             // Re-run the check rather than just refreshing: the point of the
             // fix is that the blocked state is GONE, and only the runner can
             // say so. The verdict modal reopens with the new answer.
@@ -2386,6 +2550,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       fetchedAt: new Date().toLocaleString(),
       mergeInProgress: d.mergeInProgress === "true",
       mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : undefined,
+      // Absent on runners older than this one, which is exactly "no rebase":
+      // an old runner cannot report a state it does not look for, and treating
+      // the missing field as `true` would put a banner on every panel.
+      rebaseInProgress: d.rebaseInProgress === "true",
     };
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
@@ -2575,6 +2743,46 @@ export default class NativeGitBridgePlugin extends Plugin {
         this.notify("Merge aborted; repository restored.");
       }
     ).open();
+  }
+
+  /**
+   * The two exits from an unfinished rebase. Nothing in this plugin starts a
+   * rebase; one can only be here because it was started in Termux. Before the
+   * panel banner existed, that state was invisible and inescapable from inside
+   * Obsidian, exactly like the unfinished merge it sits next to.
+   */
+  async cmdAbortRebase(): Promise<void> {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Abort rebase?",
+        body: [
+          "This runs 'git rebase --abort' and returns the branch to where it was before the rebase started.",
+          "Conflict resolutions you already made during the rebase will be discarded.",
+        ],
+        confirmLabel: "Abort rebase",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("abort-rebase");
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: abort rebase failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.notify("Rebase aborted; branch restored.");
+      }
+    ).open();
+  }
+
+  async cmdContinueRebase(): Promise<void> {
+    const result = await this.runOperation("continue-rebase");
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: continue rebase failed", result);
+    this.absorbStatusData(result.data ?? {});
+    // A rebase replays commits one at a time and can stop again on the next
+    // one, so "continued" is the honest word; the refreshed banner says whether
+    // anything is still in progress.
+    this.notify("Rebase continued.");
   }
 
   // ---------------------------------------------------- phase 4: history/diff
@@ -2891,9 +3099,19 @@ export default class NativeGitBridgePlugin extends Plugin {
   private pushStatusToView(): void {
     const leaves = this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW);
     if (leaves.length === 0) return;
-    const state = this.statusBar?.current ?? (this.lock.active ? "syncing" : "clean");
+    // An unfinished merge or rebase outranks whatever the status bar last said.
+    // The status bar's "conflict" was set from a pull RESULT and then stuck:
+    // the panel showed "Conflict" long after the conflicted files were
+    // resolved, and showed nothing special once they were, even though the
+    // repository was still mid-merge and refusing every pull.
+    const inProgress = this.lastStatus?.rebaseInProgress || this.lastStatus?.mergeInProgress;
+    const state = inProgress
+      ? "conflict"
+      : (this.statusBar?.current ?? (this.lock.active ? "syncing" : "clean"));
     const extra = {
       sparse: this.lastStatus?.sparse,
+      mergeInProgress: this.lastStatus?.mergeInProgress,
+      rebaseInProgress: this.lastStatus?.rebaseInProgress,
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
       progress: this.progressText ?? undefined,
       runningAction: this.runningAction ?? undefined,

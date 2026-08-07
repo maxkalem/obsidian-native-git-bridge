@@ -113,13 +113,21 @@ export class FileHistoryView extends ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-status-view", "ngb-history-view", "ngb-filehist-view");
+    // Same regions as the other two panels. This pane shares the
+    // `ngb-status-view` class, which stops `.view-content` from scrolling, so
+    // it MUST provide its own scrolling body — without one the commits past the
+    // fold become unreachable with no scrollbar anywhere. It has no controls of
+    // its own, so there is no bottom bar.
+    const headEl = c.createDiv({ cls: "ngb-sv-head" });
+    const body = c.createDiv({ cls: "ngb-sv-body" });
     // The full path, on ONE line: it is the only thing identifying which file
     // this history belongs to, and wrapping it would push the commits down.
-    const head = c.createDiv({ cls: "ngb-filehist-path ngb-mono" });
+    // It stays in the head so it is still on screen deep into the history.
+    const head = headEl.createDiv({ cls: "ngb-filehist-path ngb-mono" });
     head.setText(this.path ?? "");
     head.setAttribute("aria-label", this.path ?? "");
-    this.listEl = c.createDiv({ cls: "ngb-hist-list" });
-    const btns = c.createDiv({ cls: "ngb-buttons" });
+    this.listEl = body.createDiv({ cls: "ngb-hist-list" });
+    const btns = body.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
     this.moreBtn.addEventListener("click", () => void this.loadMore());
     this.moreBtn.hide();

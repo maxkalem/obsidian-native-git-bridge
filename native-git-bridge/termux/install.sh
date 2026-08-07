@@ -3,8 +3,78 @@
 # Usage: bash install.sh [/absolute/path/to/vault-repo] [--with-ssh]
 set -u
 
-say()  { printf '%s\n' "$*"; }
-fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+# Output width. Termux on a phone is far narrower than a desktop terminal (the
+# default font gives roughly 60 columns in portrait), so text hard-wrapped in
+# the source at ~78 columns wrapped a SECOND time at the terminal edge, in the
+# middle of words, and the result was unreadable. Nothing here is pre-wrapped
+# any more: every message is one logical line and `say` folds it at the width
+# the terminal actually reports.
+#
+# `stty size` is asked of /dev/tty, not of stdin: the installer is normally run
+# through `curl … | bash`, where stdin is the pipe and has no size at all.
+term_cols() {
+  local c=""
+  if [ -r /dev/tty ]; then
+    # stderr is redirected BEFORE stdin on purpose: when /dev/tty exists but
+    # cannot be opened (no controlling terminal), the failing redirection is
+    # reported by the shell, and it must land in /dev/null like everything else.
+    c="$(stty size 2>/dev/null < /dev/tty | cut -d' ' -f2 || true)"
+  fi
+  [ -n "$c" ] || c="${COLUMNS:-}"
+  case "$c" in ""|*[!0-9]*) c=72 ;; esac
+  # Below ~32 the hanging indent eats the line; above ~100 long prose becomes
+  # hard to follow. Both bounds only matter for unusual terminals.
+  [ "$c" -lt 32 ] && c=32
+  [ "$c" -gt 100 ] && c=100
+  printf '%s' "$c"
+}
+NGB_COLS="$(term_cols)"
+
+# Wrap on spaces, never inside a word. A word longer than the line (a path, a
+# URL, a token) is printed whole and allowed to overflow: breaking it would
+# make it impossible to select and copy, which is the one thing those lines
+# exist for. Continuations get a hanging indent so a wrapped bullet or numbered
+# step still reads as one item.
+say() {
+  local text="$*"
+  if [ -z "$text" ]; then printf '\n'; return 0; fi
+  # `indent` prefixes the CONTINUATION lines (a hanging indent). `lead` is the
+  # message's own leading whitespace, which word splitting is about to strip:
+  # a line written as "   detail…" has to keep its indent on the FIRST line too,
+  # or the sub-point ends up further left than the point it belongs to.
+  local indent="" lead=""
+  case "$text" in
+    "-- "*|"== "*) indent="   " ;;
+    "ERROR: "*)    indent="   " ;;
+    [0-9].\ *)     indent="   " ;;
+    "   "*)        indent="   "; lead="   " ;;
+  esac
+  # Word splitting below must not glob: several messages contain '*' or '?'.
+  local had_glob=off
+  case "$-" in *f*) had_glob=on ;; esac
+  set -f
+  local line="" word=""
+  for word in $text; do
+    if [ -z "$line" ]; then
+      line="$lead$word"
+    elif [ "$(( ${#line} + 1 + ${#word} ))" -le "$NGB_COLS" ]; then
+      line="$line $word"
+    else
+      printf '%s\n' "$line"
+      line="$indent$word"
+    fi
+  done
+  printf '%s\n' "$line"
+  [ "$had_glob" = on ] || set +f
+}
+
+# Verbatim line: a command the user is meant to copy, printed exactly as
+# written. Reflowing those would change what gets pasted.
+sayr() { printf '%s\n' "$*"; }
+
+# Errors are wrapped too: a failure message is the one line the user has to be
+# able to read, and it is usually the longest.
+fail() { say "ERROR: $*" >&2; exit 1; }
 
 # Prompts must work when piped through `curl | bash` (stdin is the pipe), so we
 # talk to /dev/tty. With no terminal at all (e.g. re-run non-interactively) we
@@ -93,11 +163,10 @@ if [ -z "$REPO_ARG" ]; then
     REPO_ARG="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
     [ -n "$REPO_ARG" ] || fail "Invalid selection."
   else
-    fail "No vault with a .git repository found on shared storage.
-   Either pass the path explicitly:  bash install.sh /storage/emulated/0/<YourVault>
-   or, if the vault has no repository yet, let the plugin make one: open the vault in
-   Obsidian and use Settings -> Native Git Bridge -> Set up repository (it pairs the
-   vault first, then creates or clones the repository without leaving the app)."
+    say "-- No vault with a .git repository was found on shared storage. Either pass the path explicitly:"
+    sayr "     bash install.sh /storage/emulated/0/<YourVault>"
+    say "   or, if the vault has no repository yet, let the plugin make one: open the vault in Obsidian and use Settings -> Native Git Bridge -> Set up repository (it pairs the vault first, then creates or clones the repository without leaving the app)."
+    fail "No vault with a .git repository found on shared storage."
   fi
 fi
 REPO_DIR="$REPO_ARG"
@@ -107,9 +176,8 @@ REPO_DIR="$REPO_ARG"
 # storage is usually owned by a different uid, which new git versions reject).
 if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if git -C "$REPO_DIR" rev-parse --is-inside-work-tree 2>&1 | grep -qi 'dubious ownership'; then
-    say "-- Git rejected the repository because of 'dubious ownership' (normal for shared storage)."
-    say "   The following EXPLICIT global change marks only this directory as safe:"
-    say "     git config --global --add safe.directory \"$REPO_DIR\""
+    say "-- Git rejected the repository because of 'dubious ownership' (normal for shared storage). The following EXPLICIT global change marks only this directory as safe:"
+    sayr "     git config --global --add safe.directory \"$REPO_DIR\""
     confirm "Apply it now?" || fail "Cannot continue without safe.directory. Nothing was changed."
     git config --global --add safe.directory "$REPO_DIR"
     git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || fail "Still not a git work tree."
@@ -224,8 +292,7 @@ if [ -n "$OUTER" ]; then
   else
     printf '/%s\n' "$REL" >> "$OUTER_EXCLUDE"
     say "-- This vault sits INSIDE another repository: $OUTER"
-    say "   Added '/$REL/' to $OUTER_EXCLUDE (local only, nothing tracked was changed),"
-    say "   so the outer repository never records this vault's files."
+    say "   Added '/$REL/' to $OUTER_EXCLUDE (local only, nothing tracked was changed), so the outer repository never records this vault's files."
   fi
 fi
 
@@ -258,14 +325,13 @@ case "$REMOTE_URL" in
     HELPER="$(git -C "$REPO_DIR" config --local --get credential.helper 2>/dev/null || true)"
     if [ -z "$HELPER" ]; then
       GLOBAL_HELPER="$(git config --global --get credential.helper 2>/dev/null || true)"
-      say "-- HTTPS remote without a repository-local credential helper: pushes from the bridge"
-      say "   would fail or would silently use another vault's account (the runner never prompts)."
+      say "-- HTTPS remote without a repository-local credential helper: pushes from the bridge would fail, or would silently use another vault's account (the runner never prompts)."
       if confirm "Give this repository its own credential file ($PROFILE_CREDS)?"; then
         mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"
         : >> "$PROFILE_CREDS"; chmod 600 "$PROFILE_CREDS"
         git -C "$REPO_DIR" config --local credential.helper "store --file=$PROFILE_CREDS"
-        say "-- credential.helper set for this repository only. Run 'git -C \"$REPO_DIR\" pull' once"
-        say "   in Termux and enter your PAT as the password; it is reused non-interactively after that."
+        say "-- credential.helper set for this repository only. Run this once in Termux and enter your PAT as the password; it is reused non-interactively after that:"
+        sayr "     git -C \"$REPO_DIR\" pull"
       elif [ -n "$GLOBAL_HELPER" ]; then
         say "-- Falling back to the global credential helper '$GLOBAL_HELPER'."
       fi
@@ -306,8 +372,7 @@ if [ -n "$REMOTE_URL" ]; then
   if GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$REPO_DIR" ls-remote --heads origin >/dev/null 2>&1; then
     say "-- Remote authentication check PASSED (non-interactive ls-remote)."
   else
-    say "-- WARNING: non-interactive access to the remote FAILED. The bridge will not be able"
-    say "   to fetch/push until credentials work without a prompt (expired PAT? missing helper?)."
+    say "-- WARNING: non-interactive access to the remote FAILED. The bridge will not be able to fetch or push until credentials work without a prompt (expired PAT? missing helper?)."
   fi
 fi
 
@@ -353,16 +418,15 @@ say "-- Pairing file written; the Obsidian plugin will import the token automati
 # 12. Next steps.
 say ""
 say "== Done. What is left (outside Termux) =="
-say "1. Open Obsidian -> Settings -> Native Git Bridge -> enable on this device."
-say "   The pairing token is imported automatically on plugin start."
-say "2. In the Git Bridge Companion app: grant the 'Run commands in Termux environment'"
-say "   permission (step 2 there) - all three checkmarks must be green."
-say "3. Authentication: whatever you already use in Termux (PAT via credential helper,"
-say "   token in URL, or SSH key) keeps working - see the auth check result above."
+say "1. Open Obsidian -> Settings -> Native Git Bridge -> enable on this device. The pairing token is imported automatically on plugin start."
+say "2. In the Git Bridge Companion app: grant the 'Run commands in Termux environment' permission (step 2 there) - all three checkmarks must be green."
+say "3. Authentication: whatever you already use in Termux (PAT via credential helper, token in URL, or SSH key) keeps working - see the auth check result above."
 say ""
-say "Manual pairing token (only needed if auto-import fails): $TOKEN"
-say "Profile for this vault: $PROFILE_ID  ($PROFILE_FILE)"
+say "Manual pairing token (only needed if auto-import fails):"
+sayr "$TOKEN"
+say "Profile for this vault: $PROFILE_ID"
+sayr "$PROFILE_FILE"
 say "Note: nothing runs in the background; the runner executes only when triggered."
-say "Recovery: you can always run it by hand with  ~/.config/native-git-bridge/runner.sh"
-say "Another vault? Run the same command with its path; each vault gets its own"
-say "profile and token, and one runner drains them all."
+say "Recovery: you can always run it by hand with"
+sayr "~/.config/native-git-bridge/runner.sh"
+say "Another vault? Run the same command with its path; each vault gets its own profile and token, and one runner drains them all."
