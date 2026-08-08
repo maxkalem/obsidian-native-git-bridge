@@ -1,8 +1,8 @@
 name: Build companion APK
 
 on:
-  push:
-    paths: ["companion/**", ".github/workflows/build-companion.yml"]
+#  push:
+#    paths: ["companion/**", ".github/workflows/build-companion.yml"]
   workflow_dispatch:
 
 jobs:

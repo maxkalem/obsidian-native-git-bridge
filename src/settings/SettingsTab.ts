@@ -679,7 +679,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
             cp.setValue(this.plugin.sharedPrefs[prefKey][f.key]).onChange((v) => { void (async () => {
               await this.plugin.setSharedPref({
                 [prefKey]: { ...this.plugin.sharedPrefs[prefKey], [f.key]: v },
-              } as Record<string, unknown>);
+              });
             })(); })
           );
       }
@@ -688,7 +688,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
         .setDesc("Restores the values this plugin ships with for this theme.")
         .addButton((b) =>
           b.setButtonText("Reset").onClick(() => { void (async () => {
-            await this.plugin.setSharedPref({ [prefKey]: { ...DEFAULT_COLORS[mode] } } as Record<string, unknown>);
+            await this.plugin.setSharedPref({ [prefKey]: { ...DEFAULT_COLORS[mode] } });
             this.refreshTab();
           })(); })
         );

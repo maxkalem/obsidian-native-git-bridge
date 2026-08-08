@@ -2,7 +2,7 @@ import { ItemView, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import { DIFF_COLOR_VARS } from "./colors";
 import { renderHunkRange, renderUnifiedDiff } from "./diffDom";
 import type { InlineDiffUnit } from "../git/inlineDiff";
-import { describeDiffBudget, overrideWarning, type DiffBudgetNotice } from "../git/diffBudget";
+import { describeDiffBudget, type DiffBudgetNotice } from "../git/diffBudget";
 import { hunkActionsFor, supportsLineSelection, type HunkActionPlan } from "../git/hunkActions";
 import { buildHunkPatch, selectableLines, selectionHasChanges } from "../git/hunkPatch";
 import { parseUnifiedDiff, type DiffHunk } from "../git/unifiedDiff";

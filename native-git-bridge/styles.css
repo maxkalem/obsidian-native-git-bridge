@@ -257,7 +257,12 @@
   color: var(--text-muted); font-variant-numeric: tabular-nums;
 }
 .ngb-sv-count-sm { font-size: var(--font-ui-smaller); letter-spacing: -0.02em; }
-.ngb-sv-count-more { cursor: pointer; text-decoration: underline dotted; }
+/* Longhands rather than the `text-decoration: underline dotted` shorthand: the
+   catalogue's CSS lint reports the shorthand as only partially supported by the
+   Obsidian baseline it checks against. The rendering is identical. */
+.ngb-sv-count-more {
+  cursor: pointer; text-decoration-line: underline; text-decoration-style: dotted;
+}
 /* Exact-value popup for clamped counts (tap to show, hold to keep). */
 .ngb-count-pop {
   position: fixed; transform: translateY(-100%);

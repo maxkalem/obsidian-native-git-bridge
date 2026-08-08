@@ -14,7 +14,7 @@
  * become CONTEXT rather than disappear, or git applies it anyway.
  */
 
-import type { DiffHunk, DiffLine } from "./unifiedDiff";
+import type { DiffHunk } from "./unifiedDiff";
 
 export interface HunkPatchRequest {
   /** Repository-relative path, as it appears in the diff. */

@@ -37,6 +37,20 @@ jobs:
           [ "$MV" = "${GITHUB_REF_NAME}" ] \
             || { echo "Tag ${GITHUB_REF_NAME} != manifest version $MV"; exit 1; }
 
+      # Repeated from build-plugin.yml, which no longer runs on a push, so this
+      # is now the only automatic check of it. The tag check above covers
+      # manifest.json alone; a package.json left behind, or a versions.json with
+      # no entry for this release, would otherwise reach users. Obsidian reads
+      # versions.json to decide which build an older app may install, so a
+      # missing entry is not cosmetic.
+      - name: Version consistency (manifest vs package vs versions.json)
+        run: |
+          MV=$(jq -r .version manifest.json)
+          PV=$(jq -r .version package.json)
+          [ "$MV" = "$PV" ] || { echo "manifest.json ($MV) != package.json ($PV)"; exit 1; }
+          jq -e --arg v "$MV" 'has($v)' versions.json >/dev/null \
+            || { echo "versions.json has no entry for $MV"; exit 1; }
+
       - name: Install dependencies (locked)
         run: npm ci
 
