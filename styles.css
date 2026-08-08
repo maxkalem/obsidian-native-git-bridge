@@ -118,6 +118,9 @@
 .ngb-sv-toolbar {
   display: flex; flex-wrap: wrap; gap: var(--size-4-1);
   margin-bottom: var(--size-4-2);
+  /* Controls spread to both ends. The footbar and the history panel override
+     this with their own, more specific rules, so order does not decide it. */
+  justify-content: space-between;
 }
 .ngb-sv-footbar .ngb-sv-toolbar {
   /* Breathing room between the separator rule and the buttons, a third of a
@@ -218,7 +221,13 @@
   cursor: pointer; padding: var(--size-4-1) 0;
   color: var(--text-muted); font-size: var(--font-ui-small);
 }
-.ngb-sv-group-title { font-weight: 600; color: var(--text-normal); }
+/* The group header uses the same right-hand column as a file row, so the title
+   takes the slack. Declared once, here: this selector used to appear twice,
+   several dozen lines apart, which is how `.ngb-hunk-bar` became a real bug. */
+.ngb-sv-group-title {
+  font-weight: 600; color: var(--text-normal);
+  flex: 1 1 auto; min-width: 0;
+}
 .ngb-sv-chevron { display: inline-flex; align-items: center; }
 .ngb-sv-list { display: flex; flex-direction: column; }
 .ngb-sv-file {
@@ -275,8 +284,6 @@
   font-size: var(--font-ui-small); color: var(--text-normal);
   max-width: 80vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-/* The group header uses the same right-hand column, so the title takes the slack. */
-.ngb-sv-group-title { flex: 1 1 auto; min-width: 0; }
 /* Group headers carry the same action slots as folder rows. */
 .ngb-sv-group-header .ngb-sv-file-actions { flex: 0 0 auto; }
 /* Nested rows (untracked children in list layout; folders/files in tree
@@ -385,8 +392,6 @@
   .ngb-sv-file-busy { animation-duration: 2.4s; }
 }
 .ngb-buttons-top { justify-content: flex-start; margin: 0 0 var(--size-4-2); }
-
-.ngb-sv-toolbar { justify-content: space-between; }
 
 /* Install command block: must wrap inside narrow settings panes */
 .ngb-cmd {

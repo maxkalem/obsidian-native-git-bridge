@@ -4811,6 +4811,7 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     } else {
       this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
       res = await this.actions.loadCommitDiff(e);
+      this.stopWaitTicker();
       if (res !== null) this.diffCache.set(e.hash, res);
     }
     if (!this.expanded.has(e.hash)) return;

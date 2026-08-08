@@ -279,6 +279,11 @@ export class FileHistoryView extends ItemView {
     } else {
       this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
       res = await this.actions.loadCommitDiff(e);
+      // Whoever starts the ticker stops it, on the same line as the await, the
+      // way `loadMore` here and both other panes already do. Without this the
+      // interval kept calling setText on the span `body.empty()` detached
+      // below, until the panel closed or another wait replaced it.
+      this.stopWaitTicker();
       if (res !== null) this.diffCache.set(e.hash, res);
     }
     if (!this.expanded.has(e.hash)) return; // collapsed while we waited
