@@ -156,10 +156,10 @@ export class FileHistoryView extends ItemView {
     if (path === null || this.loading || this.exhausted) return;
     this.loading = true;
     const waiting = this.listEl?.createDiv({ cls: "ngb-filehist-waiting" });
-    if (waiting) this.renderWaiting(waiting, "Loading history");
+    const ticker = waiting ? this.renderWaiting(waiting, "Loading history") : null;
     const page = await this.actions.loadPage(path, this.skip, this.pageSize);
     waiting?.remove();
-    this.stopWaitTicker();
+    this.stopWaitTicker(ticker);
     this.loading = false;
     if (page === null) return;
     if (this.skip === 0 && page.length === 0) {
@@ -180,8 +180,16 @@ export class FileHistoryView extends ItemView {
     for (const e of page) this.renderCommit(e);
   }
 
-  /** The panel's own "the runner is working" indicator, repeated in place. */
-  private renderWaiting(el: HTMLElement, what: string): void {
+  /**
+   * The panel's own "the runner is working" indicator, repeated in place.
+   *
+   * Returns the timer it started, which the caller hands back to
+   * `stopWaitTicker`. There is one ticker for the whole panel but two things
+   * that wait — a page of history, and each expanded commit's diff — and
+   * nothing serialises them, so the indicator can change owner while a request
+   * is out.
+   */
+  private renderWaiting(el: HTMLElement, what: string): number | null {
     el.empty();
     const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
     setIcon(spin, "refresh-cw");
@@ -196,13 +204,19 @@ export class FileHistoryView extends ItemView {
     // node that had already been removed.
     this.stopWaitTicker();
     this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+    return this.waitTicker;
   }
 
-  private stopWaitTicker(): void {
-    if (this.waitTicker !== null) {
-      window.clearInterval(this.waitTicker);
-      this.waitTicker = null;
-    }
+  /**
+   * Stops the wait indicator. With an id, only if that wait still owns it: a
+   * request that finishes must not clear the indicator a later one is using,
+   * which would leave the spinner turning with a frozen progress line.
+   */
+  private stopWaitTicker(id?: number | null): void {
+    if (this.waitTicker === null) return;
+    if (id !== undefined && id !== this.waitTicker) return;
+    window.clearInterval(this.waitTicker);
+    this.waitTicker = null;
   }
 
   private renderCommit(e: FileLogEntry): void {
@@ -277,13 +291,17 @@ export class FileHistoryView extends ItemView {
     if (cached !== undefined) {
       res = cached;
     } else {
-      this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
+      const ticker = this.renderWaiting(
+        body.createDiv({ cls: "ngb-filehist-waiting" }),
+        "Loading diff"
+      );
       res = await this.actions.loadCommitDiff(e);
       // Whoever starts the ticker stops it, on the same line as the await, the
       // way `loadMore` here and both other panes already do. Without this the
       // interval kept calling setText on the span `body.empty()` detached
-      // below, until the panel closed or another wait replaced it.
-      this.stopWaitTicker();
+      // below, until the panel closed or another wait replaced it. By id,
+      // because a second expanded commit may own the indicator by now.
+      this.stopWaitTicker(ticker);
       if (res !== null) this.diffCache.set(e.hash, res);
     }
     if (!this.expanded.has(e.hash)) return; // collapsed while we waited

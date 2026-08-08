@@ -75,6 +75,8 @@ export class HistoryView extends ItemView {
    * to obey the same rule.
    */
   private refreshQueued = false;
+  /** The in-list wait indicator while one is showing; see `startWaiting`. */
+  private waitingEl: HTMLElement | null = null;
 
   constructor(leaf: WorkspaceLeaf, private actions: HistoryViewActions) {
     super(leaf);
@@ -101,6 +103,8 @@ export class HistoryView extends ItemView {
     this.entries = [];
     this.skip = 0;
     this.exhausted = false;
+    // renderShell rebuilds the list, so the indicator element goes with it.
+    this.waitingEl = null;
     this.renderShell();
     // AFTER renderShell, which is what captures the current offset. Setting it
     // before was dead code. A reload starts at the newest commit; carrying the
@@ -111,7 +115,12 @@ export class HistoryView extends ItemView {
       // A request is already in flight. Racing a second one against it is the
       // thing to avoid; its answer describes the list this refresh just threw
       // away, so let it finish, let it discard itself, and reload after it.
+      //
+      // Show the indicator straight away. Without it the list is empty and
+      // silent for the rest of the request in flight, which reads as a panel
+      // that gave up rather than one that is waiting its turn.
       this.refreshQueued = true;
+      this.startWaiting();
       return;
     }
     await this.loadMore();
@@ -220,25 +229,27 @@ export class HistoryView extends ItemView {
     }
     // The FIRST page hides the Load-more button, so without this the panel is
     // simply blank while the runner works. Same indicator as the other panels.
-    const waiting = this.skip === 0 ? this.listEl?.createDiv({ cls: "ngb-filehist-waiting" }) : undefined;
-    if (waiting) this.renderWaiting(waiting, "Loading history");
+    const ticker = this.skip === 0 ? this.startWaiting() : null;
     const page = await this.actions.loadPage(this.skip, this.pageSize);
-    waiting?.remove();
-    this.stopWaitTicker();
     this.loading = false;
     if (epoch !== this.loadEpoch) {
       // `refresh()` rebuilt the list while this request was out. The page
       // describes the old list: appending it would show the state from BEFORE
       // the refresh as its result, and would advance `skip` by a length that
       // belongs to a different list. Drop it, and run the refresh that waited.
+      //
+      // The indicator stays up: `refresh()` put a fresh one in the rebuilt
+      // list, and the reload below takes it over rather than replacing it.
       if (this.refreshQueued) {
         this.refreshQueued = false;
         await this.loadMore();
       } else {
+        this.stopWaiting(ticker);
         this.applyLoadingState();
       }
       return;
     }
+    this.stopWaiting(ticker);
     this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
@@ -263,8 +274,32 @@ export class HistoryView extends ItemView {
     for (const e of page) this.renderCommit(e);
   }
 
+  /**
+   * The in-list wait indicator. One per panel, reused rather than duplicated:
+   * a refresh that has to wait for a request in flight puts it there, and the
+   * load that follows finds it already showing instead of adding a second.
+   *
+   * `refresh()` clears the field, because `renderShell` throws the element away
+   * with the rest of the list.
+   */
+  private startWaiting(): number | null {
+    if (!this.listEl) return null;
+    if (this.waitingEl === null) {
+      this.waitingEl = this.listEl.createDiv({ cls: "ngb-filehist-waiting" });
+    }
+    return this.renderWaiting(this.waitingEl, "Loading history");
+  }
+
+  /** Takes the indicator down, unless a later wait has taken it over. */
+  private stopWaiting(id: number | null): void {
+    if (id !== null && id !== this.waitTicker) return;
+    this.waitingEl?.remove();
+    this.waitingEl = null;
+    this.stopWaitTicker(id);
+  }
+
   /** "The runner is working" indicator, identical in all four panels. */
-  private renderWaiting(el: HTMLElement, what: string): void {
+  private renderWaiting(el: HTMLElement, what: string): number | null {
     el.empty();
     const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
     setIcon(spin, "refresh-cw");
@@ -279,13 +314,19 @@ export class HistoryView extends ItemView {
     // refresh, each writing into a node that had already been removed.
     this.stopWaitTicker();
     this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+    return this.waitTicker;
   }
 
-  private stopWaitTicker(): void {
-    if (this.waitTicker !== null) {
-      window.clearInterval(this.waitTicker);
-      this.waitTicker = null;
-    }
+  /**
+   * With an id, stops only while that wait still owns the ticker. A request
+   * that finishes must not clear the indicator a later one is using: that is
+   * how the panel came to show a spinner with a frozen progress line.
+   */
+  private stopWaitTicker(id?: number | null): void {
+    if (this.waitTicker === null) return;
+    if (id !== undefined && id !== null && id !== this.waitTicker) return;
+    window.clearInterval(this.waitTicker);
+    this.waitTicker = null;
   }
 
   private renderCommit(e: RepoLogEntry): void {

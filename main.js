@@ -2461,7 +2461,13 @@ function buildPathTree(items, getPath) {
 // src/ui/countBadge.ts
 function formatCount(count) {
   const n = Math.max(0, Math.floor(count));
-  if (n > 9999) return { text: "9999+", small: true, clamped: true };
+  if (n > 99999) return { text: "99k+", small: true, clamped: true };
+  if (n >= 1e4) return { text: `${Math.floor(n / 1e3)}k`, small: true, clamped: true };
+  if (n >= 1e3) {
+    const whole = Math.floor(n / 1e3);
+    const tenth = Math.floor(n % 1e3 / 100);
+    return { text: `${whole}.${tenth}k`, small: true, clamped: true };
+  }
   return { text: String(n), small: n > 99, clamped: n > 99 };
 }
 function renderCountBadge(parent, count, describe) {
@@ -3267,6 +3273,8 @@ var HistoryView = class extends import_obsidian11.ItemView {
      * to obey the same rule.
      */
     this.refreshQueued = false;
+    /** The in-list wait indicator while one is showing; see `startWaiting`. */
+    this.waitingEl = null;
   }
   getViewType() {
     return NGB_HISTORY_VIEW;
@@ -3287,10 +3295,12 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.entries = [];
     this.skip = 0;
     this.exhausted = false;
+    this.waitingEl = null;
     this.renderShell();
     this.savedScroll = 0;
     if (this.loading) {
       this.refreshQueued = true;
+      this.startWaiting();
       return;
     }
     await this.loadMore();
@@ -3377,21 +3387,20 @@ var HistoryView = class extends import_obsidian11.ItemView {
       this.moreBtn.disabled = true;
       this.moreBtn.setText("Loading\u2026");
     }
-    const waiting = this.skip === 0 ? this.listEl?.createDiv({ cls: "ngb-filehist-waiting" }) : void 0;
-    if (waiting) this.renderWaiting(waiting, "Loading history");
+    const ticker = this.skip === 0 ? this.startWaiting() : null;
     const page = await this.actions.loadPage(this.skip, this.pageSize);
-    waiting?.remove();
-    this.stopWaitTicker();
     this.loading = false;
     if (epoch !== this.loadEpoch) {
       if (this.refreshQueued) {
         this.refreshQueued = false;
         await this.loadMore();
       } else {
+        this.stopWaiting(ticker);
         this.applyLoadingState();
       }
       return;
     }
+    this.stopWaiting(ticker);
     this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
@@ -3415,6 +3424,28 @@ var HistoryView = class extends import_obsidian11.ItemView {
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
   }
+  /**
+   * The in-list wait indicator. One per panel, reused rather than duplicated:
+   * a refresh that has to wait for a request in flight puts it there, and the
+   * load that follows finds it already showing instead of adding a second.
+   *
+   * `refresh()` clears the field, because `renderShell` throws the element away
+   * with the rest of the list.
+   */
+  startWaiting() {
+    if (!this.listEl) return null;
+    if (this.waitingEl === null) {
+      this.waitingEl = this.listEl.createDiv({ cls: "ngb-filehist-waiting" });
+    }
+    return this.renderWaiting(this.waitingEl, "Loading history");
+  }
+  /** Takes the indicator down, unless a later wait has taken it over. */
+  stopWaiting(id) {
+    if (id !== null && id !== this.waitTicker) return;
+    this.waitingEl?.remove();
+    this.waitingEl = null;
+    this.stopWaitTicker(id);
+  }
   /** "The runner is working" indicator, identical in all four panels. */
   renderWaiting(el, what) {
     el.empty();
@@ -3428,12 +3459,18 @@ var HistoryView = class extends import_obsidian11.ItemView {
     tick();
     this.stopWaitTicker();
     this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+    return this.waitTicker;
   }
-  stopWaitTicker() {
-    if (this.waitTicker !== null) {
-      window.clearInterval(this.waitTicker);
-      this.waitTicker = null;
-    }
+  /**
+   * With an id, stops only while that wait still owns the ticker. A request
+   * that finishes must not clear the indicator a later one is using: that is
+   * how the panel came to show a spinner with a frozen progress line.
+   */
+  stopWaitTicker(id) {
+    if (this.waitTicker === null) return;
+    if (id !== void 0 && id !== null && id !== this.waitTicker) return;
+    window.clearInterval(this.waitTicker);
+    this.waitTicker = null;
   }
   renderCommit(e) {
     if (!this.listEl) return;
@@ -4731,10 +4768,10 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     if (path === null || this.loading || this.exhausted) return;
     this.loading = true;
     const waiting = this.listEl?.createDiv({ cls: "ngb-filehist-waiting" });
-    if (waiting) this.renderWaiting(waiting, "Loading history");
+    const ticker = waiting ? this.renderWaiting(waiting, "Loading history") : null;
     const page = await this.actions.loadPage(path, this.skip, this.pageSize);
     waiting?.remove();
-    this.stopWaitTicker();
+    this.stopWaitTicker(ticker);
     this.loading = false;
     if (page === null) return;
     if (this.skip === 0 && page.length === 0) {
@@ -4754,7 +4791,15 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     this.skip += page.length;
     for (const e of page) this.renderCommit(e);
   }
-  /** The panel's own "the runner is working" indicator, repeated in place. */
+  /**
+   * The panel's own "the runner is working" indicator, repeated in place.
+   *
+   * Returns the timer it started, which the caller hands back to
+   * `stopWaitTicker`. There is one ticker for the whole panel but two things
+   * that wait — a page of history, and each expanded commit's diff — and
+   * nothing serialises them, so the indicator can change owner while a request
+   * is out.
+   */
   renderWaiting(el, what) {
     el.empty();
     const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
@@ -4767,12 +4812,18 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     tick();
     this.stopWaitTicker();
     this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+    return this.waitTicker;
   }
-  stopWaitTicker() {
-    if (this.waitTicker !== null) {
-      window.clearInterval(this.waitTicker);
-      this.waitTicker = null;
-    }
+  /**
+   * Stops the wait indicator. With an id, only if that wait still owns it: a
+   * request that finishes must not clear the indicator a later one is using,
+   * which would leave the spinner turning with a frozen progress line.
+   */
+  stopWaitTicker(id) {
+    if (this.waitTicker === null) return;
+    if (id !== void 0 && id !== this.waitTicker) return;
+    window.clearInterval(this.waitTicker);
+    this.waitTicker = null;
   }
   renderCommit(e) {
     if (!this.listEl) return;
@@ -4837,9 +4888,12 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     if (cached !== void 0) {
       res = cached;
     } else {
-      this.renderWaiting(body.createDiv({ cls: "ngb-filehist-waiting" }), "Loading diff");
+      const ticker = this.renderWaiting(
+        body.createDiv({ cls: "ngb-filehist-waiting" }),
+        "Loading diff"
+      );
       res = await this.actions.loadCommitDiff(e);
-      this.stopWaitTicker();
+      this.stopWaitTicker(ticker);
       if (res !== null) this.diffCache.set(e.hash, res);
     }
     if (!this.expanded.has(e.hash)) return;

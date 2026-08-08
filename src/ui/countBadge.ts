@@ -1,9 +1,13 @@
 /**
  * The file-count badge that sits in the right-hand column of the panels, in
- * the same slot as a file row's change letter. The column reserves room for
- * two digits; longer numbers shrink instead of widening the column, and
- * anything past 9999 is clamped so a huge repository cannot push the row
- * layout around.
+ * the same slot as a file row's change letter.
+ *
+ * That column is a FIXED width, the same on every kind of row, so the action
+ * buttons to its left line up down the whole panel. Which means the text can
+ * never be longer than four characters: a four-digit count (2415 untracked
+ * files in one folder is an ordinary number here) used to widen the column and
+ * shift that row's buttons out of line with every other row. Anything from a
+ * thousand up is therefore abbreviated, and the exact figure is one tap away.
  */
 
 export interface CountBadgeFormat {
@@ -16,7 +20,15 @@ export interface CountBadgeFormat {
 
 export function formatCount(count: number): CountBadgeFormat {
   const n = Math.max(0, Math.floor(count));
-  if (n > 9999) return { text: "9999+", small: true, clamped: true };
+  if (n > 99999) return { text: "99k+", small: true, clamped: true };
+  // Rounded DOWN throughout: a badge must never claim more files than there
+  // are, and "9.9k" for 9999 is the honest reading of it.
+  if (n >= 10000) return { text: `${Math.floor(n / 1000)}k`, small: true, clamped: true };
+  if (n >= 1000) {
+    const whole = Math.floor(n / 1000);
+    const tenth = Math.floor((n % 1000) / 100);
+    return { text: `${whole}.${tenth}k`, small: true, clamped: true };
+  }
   return { text: String(n), small: n > 99, clamped: n > 99 };
 }
 

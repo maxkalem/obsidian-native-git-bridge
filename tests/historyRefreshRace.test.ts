@@ -135,6 +135,29 @@ describe("history panel, refresh while a page is in flight", () => {
     expect(__findAllByClass(view.contentEl, "ngb-filehist-waiting")).toHaveLength(0);
   });
 
+  it("keeps the wait indicator up while the queued refresh waits its turn", async () => {
+    // What the device showed: after the second tap the list was empty and
+    // silent for the rest of the request in flight, which reads as a panel
+    // that gave up. There must be exactly one indicator throughout, never two.
+    const g = gatedPages();
+    const view = new HistoryView(leaf, actions({ loadPage: g.loadPage })) as Any;
+    view.renderShell();
+    void view.refresh();
+    expect(__findAllByClass(view.contentEl, "ngb-filehist-waiting")).toHaveLength(1);
+
+    void view.refresh();
+    await settle();
+    expect(__findAllByClass(view.contentEl, "ngb-filehist-waiting")).toHaveLength(1);
+
+    g.releases[0]?.(STALE);
+    await settle();
+    expect(__findAllByClass(view.contentEl, "ngb-filehist-waiting")).toHaveLength(1);
+
+    g.releases[1]?.(FRESH);
+    await settle();
+    expect(__findAllByClass(view.contentEl, "ngb-filehist-waiting")).toHaveLength(0);
+  });
+
   it("a later page still lands normally when no refresh interrupts it", async () => {
     // The guard must not cost the ordinary case: Load more after a first page.
     const g = gatedPages();

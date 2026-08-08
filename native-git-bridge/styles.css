@@ -251,17 +251,24 @@
   color: var(--text-faint); font-size: var(--font-ui-smaller);
   padding: 2px 0 2px var(--size-4-3);
 }
+/* The change letter and the file count share this column, and it is a FIXED
+   width rather than a minimum: the action buttons sit to its left on every kind
+   of row, so anything that can widen it pushes one row's buttons out of line
+   with the rest. Four characters is what the count badge is allowed (see
+   countBadge.ts), and one letter is what this one ever holds. */
 .ngb-sv-file-code {
-  flex: 0 0 auto; min-width: 1.4em; text-align: center;
+  flex: 0 0 auto; width: 4ch; text-align: center;
   font-family: var(--font-monospace); font-size: var(--font-smaller);
   color: var(--text-muted); margin-left: 2px;
 }
 .ngb-sv-file-actions { display: flex; gap: 0; flex: 0 0 auto; }
-/* File counts share the change-letter column on the right. Room is reserved
-   for two digits; longer values shrink rather than widen the column, so rows
-   stay aligned whatever the repository size. */
+/* File counts share the change-letter column on the right, at exactly the same
+   fixed width, which is what keeps the buttons of a folder row and of a file
+   row in one vertical line. `formatCount` guarantees at most four characters,
+   so nothing here has to grow: a four-digit count used to widen this column and
+   shift that row's buttons left of every other row's. */
 .ngb-sv-count {
-  flex: 0 0 auto; min-width: 2.2ch; text-align: center; margin-left: 2px;
+  flex: 0 0 auto; width: 4ch; text-align: center; margin-left: 2px;
   font-family: var(--font-monospace); font-size: var(--font-smaller);
   color: var(--text-muted); font-variant-numeric: tabular-nums;
 }

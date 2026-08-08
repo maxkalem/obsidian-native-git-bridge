@@ -111,6 +111,35 @@ describe("file history, the wait ticker", () => {
     expect(cleared).toContain(id);
   });
 
+  it("does not stop a ticker that a later wait owns", async () => {
+    // Nothing serialises renderCommitDiff: expanding two commits sends two
+    // requests. `renderWaiting` gives the panel ONE ticker, so the second
+    // expansion takes it over — and then whichever diff arrives first must not
+    // clear the indicator the other one is still using.
+    const gates = new Map<string, (v: { diff: string; truncated: boolean }) => void>();
+    const view = expandedView({
+      loadCommitDiff: (e: Any) =>
+        new Promise<{ diff: string; truncated: boolean }>((res) => gates.set(e.hash, res)),
+    });
+    const second: FileLogEntry = { ...ENTRY, hash: "99887766554433" } as FileLogEntry;
+    view.expanded.add(second.hash);
+
+    const bodyA = view.contentEl.createDiv({ cls: "ngb-filehist-body" });
+    const bodyB = view.contentEl.createDiv({ cls: "ngb-filehist-body" });
+    const doneA = view.renderCommitDiff(bodyA, ENTRY);
+    const doneB = view.renderCommitDiff(bodyB, second);
+    const tickerB = view.waitTicker as number;
+    expect(tickerB).not.toBeNull();
+
+    gates.get(ENTRY.hash)?.({ diff: DIFF, truncated: false });
+    await doneA;
+    expect(view.waitTicker).toBe(tickerB);
+
+    gates.get(second.hash)?.({ diff: DIFF, truncated: false });
+    await doneB;
+    expect(view.waitTicker).toBeNull();
+  });
+
   it("starts no ticker at all for a diff that is already cached", async () => {
     const view = expandedView();
     const body = view.contentEl.createDiv({ cls: "ngb-filehist-body" });
