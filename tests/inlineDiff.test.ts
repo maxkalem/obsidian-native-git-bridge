@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  INLINE_DIFF_CHAR_LIMIT,
   INLINE_DIFF_TOKEN_LIMIT,
   inlineDiff,
   tokenizeLine,
@@ -117,6 +118,82 @@ describe("inlineDiff", () => {
     const a = Array.from({ length: tokens }, (_, i) => `w${i}`).join(" ");
     const r = inlineDiff(a, `${a} tail`);
     expect(r.after.some((x) => x.kind === "add")).toBe(true);
+  });
+});
+
+describe("inlineDiff, character unit", () => {
+  it("marks the letters that changed, not the whole word", () => {
+    // The word unit reports "brown" replaced by "red". The character unit is
+    // what diff2html produced, and it is the useful one for an identifier or a
+    // path, where one letter IS the edit.
+    const { before, after } = inlineDiff("colour", "color", "char");
+    expect(show(before)).toEqual(["same:colo", "remove:u", "same:r"]);
+    expect(show(after)).toEqual(["same:color"]);
+  });
+
+  it("refines only inside a stretch the word pass already changed", () => {
+    // "quick" is untouched, so it stays one shared run: the character pass must
+    // not re-diff the whole line and start matching letters across words.
+    const { before, after } = inlineDiff("the quick fox", "the quick fix", "char");
+    expect(joined(before)).toBe("the quick fox");
+    expect(joined(after)).toBe("the quick fix");
+    expect(before.some((r) => r.kind === "same" && r.text.includes("quick"))).toBe(true);
+    expect(before.filter((r) => r.kind === "remove")).toEqual([{ kind: "remove", text: "o" }]);
+    expect(after.filter((r) => r.kind === "add")).toEqual([{ kind: "add", text: "i" }]);
+  });
+
+  it("leaves the word unit alone", () => {
+    const { before } = inlineDiff("colour", "color");
+    expect(show(before)).toEqual(["remove:colour"]);
+  });
+
+  it("does not split a surrogate pair", () => {
+    // Array.from splits by code point; "".split("") would cut the emoji in
+    // half and render a replacement glyph on each side.
+    const { before, after } = inlineDiff("a 😀 b", "a 😀 c", "char");
+    expect(joined(before)).toBe("a 😀 b");
+    expect(joined(after)).toBe("a 😀 c");
+    // A correct run may well CONTAIN surrogates — an emoji is a pair of them.
+    // What must never appear is half a pair on its own.
+    const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const r of [...before, ...after]) expect(r.text).not.toMatch(lone);
+  });
+
+  it("always reassembles into the original text", () => {
+    const pairs: [string, string][] = [
+      ["the quick brown fox", "the quick red fox jumps"],
+      ["alpha", "beta"],
+      ["  indented", "\tindented"],
+      ["Projects/Water Sort/GD.md", "Projects/Water Sort/GDD.md"],
+      ["", "x"],
+      ["x", ""],
+      ["привіт світ", "привіт світе"],
+    ];
+    for (const [a, b] of pairs) {
+      const r = inlineDiff(a, b, "char");
+      expect(joined(r.before)).toBe(a);
+      expect(joined(r.after)).toBe(b);
+    }
+  });
+
+  it("falls back to the word unit on a stretch too long to refine", () => {
+    // The ceiling is per changed stretch, not per line, so a paragraph with one
+    // small edit is still refined while one rewritten wholesale is not.
+    const a = "z".repeat(INLINE_DIFF_CHAR_LIMIT + 10);
+    const b = "y".repeat(INLINE_DIFF_CHAR_LIMIT + 10);
+    const t0 = Date.now();
+    const r = inlineDiff(a, b, "char");
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(show(r.before)).toEqual([`remove:${a}`]);
+    expect(show(r.after)).toEqual([`add:${b}`]);
+  });
+
+  it("stays as cheap as the word pass on a long line with one small edit", () => {
+    const filler = Array.from({ length: 150 }, (_, i) => `word${i}`).join(" ");
+    const t0 = Date.now();
+    const r = inlineDiff(`${filler} alpha`, `${filler} alpho`, "char");
+    expect(Date.now() - t0).toBeLessThan(500);
+    expect(r.before.filter((x) => x.kind === "remove")).toEqual([{ kind: "remove", text: "a" }]);
   });
 });
 

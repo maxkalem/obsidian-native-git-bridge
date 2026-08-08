@@ -3,8 +3,9 @@ import { describeFileChange, type FileLogEntry } from "../git/historyParsers";
 import { parseHunks, restoreHunk, type DiffHunk } from "../git/hunks";
 import { buildWholeFilePatch, needsNoNewlineMarker } from "../git/hunkPatch";
 import { markInvisibles, sizeGutter } from "./DiffView";
-import { renderUnifiedDiff } from "./diffDom";
+import { renderHunkRange, renderUnifiedDiff } from "./diffDom";
 import { DIFF_COLOR_VARS } from "./colors";
+import type { InlineDiffUnit } from "../git/inlineDiff";
 
 export const NGB_FILE_HISTORY_VIEW = "native-git-bridge-file-history";
 
@@ -36,6 +37,8 @@ export interface FileHistoryActions {
   progressText(): string;
   wrapLines(): boolean;
   showInvisibles(): boolean;
+  /** Shared preference: compare changed lines by word or by character. */
+  inlineUnit(): InlineDiffUnit;
   /** Custom colours as CSS variables, or null while the toggle is off. */
   colors(): Record<string, string> | null;
 }
@@ -291,7 +294,25 @@ export class FileHistoryView extends ItemView {
     const hunks = parseHunks(res.diff);
     const pane = body.createDiv({ cls: "ngb-diff-view ngb-filehist-diff" });
     pane.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
-    renderUnifiedDiff(pane, res.diff);
+    // The restore control goes in the hunk's own `@@` row, through the same
+    // hook the diff pane uses. It used to be a table row of its own inserted
+    // ABOVE that header, which put this panel's hunks in a different shape
+    // from the diff pane's for no reason — and, because that row was right
+    // aligned across a table as wide as the longest line of code, the button
+    // was pushed off the horizontal scroller and could not be seen at all.
+    renderUnifiedDiff(pane, res.diff, {
+      unit: this.actions.inlineUnit(),
+      hunkBar: (bar, _hunk, i) => {
+        const hunk = hunks[i];
+        if (hunk === undefined) return;
+        const b = bar.createEl("button", { cls: "ngb-hunk-btn" });
+        setIcon(b.createSpan({ cls: "ngb-hunk-btn-icon" }), "rotate-ccw");
+        b.createSpan({ text: "Restore this block" });
+        b.setAttribute("aria-label", `Restore this block from ${e.hash.slice(0, 8)}`);
+        b.addEventListener("click", () => void this.restoreBlock(hunk, e));
+        renderHunkRange(bar, _hunk);
+      },
+    });
     // Same measured gutter and the same optional colours as the diff pane:
     // this IS a diff pane, just embedded in a commit row.
     sizeGutter(pane);
@@ -301,25 +322,6 @@ export class FileHistoryView extends ItemView {
       else pane.style.removeProperty(name);
     }
     if (this.actions.showInvisibles()) markInvisibles(pane);
-    // One restore control per block, placed ABOVE its hunk in a bar of its
-    // own (own background, interface font, full width) so it cannot be read
-    // as part of the monospaced diff.
-    const files = Array.from(pane.querySelectorAll(".d2h-file-wrapper"));
-    const rows = files.length > 0 ? Array.from(files[0]!.querySelectorAll("tr")) : [];
-    let hunkIndex = 0;
-    for (const tr of rows) {
-      if (tr.querySelector(".d2h-info") === null) continue;
-      const hunk = hunks[hunkIndex++];
-      if (hunk === undefined) continue;
-      const bar = createDiv({ cls: "ngb-hunk-bar" });
-      const b = bar.createEl("button", { cls: "ngb-hunk-restore" });
-      const bi = b.createSpan({ cls: "ngb-filehist-restore-icon" });
-      setIcon(bi, "rotate-ccw");
-      b.createSpan({ text: "Restore this block" });
-      b.setAttribute("aria-label", `Restore this block from ${e.hash.slice(0, 8)}`);
-      b.addEventListener("click", () => void this.restoreBlock(hunk, e));
-      tr.parentElement?.insertBefore(wrapRow(bar, tr), tr);
-    }
     if (res.truncated) {
       body.createDiv({
         cls: "ngb-warning",
@@ -372,12 +374,3 @@ export class FileHistoryView extends ItemView {
   }
 }
 
-/** Wrap a bar element in a full-width table row so it can sit between hunks. */
-function wrapRow(bar: HTMLElement, sibling: Element): HTMLElement {
-  const tr = createEl("tr", { cls: "ngb-hunk-bar-row" });
-  const td = tr.createEl("td");
-  const cols = sibling.children.length || 2;
-  td.setAttribute("colspan", String(cols));
-  td.appendChild(bar);
-  return tr;
-}

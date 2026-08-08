@@ -78,8 +78,8 @@ describe("gutterWidthCh", () => {
     const one = gutterWidthCh(fake(["1", "7"]));
     const three = gutterWidthCh(fake(["4", "187", "192"]));
     expect(three).toBeGreaterThan(one);
-    expect(one).toBe(6); // 2 digits + prefix + padding
-    expect(three).toBe(10);
+    expect(one).toBe(7); // 2 digits + prefix + padding + separation
+    expect(three).toBe(11);
   });
 
   it("never returns zero for an empty diff", () => {

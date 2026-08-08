@@ -105,6 +105,7 @@ import {
   sanitizeColorSet,
   type NgbColorSet,
 } from "./ui/colors";
+import type { InlineDiffUnit } from "./git/inlineDiff";
 
 /** Non-device-specific, shareable UI preferences (safe to sync via data.json). */
 interface SharedUiPrefs {
@@ -114,6 +115,21 @@ interface SharedUiPrefs {
   wrapDiffLines: boolean;
   /** Render whitespace glyphs (· → ␍) in the diff pane. */
   showInvisibles: boolean;
+  /**
+   * Keep line-picking mode on when a diff pane is pointed at another file.
+   *
+   * Off by default: the picks are coordinates into the diff that was on
+   * screen, so they cannot survive the move, and a mode left on greets the
+   * next file with checkboxes nobody asked for.
+   */
+  keepLineSelection: boolean;
+  /**
+   * What a changed line is compared by: whole words, or single characters.
+   *
+   * Cosmetic and about reading rather than about how much work this device
+   * does, so it is shared through data.json like the other display toggles.
+   */
+  inlineDiffUnit: InlineDiffUnit;
   /** Conflict pane: show raw <<<<<<< markers with separate action rows. */
   showConflictMarkers: boolean;
   /** Render file lists as a folder tree (status + history panels). */
@@ -132,6 +148,8 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showRibbonIcon: true,
   wrapDiffLines: false,
   showInvisibles: false,
+  keepLineSelection: false,
+  inlineDiffUnit: "word",
   showConflictMarkers: false,
   treeView: false,
   customColors: false,
@@ -291,6 +309,8 @@ export default class NativeGitBridgePlugin extends Plugin {
             }),
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
+          keepLineSelection: () => this.sharedPrefs.keepLineSelection,
           colors: () => this.diffColorVars(),
           progressText: () => this.progressText ?? "",
         })
@@ -313,6 +333,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           progressText: () => this.progressText ?? "",
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
           colors: () => this.diffColorVars(),
         })
     );
@@ -328,6 +349,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           stageFile: (p) => this.cmdStageFile(p),
           markersVisible: () => this.sharedPrefs.showConflictMarkers,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
           colors: () => this.conflictColorVars(),
         })
     );

@@ -36,6 +36,25 @@
    that matches the specificity of the app's own `.mod-… .view-content` rule,
    and a plugin's stylesheet is applied after the app's. */
 .view-content.ngb-status-view { padding-bottom: 0; }
+/* Room to scroll PAST the last line, in the panes that scroll their own
+   content and have no bottom bar under it. Without it the final rows stop level
+   with the bottom edge, where Android's gesture bar and Obsidian's floating
+   toolbar sit on top of them: they are rendered, and they cannot be read.
+   Roughly five line heights clears both with the last line still comfortably
+   above the chrome.
+   One variable rather than three literals, so the panes cannot drift apart.
+   The status panel is deliberately not in this list: its bottom bar already
+   holds the content clear of the edge, and the padding would only add a band
+   of nothing to scroll through. */
+.ngb-diff-view, .ngb-conflict-view, .ngb-history-view { --ngb-scroll-tail: 7.5em; }
+.ngb-history-view .ngb-sv-body { padding-bottom: var(--ngb-scroll-tail); }
+/* Written as `.view-content.<pane>` for the reason given just above: that is
+   the specificity of the app's own `.mod-… .view-content` rule, which sets the
+   bottom padding these two panes are overriding. A single class loses to it,
+   which is why the first attempt at this changed nothing on the device. */
+.view-content.ngb-diff-view, .view-content.ngb-conflict-view {
+  padding-bottom: var(--ngb-scroll-tail);
+}
 /* Both fixed regions size to their content and never scroll: everything in
    them is a control or a state line, and a control you have to scroll to find
    is a control you do not have. They grow when the merge banner appears and
@@ -455,7 +474,11 @@
 
 /* ------------------------------------------------------------- diff pane */
 
-.ngb-diff-view { padding: var(--size-4-2); overflow: auto; }
+.ngb-diff-view {
+  padding: var(--size-4-2);
+  padding-bottom: var(--ngb-scroll-tail);
+  overflow: auto;
+}
 .ngb-diff-pane-body { margin-top: var(--size-4-2); }
 
 /* diff2html (line-by-line) rendering, adapted to Obsidian CSS variables.
@@ -514,10 +537,18 @@
   background-color: var(--background-primary);
   border-right: 1px solid var(--background-modifier-border);
 }
+/* Old number, new number, then the prefix — three columns that must stay
+   apart at any digit count. `min-width: 1.6em` alone was room for exactly two
+   digits: at three the two numbers touched and `832` next to `887` rendered as
+   `832887`, which is unreadable and looks like one six-digit number. The
+   min-width is now a floor for short files only, and the separator does the
+   work at every length. */
 .ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
   display: inline-block; box-sizing: border-box; overflow: hidden;
   min-width: 1.6em; text-align: right;
 }
+.ngb-diff-view .line-num1 { padding-right: 0.6em; }
+.ngb-diff-view .line-num2 { padding-right: 0.35em; }
 .ngb-diff-view .d2h-code-linenumber .d2h-code-line-prefix {
   display: inline-block; width: 1em; text-align: center; color: var(--text-muted);
 }
@@ -531,30 +562,75 @@
    correct one, and only the content span should ever preserve spacing. */
 /* One hunk's controls, inside its @@ header row so they scroll with the hunk
    and can never cover a line of the diff. Interface font, not monospace: these
-   are buttons, not code. */
+   are buttons, not code.
+
+   Everything is packed to the START of the row. Pushing the mode toggle to the
+   far end with `margin-left: auto` only worked in the wrapped layout: without
+   wrapping the table is as wide as the longest line of code, so "the far end"
+   sat somewhere off the right of the horizontal scroller and the toggle could
+   not be reached at all. */
 .ngb-hunk-bar {
   display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: flex-start;
   gap: var(--size-4-1);
   padding: var(--size-4-1) 0.5em var(--size-4-2);
   font-family: var(--font-interface);
 }
+/* Explicit button chrome. These sit on the @@ row's own background, which is
+   the pane background, so a button styled only by its padding read as a label
+   with nothing to tap. */
 .ngb-hunk-btn {
   font-size: var(--font-ui-smaller);
   padding: var(--size-4-1) var(--size-4-2);
   height: auto; min-height: 0;
+  display: inline-flex; align-items: center; gap: var(--size-2-2);
+  background-color: var(--interactive-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  box-shadow: var(--shadow-s);
+  color: var(--text-normal);
 }
-.ngb-hunk-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* The mode toggle sits after the actions and is pushed to the far end, so the
-   thing that changes what those buttons do is never mistaken for one of them. */
-.ngb-hunk-pick-toggle { margin-left: auto; display: inline-flex; align-items: center; gap: var(--size-4-1); }
+.ngb-hunk-btn:hover { background-color: var(--interactive-hover); }
+.ngb-hunk-btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; }
+.ngb-hunk-btn-icon { display: inline-flex; align-items: center; }
+.ngb-hunk-btn-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
 .ngb-hunk-pick-toggle span { font-size: var(--font-ui-smaller); }
+/* Which lines of the file this hunk is. A label, not a control: no chrome, and
+   it never competes with the buttons beside it for a tap. */
+.ngb-hunk-range {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  user-select: none;
+}
+/* A rule between hunks, with half the air on each side of it.
+   Without any separation the last line of one hunk and the @@ row of the next
+   sit flush together and the diff reads as one continuous stretch of file. The
+   air alone was not enough on a phone, so the boundary is drawn.
+   The border goes on BOTH cells of the header row, gutter included, so the line
+   crosses the whole table instead of stopping where the numbers end.
+   On the FIRST hunk it would be a rule under the pane header and nothing else,
+   hence the sibling combinator. */
+.ngb-diff-view tr.ngb-hunk-end > td { padding-bottom: 0.7em; }
+.ngb-diff-view tr + tr.ngb-hunk-start > td {
+  padding-top: 0.7em;
+  border-top: 1px solid var(--background-modifier-border);
+}
 
 /* Line checkboxes, first in the sticky gutter: the left edge is the only part
    of a wide diff reachable on a phone without scrolling sideways. Sized against
-   the line height so a row does not grow taller in picking mode. */
+   the line height so a row does not grow taller in picking mode.
+
+   `float: left` is what puts them in a COLUMN. The gutter is right-aligned, so
+   in normal flow the checkbox is pushed rightwards by whatever the numbers
+   beside it happen to need: an insertion (one number) and a context line (two)
+   put their checkboxes at different distances from the left edge, and a column
+   of ticks zig-zagged. Floating takes the checkbox out of that flow and pins it
+   to the cell's left edge, the same place on every row, which is also the
+   easiest place to hit with a thumb. */
 .ngb-diff-view .ngb-line-pick {
+  float: left;
   margin: 0 0.25em 0 0;
-  vertical-align: middle;
   width: 1em; height: 1em;
   flex: 0 0 auto;
 }
@@ -616,6 +692,19 @@
   display: block; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%;
 }
 
+/* Whole-file preview (File at commit). The diff pane's table and classes, with
+   one number column instead of two, always wrapped, and scrolling inside the
+   modal rather than growing it. No bottom tail: a modal has no gesture bar or
+   floating toolbar over its lower edge. */
+.ngb-preview-view {
+  padding: 0; padding-bottom: 0;
+  max-height: 60vh; overflow-y: auto; overflow-x: hidden;
+  margin-top: var(--size-4-2);
+  border: 1px solid var(--background-modifier-border); border-radius: 3px;
+}
+.ngb-preview-view .line-num2, .ngb-preview-view .d2h-code-line-prefix { display: none; }
+.ngb-preview-view .d2h-cntx { background-color: transparent; }
+
 /* Invisible characters (settings toggle): the glyphs are inserted by a DOM
    pass over the rendered diff (spaces -> ·, tabs -> →, CR -> ␍), wrapped in
    this class so they stay visually secondary. */
@@ -634,11 +723,21 @@
    glyph in the gutter so they can never be misread as wrapped continuations. */
 /* Vertical scrolling only: nothing here may push the pane sideways, whatever
    width it is opened at. */
-.ngb-conflict-view { padding: var(--size-4-2); overflow-y: auto; overflow-x: hidden; }
+.ngb-conflict-view {
+  padding: var(--size-4-2);
+  padding-bottom: var(--ngb-scroll-tail);
+  overflow-y: auto; overflow-x: hidden;
+}
 .ngb-conf-list, .ngb-conf-row { max-width: 100%; }
 .ngb-conflict-view {
   --ngb-conf-ours-bg: rgba(8, 185, 78, 0.12);
   --ngb-conf-theirs-bg: rgba(8, 109, 221, 0.12);
+  /* The diff pane's intra-line highlights, repeated here so the conflict pane
+     has them without depending on a diff pane being open. Overridden inline by
+     the custom-colour setting, which writes the same two names. */
+  --ngb-diff-del-hl: #AA1414;
+  --ngb-diff-del-hl-fg: #ffffff;
+  --ngb-diff-ins-hl: rgba(35, 192, 35, 0.31);
 }
 .ngb-conf-list {
   font-family: var(--font-monospace); font-size: var(--font-smaller);
@@ -646,12 +745,34 @@
   margin-top: var(--size-4-2);
 }
 .ngb-conf-row { display: flex; align-items: flex-start; }
+/* One line height of air above every conflict block after the first, the same
+   separation the diff pane gives a hunk and for the same reason: without it the
+   ordinary file lines before a block and the block itself run together. */
+.ngb-conf-row + .ngb-conf-block-start { margin-top: 1.4em; }
 .ngb-conf-num {
   flex: 0 0 3em; text-align: right; padding-right: 0.5em;
   color: var(--text-faint); user-select: none;
   border-right: 1px solid var(--background-modifier-border);
 }
 .ngb-conf-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-word; padding-left: 0.5em; min-width: 0; }
+/* What differs between the local and the remote line, highlighted the same way
+   the diff pane highlights it. The default `<del>`/`<ins>` rendering is a
+   strikethrough and an underline, which say "something here" without saying
+   what, and on a wrapped Cyrillic paragraph a thin underline is easy to miss
+   entirely. The colours are the diff pane's own, so one file reads the same
+   way in both panes. */
+.ngb-conflict-view .ngb-conf-text del {
+  background-color: var(--ngb-diff-del-hl);
+  color: var(--ngb-diff-del-hl-fg);
+}
+.ngb-conflict-view .ngb-conf-text ins {
+  background-color: var(--ngb-diff-ins-hl);
+}
+.ngb-conflict-view .ngb-conf-text del,
+.ngb-conflict-view .ngb-conf-text ins {
+  border-radius: 0.2em;
+  text-decoration: none;
+}
 .ngb-conf-ours { background: var(--ngb-conf-ours-bg); }
 .ngb-conf-theirs { background: var(--ngb-conf-theirs-bg); }
 .ngb-conf-base .ngb-conf-text { color: var(--text-faint); }
@@ -682,10 +803,13 @@
   padding: 0 var(--size-2-3); border-radius: var(--radius-s);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
+/* The side is carried by the coloured edge of the chrome row, not by a tint
+   behind the label. Two tinted labels on a row that already has its own
+   background, above a block that already has that side's tint, was the third
+   place the same fact was being stated, and the one that made the label itself
+   hardest to read. */
 .ngb-conf-ours-head { border-left: 3px solid var(--color-green, #08b94e); }
-.ngb-conf-ours-head .ngb-conf-side-chip { background: var(--ngb-conf-ours-bg); }
 .ngb-conf-theirs-head { border-left: 3px solid var(--color-blue, #086ddd); }
-.ngb-conf-theirs-head .ngb-conf-side-chip { background: var(--ngb-conf-theirs-bg); }
 .ngb-conf-keep {
   flex: 0 1 auto; margin-left: auto;
   font-size: var(--font-ui-smaller); padding: 0 var(--size-4-2);
@@ -754,17 +878,10 @@
 .ngb-filehist-body:empty { display: none; }
 .ngb-filehist-diff { padding: 0; }
 
-/* Per-block restore sits in a bar of its own ABOVE the hunk: interface font,
-   own background, full width. Nothing about it reads as diff content. */
-.ngb-hunk-bar-row > td { padding: 0; }
-.ngb-hunk-bar {
-  display: flex; justify-content: flex-end;
-  background: var(--background-secondary-alt);
-  border-top: 1px solid var(--background-modifier-border);
-  padding: 2px var(--size-4-2);
-}
-.ngb-hunk-restore {
-  display: inline-flex; align-items: center; gap: var(--size-2-2);
-  font-family: var(--font-interface); font-size: var(--font-ui-smaller);
-  padding: 0 var(--size-4-2);
-}
+/* Per-block restore now sits in the hunk's own `@@` row, styled as
+   `.ngb-hunk-btn` like every other hunk control, so this panel and the diff
+   pane put the same kind of thing in the same place. What used to be here — a
+   table row of its own above the header, right aligned, with its own
+   background — is gone: the alignment pushed the button off the horizontal
+   scroller on a diff wider than the pane, and the shape differed from the diff
+   pane's for no reason anyone could name. */

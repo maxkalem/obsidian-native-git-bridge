@@ -57,6 +57,16 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
     },
     toggleClass: (c: string, on: boolean) => (on ? el.addClass(c) : el.removeClass(c)),
     hasClass: (c: string) => el.className.split(/\s+/).includes(c),
+    /**
+     * Class selectors only, like `querySelectorAll` above, and walking upwards
+     * instead. Enough for `sizeGutter`, which asks a node inside the pane which
+     * pane it is in.
+     */
+    closest: (sel: string) => {
+      const cls = sel.trim().replace(/^\./, "");
+      for (let n: Any = el; n; n = n.parent) if (n.hasClass?.(cls)) return n;
+      return null;
+    },
     setText: (t: unknown) => {
       el.textContent = String(t ?? "");
       return el;
@@ -242,6 +252,15 @@ export class ItemView {
     return Promise.resolve();
   }
   onClose(): Promise<void> {
+    return Promise.resolve();
+  }
+  /**
+   * Obsidian persists the state and returns; the panes call it through `super`
+   * after doing their own work. A no-op here is enough to let a test drive a
+   * pane through its REAL `setState`, which is where "the pane was pointed at
+   * another file" is decided.
+   */
+  setState(): Promise<void> {
     return Promise.resolve();
   }
   registerEvent(): void {}

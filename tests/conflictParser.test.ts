@@ -109,9 +109,11 @@ describe("resolveBlock", () => {
 });
 
 describe("shortRefLabel (button naming: who the conflict is with)", () => {
-  it("abbreviates bare commit hashes to 8 chars", async () => {
+  it("abbreviates bare commit hashes to 8 chars, with an ellipsis", async () => {
+    // The ellipsis is what stops a shortened hash reading as a short ref that
+    // happens to be hexadecimal.
     const { shortRefLabel } = await import("../src/ui/ConflictView");
-    expect(shortRefLabel("812a998bac9fc32c19871710b2a259a107bbe867")).toBe("812a998b");
+    expect(shortRefLabel("812a998bac9fc32c19871710b2a259a107bbe867")).toBe("812a998b…");
   });
   it("keeps branch names, trimming only very long ones", async () => {
     const { shortRefLabel } = await import("../src/ui/ConflictView");

@@ -1366,6 +1366,46 @@ OUT="$(NGB_BASE_URL="$ROOT/half" bash "$ROOT/half/bootstrap.sh" "$ROOT/vault" 2>
 check 'printf %s "$OUT" | grep -q "does not look like a script"' "a truncated or wrong file is refused, not executed"
 
 # ---------------------------------------------------------------------------
+# phase 8b: what the installer says about the profiles already on the device.
+#
+# Profiles accumulate silently. A vault that was moved or deleted leaves its
+# profile behind, and the only symptom is that there are more profiles than
+# repositories — which nothing ever said out loud. The listing is the answer,
+# so it has to keep working.
+#
+# `list_profiles` is lifted out of the real installer rather than copied here:
+# the installer itself refuses to run outside Termux, and a second copy of the
+# code would be free to drift from the one that ships.
+
+echo "# phase 8b: the installer lists every profile and flags the dead ones"
+PROBE_DIR="$ROOT/profprobe"
+mkdir -p "$PROBE_DIR/profiles" "$PROBE_DIR/Alive" "$PROBE_DIR/NotARepo"
+git -C "$PROBE_DIR/Alive" init -q
+for entry in "a:$PROBE_DIR/Alive" "b:$PROBE_DIR/NotARepo" "c:$PROBE_DIR/Gone"; do
+  suffix="${entry%%:*}"; dir="${entry#*:}"
+  printf 'NGB_PROFILE_FORMAT=1\nNGB_PROFILE_ID="p-0000000%s"\nNGB_REPO_DIR="%s"\nNGB_TOKEN="t"\n' \
+    "$suffix" "$dir" > "$PROBE_DIR/profiles/p-0000000$suffix.conf"
+done
+{
+  printf 'say() { printf "%%s\\n" "$*"; }\n'
+  printf 'sayr() { printf "%%s\\n" "$*"; }\n'
+  printf 'profile_value() { sed -n "s/^$2=\\"\\{0,1\\}\\([^\\"]*\\)\\"\\{0,1\\}$/\\1/p" "$1" | head -1; }\n'
+  printf 'PROFILES_DIR="%s/profiles"\n' "$PROBE_DIR"
+  printf 'PROFILE_FILE="%s/profiles/p-0000000b.conf"\n' "$PROBE_DIR"
+  sed -n '/^list_profiles() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh"
+  printf 'list_profiles\n'
+} > "$PROBE_DIR/probe.sh"
+check 'grep -q "^list_profiles() {" "$SCRIPT_DIR/native-git-bridge/termux/install.sh"' "the installer defines list_profiles (the probe below lifts the real one)"
+OUT="$(bash "$PROBE_DIR/probe.sh" 2>&1)"
+check 'printf %s "$OUT" | grep -q "Profiles on this device: 3 (this vault is #2)"' "the total and this vault's position are both reported"
+check 'printf %s "$OUT" | grep -q "p-0000000a  $PROBE_DIR/Alive$"' "a live profile is listed with its directory and nothing else"
+check 'printf %s "$OUT" | grep -q "p-0000000b.*<- this vault"' "the profile just written is marked"
+check 'printf %s "$OUT" | grep -q "p-0000000c.*MISSING (directory is gone)"' "a profile whose vault was deleted is called out"
+check 'printf %s "$OUT" | grep -q "p-0000000b.*NOT A REPOSITORY"' "a directory that is no longer a work tree is called out"
+check 'printf %s "$OUT" | grep -q "rm $PROBE_DIR/profiles/<profile-id>.conf"' "…and the listing says how to remove one, without removing anything itself"
+check '[ "$(ls -1 "$PROBE_DIR"/profiles/*.conf | wc -l)" = "3" ]' "listing the profiles deletes none of them"
+
+# ---------------------------------------------------------------------------
 # phase 9: getting OUT of states the plugin used to be unable to leave.
 #
 # Two dead ends were reported from a real device, and both are here because

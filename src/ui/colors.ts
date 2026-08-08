@@ -61,8 +61,20 @@ export const DIFF_COLOR_VARS = [
   "--ngb-diff-del-hl",
 ] as const;
 
-/** CSS variables the conflict pane owns. */
-export const CONFLICT_COLOR_VARS = ["--ngb-conf-ours-bg", "--ngb-conf-theirs-bg"] as const;
+/**
+ * CSS variables the conflict pane owns.
+ *
+ * The two intra-line highlights are the diff pane's own, deliberately: the
+ * conflict pane compares its local block against its remote one and marks what
+ * differs exactly as the diff pane does, and one file must not be highlighted
+ * in two different colours depending on which pane it is read in.
+ */
+export const CONFLICT_COLOR_VARS = [
+  "--ngb-conf-ours-bg",
+  "--ngb-conf-theirs-bg",
+  "--ngb-diff-del-hl",
+  "--ngb-diff-ins-hl",
+] as const;
 
 export function diffColorVars(set: NgbColorSet): Record<string, string> {
   return {
@@ -77,6 +89,8 @@ export function conflictColorVars(set: NgbColorSet): Record<string, string> {
   return {
     "--ngb-conf-ours-bg": set.conflictLocalBg,
     "--ngb-conf-theirs-bg": set.conflictRemoteBg,
+    "--ngb-diff-del-hl": set.diffDelHl,
+    "--ngb-diff-ins-hl": set.diffAddHl,
   };
 }
 

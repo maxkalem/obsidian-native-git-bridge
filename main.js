@@ -980,8 +980,21 @@ var TextPreviewModal = class extends import_obsidian2.Modal {
     this.titleEl.setText(this.title);
     const c = this.contentEl;
     c.createDiv({ cls: "ngb-settings-note", text: this.meta });
-    const box = c.createDiv({ cls: "ngb-output ngb-output-tall" });
-    box.createEl("pre", { text: this.text });
+    const box = c.createDiv({ cls: "ngb-diff-view ngb-diff-wrap ngb-preview-view" });
+    const tbody = box.createDiv({ cls: "d2h-code-wrapper" }).createEl("table", { cls: "d2h-diff-table" }).createEl("tbody", { cls: "d2h-diff-tbody" });
+    const body = this.text.endsWith("\n") ? this.text.slice(0, -1) : this.text;
+    const lines = body === "" ? [] : body.split("\n");
+    lines.forEach((line, i) => {
+      const tr = tbody.createEl("tr");
+      const gutter = tr.createEl("td", { cls: "d2h-code-linenumber d2h-cntx" });
+      gutter.createDiv({ cls: "line-num1", text: String(i + 1) });
+      const code = tr.createEl("td", { cls: "d2h-cntx" }).createDiv({ cls: "d2h-code-line" });
+      code.createSpan({ cls: "d2h-code-line-ctn", text: line.replace(/\r$/, "") });
+    });
+    box.style.setProperty("--ngb-diff-gutter-w", `${String(lines.length).length + 2}ch`);
+    if (lines.length === 0) {
+      box.createEl("p", { cls: "ngb-settings-note", text: "This version of the file is empty." });
+    }
   }
   onClose() {
     this.contentEl.empty();
@@ -1058,7 +1071,12 @@ var DIFF_COLOR_VARS = [
   "--ngb-diff-del-bg",
   "--ngb-diff-del-hl"
 ];
-var CONFLICT_COLOR_VARS = ["--ngb-conf-ours-bg", "--ngb-conf-theirs-bg"];
+var CONFLICT_COLOR_VARS = [
+  "--ngb-conf-ours-bg",
+  "--ngb-conf-theirs-bg",
+  "--ngb-diff-del-hl",
+  "--ngb-diff-ins-hl"
+];
 function diffColorVars(set) {
   return {
     "--ngb-diff-ins-bg": set.diffAddBg,
@@ -1070,7 +1088,9 @@ function diffColorVars(set) {
 function conflictColorVars(set) {
   return {
     "--ngb-conf-ours-bg": set.conflictLocalBg,
-    "--ngb-conf-theirs-bg": set.conflictRemoteBg
+    "--ngb-conf-theirs-bg": set.conflictRemoteBg,
+    "--ngb-diff-del-hl": set.diffDelHl,
+    "--ngb-diff-ins-hl": set.diffAddHl
   };
 }
 var HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -1358,6 +1378,24 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       (t) => t.setValue(this.plugin.sharedPrefs.showInvisibles).onChange((v) => {
         void (async () => {
           await this.plugin.setSharedPref({ showInvisibles: v });
+        })();
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Compare changed lines by").setDesc(
+      "What gets highlighted inside a line that changed, in the diff pane, the file history and the conflict pane. Words suit prose: 'brown' becoming 'red' is one word replaced. Characters suit paths, identifiers and numbers, where one letter is the whole edit."
+    ).addDropdown(
+      (d) => d.addOption("word", "Words").addOption("char", "Characters").setValue(this.plugin.sharedPrefs.inlineDiffUnit).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({ inlineDiffUnit: v });
+        })();
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Keep line selection when opening another file").setDesc(
+      "The diff pane is reused for every diff. Off: opening another file leaves line-selection mode, so a diff never arrives already in it. On: the mode stays. The ticked lines are dropped either way \u2014 they point at lines of the diff that was on screen."
+    ).addToggle(
+      (t) => t.setValue(this.plugin.sharedPrefs.keepLineSelection).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({ keepLineSelection: v });
         })();
       })
     );
@@ -3467,10 +3505,11 @@ var import_obsidian12 = require("obsidian");
 
 // src/git/inlineDiff.ts
 var INLINE_DIFF_TOKEN_LIMIT = 400;
+var INLINE_DIFF_CHAR_LIMIT = 300;
 function tokenizeLine(line) {
   return line.match(/[\p{L}\p{N}_]+|\s+|[^\p{L}\p{N}_\s]/gu) ?? [];
 }
-function inlineDiff(before, after) {
+function inlineDiff(before, after, unit = "word") {
   if (before === after) {
     return { before: single(before, "same"), after: single(after, "same") };
   }
@@ -3479,6 +3518,27 @@ function inlineDiff(before, after) {
   if (a.length > INLINE_DIFF_TOKEN_LIMIT || b.length > INLINE_DIFF_TOKEN_LIMIT) {
     return { before: single(before, "remove"), after: single(after, "add") };
   }
+  const beforeRuns = new RunBuilder();
+  const afterRuns = new RunBuilder();
+  const emit = (g) => {
+    if (g.removed === g.added) {
+      beforeRuns.push("same", g.removed);
+      afterRuns.push("same", g.added);
+      return;
+    }
+    if (g.removed !== "") beforeRuns.push("remove", g.removed);
+    if (g.added !== "") afterRuns.push("add", g.added);
+  };
+  for (const g of diffGroups(a, b)) {
+    if (unit === "char" && refinable(g)) {
+      for (const fine of diffGroups(characters(g.removed), characters(g.added))) emit(fine);
+    } else {
+      emit(g);
+    }
+  }
+  return { before: beforeRuns.done(), after: afterRuns.done() };
+}
+function diffGroups(a, b) {
   const n = a.length;
   const m = b.length;
   const lcs = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
@@ -3487,27 +3547,63 @@ function inlineDiff(before, after) {
       lcs[i2][j2] = a[i2] === b[j2] ? lcs[i2 + 1][j2 + 1] + 1 : Math.max(lcs[i2 + 1][j2], lcs[i2][j2 + 1]);
     }
   }
-  const beforeRuns = new RunBuilder();
-  const afterRuns = new RunBuilder();
+  const out = [];
+  let shared = "";
+  let removed = "";
+  let added = "";
+  const flushChange = () => {
+    if (removed === "" && added === "") return;
+    out.push({ removed, added });
+    removed = added = "";
+  };
+  const flushShared = () => {
+    if (shared === "") return;
+    out.push({ removed: shared, added: shared });
+    shared = "";
+  };
   let i = 0;
   let j = 0;
   while (i < n && j < m) {
     if (a[i] === b[j]) {
-      beforeRuns.push("same", a[i]);
-      afterRuns.push("same", b[j]);
+      flushChange();
+      shared += a[i];
       i++;
       j++;
     } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
-      beforeRuns.push("remove", a[i]);
+      flushShared();
+      removed += a[i];
       i++;
     } else {
-      afterRuns.push("add", b[j]);
+      flushShared();
+      added += b[j];
       j++;
     }
   }
-  for (; i < n; i++) beforeRuns.push("remove", a[i]);
-  for (; j < m; j++) afterRuns.push("add", b[j]);
-  return { before: beforeRuns.done(), after: afterRuns.done() };
+  flushShared();
+  for (; i < n; i++) removed += a[i];
+  for (; j < m; j++) added += b[j];
+  flushChange();
+  return out;
+}
+function refinable(g) {
+  if (g.removed === "" || g.added === "") return false;
+  return g.removed.length <= INLINE_DIFF_CHAR_LIMIT && g.added.length <= INLINE_DIFF_CHAR_LIMIT;
+}
+function characters(text) {
+  return Array.from(text);
+}
+function pairLineBlocks(before, after, unit = "word") {
+  const out = {
+    before: new Array(before.length).fill(null),
+    after: new Array(after.length).fill(null)
+  };
+  for (let k = 0; k < Math.min(before.length, after.length); k++) {
+    const r = inlineDiff(before[k], after[k], unit);
+    if (!worthHighlighting(r.before)) continue;
+    out.before[k] = r.before;
+    out.after[k] = r.after;
+  }
+  return out;
 }
 function single(text, kind) {
   return text === "" ? [] : [{ text, kind }];
@@ -3531,7 +3627,7 @@ function worthHighlighting(runs) {
 
 // src/git/unifiedDiff.ts
 var HUNK_RE = /^@@+ -(\d+)(?:,\d+)?(?: -\d+(?:,\d+)?)* \+(\d+)(?:,\d+)? @@/;
-function parseUnifiedDiff(diff) {
+function parseUnifiedDiff(diff, unit = "word") {
   const files = [];
   let file = null;
   let hunk = null;
@@ -3592,8 +3688,15 @@ function parseUnifiedDiff(diff) {
       if (newLeft > 0) newLeft--;
     }
   }
-  for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines);
+  for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines, unit);
   return files;
+}
+function hunkLineRange(hunk) {
+  for (const side of ["new", "old"]) {
+    const nums = hunk.lines.map((l) => side === "new" ? l.newNumber : l.oldNumber).filter((n) => n !== null);
+    if (nums.length > 0) return { side, from: Math.min(...nums), to: Math.max(...nums) };
+  }
+  return null;
 }
 function hunkCounts(header) {
   const m = /@@+ -(\d+)(?:,(\d+))?(?: -\d+(?:,\d+)?)* \+(\d+)(?:,(\d+))? @@/.exec(header);
@@ -3603,7 +3706,7 @@ function hunkCounts(header) {
     new: m[4] === void 0 ? 1 : Number(m[4])
   };
 }
-function pairChangedLines(lines) {
+function pairChangedLines(lines, unit) {
   let i = 0;
   while (i < lines.length) {
     if (lines[i].kind !== "delete") {
@@ -3614,17 +3717,23 @@ function pairChangedLines(lines) {
     while (d < lines.length && lines[d].kind === "delete") d++;
     let a = d;
     while (a < lines.length && lines[a].kind === "insert") a++;
-    const dels = d - i;
-    const adds = a - d;
-    for (let k = 0; k < Math.min(dels, adds); k++) {
-      const del = lines[i + k];
-      const ins = lines[d + k];
+    const dels = lines.slice(i, d);
+    const adds = lines.slice(d, a);
+    const runs = pairLineBlocks(
+      dels.map((l) => l.text),
+      adds.map((l) => l.text),
+      unit
+    );
+    for (let k = 0; k < Math.min(dels.length, adds.length); k++) {
+      const del = dels[k];
+      const ins = adds[k];
       del.paired = true;
       ins.paired = true;
-      const r = inlineDiff(del.text, ins.text);
-      if (worthHighlighting(r.before)) {
-        del.runs = r.before;
-        ins.runs = r.after;
+      const b = runs.before[k];
+      const af = runs.after[k];
+      if (b !== null && b !== void 0 && af !== null && af !== void 0) {
+        del.runs = b;
+        ins.runs = af;
       }
     }
     i = a > i ? a : i + 1;
@@ -3716,15 +3825,17 @@ var NBSP = "\xA0";
 function renderUnifiedDiff(parent, diff, opts = {}) {
   const wrapper = parent.createDiv({ cls: "d2h-wrapper" });
   let hunkIndex = 0;
-  for (const file of parseUnifiedDiff(diff)) {
+  for (const file of parseUnifiedDiff(diff, opts.unit)) {
     const fileWrap = wrapper.createDiv({ cls: "d2h-file-wrapper" });
     const table = fileWrap.createDiv({ cls: "d2h-file-diff" }).createDiv({ cls: "d2h-code-wrapper" }).createEl("table", { cls: "d2h-diff-table" });
     const tbody = table.createEl("tbody", { cls: "d2h-diff-tbody" });
     for (const hunk of file.hunks) {
       renderHunkHeader(tbody, hunk.header, hunk, hunkIndex, opts);
       const pickable = new Set(selectableLines(hunk));
+      const last = hunk.lines.length - 1;
       hunk.lines.forEach((line, i) => {
-        renderLine(tbody, line, hunkIndex, i, pickable.has(i) ? opts : {});
+        const tr = renderLine(tbody, line, hunkIndex, i, pickable.has(i) ? opts : {});
+        if (i === last) tr.addClass("ngb-hunk-end");
       });
       hunkIndex++;
     }
@@ -3732,11 +3843,23 @@ function renderUnifiedDiff(parent, diff, opts = {}) {
   return wrapper;
 }
 function renderHunkHeader(tbody, header, hunk, hunkIndex, opts) {
-  const tr = tbody.createEl("tr");
+  const tr = tbody.createEl("tr", { cls: "ngb-hunk-start" });
   tr.createEl("td", { cls: "d2h-code-linenumber d2h-info" });
   const cell = tr.createEl("td", { cls: "d2h-info" });
   cell.createDiv({ cls: "d2h-code-line", text: header });
-  if (opts.hunkBar) opts.hunkBar(cell.createDiv({ cls: "ngb-hunk-bar" }), hunk, hunkIndex);
+  const bar = cell.createDiv({ cls: "ngb-hunk-bar" });
+  if (opts.hunkBar) opts.hunkBar(bar, hunk, hunkIndex);
+  else renderHunkRange(bar, hunk);
+}
+function renderHunkRange(bar, hunk) {
+  const range2 = hunkLineRange(hunk);
+  if (range2 === null) return;
+  const text = range2.from === range2.to ? `${range2.from}` : `${range2.from}-${range2.to}`;
+  const el = bar.createSpan({ cls: "ngb-hunk-range", text });
+  el.setAttribute(
+    "aria-label",
+    range2.side === "new" ? `Lines ${text} of the file` : `Lines ${text} of the previous version`
+  );
 }
 function renderLine(tbody, line, hunkIndex, lineIndex, opts) {
   const kindCls = line.kind === "insert" ? "d2h-ins" : line.kind === "delete" ? "d2h-del" : "d2h-cntx";
@@ -3757,13 +3880,14 @@ function renderLine(tbody, line, hunkIndex, lineIndex, opts) {
   const code = tr.createEl("td", { cls }).createDiv({ cls: "d2h-code-line" });
   const ctn = code.createSpan({ cls: "d2h-code-line-ctn" });
   if (line.runs === void 0) ctn.setText(line.text);
-  else renderRuns(ctn, line.runs, line.kind);
+  else renderInlineRuns(ctn, line.runs, line.kind === "insert" ? "after" : "before");
+  return tr;
 }
-function renderRuns(ctn, runs, kind) {
-  const mark = kind === "insert" ? "add" : "remove";
+function renderInlineRuns(ctn, runs, side) {
+  const mark = side === "after" ? "add" : "remove";
   for (const run of runs) {
     if (run.kind === "same") ctn.appendText(run.text);
-    else if (run.kind === mark) ctn.createEl(kind === "insert" ? "ins" : "del", { text: run.text });
+    else if (run.kind === mark) ctn.createEl(side === "after" ? "ins" : "del", { text: run.text });
   }
 }
 
@@ -3877,7 +4001,7 @@ function gutterWidthCh(root) {
     const t = (el.textContent ?? "").trim();
     if (t.length > digits) digits = t.length;
   }
-  let width = 2 * digits + 4;
+  let width = 2 * digits + 5;
   if (root.querySelector(".ngb-line-pick") !== null) width += 2;
   return width;
 }
@@ -3931,7 +4055,11 @@ var DiffView = class extends import_obsidian12.ItemView {
         to: s.to,
         label: typeof s.label === "string" ? s.label : `${s.from} \u2192 ${s.to}`
       };
-      if (changed) this.overrideKb = null;
+      if (changed) {
+        this.overrideKb = null;
+        if (!this.actions.keepLineSelection()) this.picking = false;
+        this.picked.clear();
+      }
       await this.loadAndRender();
     }
     return super.setState(state, result);
@@ -3985,7 +4113,8 @@ var DiffView = class extends import_obsidian12.ItemView {
     }
     const plans = hunkActionsFor(this.state?.from ?? "", this.state?.to ?? "");
     renderUnifiedDiff(box, res.diff, {
-      hunkBar: plans.length === 0 ? void 0 : (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
+      unit: this.actions.inlineUnit(),
+      hunkBar: (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
       lineCheckbox: this.picking ? (b, hunkIndex, lineIndex) => {
         const key = `${hunkIndex}:${lineIndex}`;
         b.checked = this.picked.has(key);
@@ -4001,12 +4130,17 @@ var DiffView = class extends import_obsidian12.ItemView {
     this.applyDisplayPrefs();
   }
   /**
-   * One hunk's controls: its actions, and the toggle that switches the pane
-   * between whole-hunk and picked-lines.
+   * One hunk's controls: its actions, which lines of the file it is, and the
+   * toggle that switches the pane between whole-hunk and picked-lines.
    *
    * The toggle sits beside the actions rather than in the pane header because it
    * changes what those very buttons do, and a control that changes another
-   * control belongs next to it.
+   * control belongs next to it. It used to be pushed to the far end with
+   * `margin-left: auto`, which worked only in the wrapped layout: without
+   * wrapping the table is as wide as the longest line of code, so "the far end"
+   * was somewhere off the right of the horizontal scroller and the toggle could
+   * not be reached at all. Every control now sits at the start of the row, in
+   * the order it is used.
    */
   renderHunkBar(bar, hunk, hunkIndex, plans) {
     const selected = this.selectionFor(hunk, hunkIndex);
@@ -4021,11 +4155,13 @@ var DiffView = class extends import_obsidian12.ItemView {
         void this.runHunkAction(plan, hunk, hunkIndex);
       });
     }
+    renderHunkRange(bar, hunk);
     if (!supportsLineSelection(this.state?.from ?? "", this.state?.to ?? "")) return;
-    const toggle = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-hunk-pick-toggle" });
-    toggle.setAttribute("aria-label", this.picking ? "Select hunk" : "Select lines");
-    (0, import_obsidian12.setIcon)(toggle, this.picking ? "square" : "list-checks");
-    if (!import_obsidian12.Platform.isPhone) toggle.createSpan({ text: this.picking ? "Select hunk" : "Select lines" });
+    const toggle = bar.createEl("button", { cls: "ngb-hunk-btn ngb-hunk-pick-toggle" });
+    const toggleLabel = this.picking ? "Select hunk" : "Select lines";
+    toggle.setAttribute("aria-label", toggleLabel);
+    (0, import_obsidian12.setIcon)(toggle.createSpan({ cls: "ngb-hunk-btn-icon" }), this.picking ? "square" : "list-checks");
+    if (!import_obsidian12.Platform.isPhone) toggle.createSpan({ text: toggleLabel });
     toggle.addEventListener("click", () => {
       this.picking = !this.picking;
       this.picked.clear();
@@ -4052,9 +4188,10 @@ var DiffView = class extends import_obsidian12.ItemView {
       const hunk = hunks[i];
       if (!hunk) return;
       const empty = !selectionHasChanges(hunk, this.selectionFor(hunk, i));
-      for (const b of Array.from(bar.querySelectorAll(".ngb-hunk-btn"))) {
-        b.disabled = empty;
-      }
+      const actions = Array.from(bar.querySelectorAll(".ngb-hunk-btn")).filter(
+        (b) => !b.hasClass("ngb-hunk-pick-toggle")
+      );
+      for (const b of actions) b.disabled = empty;
     });
   }
   /**
@@ -4353,10 +4490,12 @@ var ConflictView = class extends import_obsidian13.ItemView {
     const list = c.createDiv({ cls: "ngb-conf-list" });
     const rawMarkers = this.actions.markersVisible();
     let lineNo = 1;
-    const row = (num, text, cls) => {
+    const row = (num, text, cls, runs) => {
       const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
       r.createSpan({ cls: "ngb-conf-num", text: num === null ? "" : String(num) });
-      r.createSpan({ cls: "ngb-conf-text", text: text === "" ? " " : text });
+      const body = r.createSpan({ cls: "ngb-conf-text" });
+      if (runs === void 0 || runs === null) body.setText(text === "" ? " " : text);
+      else renderInlineRuns(body, runs, cls.includes("ngb-conf-theirs") ? "after" : "before");
       return r;
     };
     const chromeRow = (num, chip, sideCls, btnLabel, onKeep) => {
@@ -4377,25 +4516,26 @@ var ConflictView = class extends import_obsidian13.ItemView {
       }
       const idx = seg.index;
       const remote = shortRefLabel(seg.theirsLabel);
-      const oursChip = `LOCAL \u2014 yours (${seg.oursLabel || "HEAD"})`;
-      const theirsChip = `REMOTE \u2014 theirs${remote ? ` (${remote})` : ""}`;
-      const keepOursLabel = "Keep local";
-      const keepTheirsLabel = remote ? `Keep remote (${remote})` : "Keep remote";
+      const oursChip = `Local (${seg.oursLabel || "HEAD"})`;
+      const theirsChip = `Remote${remote ? ` (${remote})` : ""}`;
+      const keepOursLabel = "Keep Local";
+      const keepTheirsLabel = "Keep Remote";
       const keepOurs = () => void this.applyResolution(idx, "ours");
       const keepTheirs = () => void this.applyResolution(idx, "theirs");
+      const marks = pairLineBlocks(seg.ours, seg.theirs, this.actions.inlineUnit());
       if (rawMarkers) {
-        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours");
+        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours ngb-conf-block-start");
         chromeRow(null, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
       } else {
-        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head ngb-conf-block-start", keepOursLabel, keepOurs);
       }
-      for (const l of seg.ours) row(lineNo++, l, "ngb-conf-ours");
+      seg.ours.forEach((l, k) => row(lineNo++, l, "ngb-conf-ours", marks.before[k]));
       if (seg.base !== void 0) {
         row(lineNo++, rawMarkers ? "|||||||" : "\u2026\u2026\u2026 common ancestor:", "ngb-conf-base ngb-conf-raw");
         for (const l of seg.base) row(lineNo++, l, "ngb-conf-base");
       }
       row(lineNo++, rawMarkers ? "=======" : "\u2014\u2014\u2014", "ngb-conf-divider ngb-conf-raw");
-      for (const l of seg.theirs) row(lineNo++, l, "ngb-conf-theirs");
+      seg.theirs.forEach((l, k) => row(lineNo++, l, "ngb-conf-theirs", marks.after[k]));
       if (rawMarkers) {
         row(lineNo++, `>>>>>>> ${seg.theirsLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-theirs");
         chromeRow(null, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
@@ -4421,7 +4561,7 @@ var ConflictView = class extends import_obsidian13.ItemView {
 };
 function shortRefLabel(label2) {
   const l = label2.trim();
-  if (/^[0-9a-f]{12,40}$/i.test(l)) return l.slice(0, 8);
+  if (/^[0-9a-f]{12,40}$/i.test(l)) return `${l.slice(0, 8)}\u2026`;
   return l.length > 24 ? `${l.slice(0, 24)}\u2026` : l;
 }
 
@@ -4686,7 +4826,19 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     const hunks = parseHunks(res.diff);
     const pane = body.createDiv({ cls: "ngb-diff-view ngb-filehist-diff" });
     pane.toggleClass("ngb-diff-wrap", this.actions.wrapLines());
-    renderUnifiedDiff(pane, res.diff);
+    renderUnifiedDiff(pane, res.diff, {
+      unit: this.actions.inlineUnit(),
+      hunkBar: (bar, _hunk, i) => {
+        const hunk = hunks[i];
+        if (hunk === void 0) return;
+        const b = bar.createEl("button", { cls: "ngb-hunk-btn" });
+        (0, import_obsidian14.setIcon)(b.createSpan({ cls: "ngb-hunk-btn-icon" }), "rotate-ccw");
+        b.createSpan({ text: "Restore this block" });
+        b.setAttribute("aria-label", `Restore this block from ${e.hash.slice(0, 8)}`);
+        b.addEventListener("click", () => void this.restoreBlock(hunk, e));
+        renderHunkRange(bar, _hunk);
+      }
+    });
     sizeGutter(pane);
     const colors = this.actions.colors();
     for (const name of DIFF_COLOR_VARS) {
@@ -4694,22 +4846,6 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
       else pane.style.removeProperty(name);
     }
     if (this.actions.showInvisibles()) markInvisibles(pane);
-    const files = Array.from(pane.querySelectorAll(".d2h-file-wrapper"));
-    const rows = files.length > 0 ? Array.from(files[0].querySelectorAll("tr")) : [];
-    let hunkIndex = 0;
-    for (const tr of rows) {
-      if (tr.querySelector(".d2h-info") === null) continue;
-      const hunk = hunks[hunkIndex++];
-      if (hunk === void 0) continue;
-      const bar = createDiv({ cls: "ngb-hunk-bar" });
-      const b = bar.createEl("button", { cls: "ngb-hunk-restore" });
-      const bi = b.createSpan({ cls: "ngb-filehist-restore-icon" });
-      (0, import_obsidian14.setIcon)(bi, "rotate-ccw");
-      b.createSpan({ text: "Restore this block" });
-      b.setAttribute("aria-label", `Restore this block from ${e.hash.slice(0, 8)}`);
-      b.addEventListener("click", () => void this.restoreBlock(hunk, e));
-      tr.parentElement?.insertBefore(wrapRow(bar, tr), tr);
-    }
     if (res.truncated) {
       body.createDiv({
         cls: "ngb-warning",
@@ -4751,14 +4887,6 @@ var FileHistoryView = class extends import_obsidian14.ItemView {
     }
   }
 };
-function wrapRow(bar, sibling) {
-  const tr = createEl("tr", { cls: "ngb-hunk-bar-row" });
-  const td = tr.createEl("td");
-  const cols = sibling.children.length || 2;
-  td.setAttribute("colspan", String(cols));
-  td.appendChild(bar);
-  return tr;
-}
 
 // src/bridge/selfCheck.ts
 var LOG_TAIL_BYTES = 4e3;
@@ -4883,6 +5011,8 @@ var DEFAULT_SHARED_PREFS = {
   showRibbonIcon: true,
   wrapDiffLines: false,
   showInvisibles: false,
+  keepLineSelection: false,
+  inlineDiffUnit: "word",
   showConflictMarkers: false,
   treeView: false,
   customColors: false,
@@ -5050,6 +5180,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         }),
         wrapLines: () => this.sharedPrefs.wrapDiffLines,
         showInvisibles: () => this.sharedPrefs.showInvisibles,
+        inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
+        keepLineSelection: () => this.sharedPrefs.keepLineSelection,
         colors: () => this.diffColorVars(),
         progressText: () => this.progressText ?? ""
       })
@@ -5069,6 +5201,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         progressText: () => this.progressText ?? "",
         wrapLines: () => this.sharedPrefs.wrapDiffLines,
         showInvisibles: () => this.sharedPrefs.showInvisibles,
+        inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
         colors: () => this.diffColorVars()
       })
     );
@@ -5082,6 +5215,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         stageFile: (p) => this.cmdStageFile(p),
         markersVisible: () => this.sharedPrefs.showConflictMarkers,
         showInvisibles: () => this.sharedPrefs.showInvisibles,
+        inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
         colors: () => this.conflictColorVars()
       })
     );

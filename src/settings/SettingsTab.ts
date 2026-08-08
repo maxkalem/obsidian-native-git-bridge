@@ -7,6 +7,7 @@ import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { formatSize } from "../git/previousRepos";
+import type { InlineDiffUnit } from "../git/inlineDiff";
 import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
@@ -327,6 +328,38 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.sharedPrefs.showInvisibles).onChange((v) => { void (async () => {
           await this.plugin.setSharedPref({ showInvisibles: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Compare changed lines by")
+      .setDesc(
+        "What gets highlighted inside a line that changed, in the diff pane, " +
+          "the file history and the conflict pane. Words suit prose: 'brown' " +
+          "becoming 'red' is one word replaced. Characters suit paths, " +
+          "identifiers and numbers, where one letter is the whole edit."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("word", "Words")
+          .addOption("char", "Characters")
+          .setValue(this.plugin.sharedPrefs.inlineDiffUnit)
+          .onChange((v) => { void (async () => {
+            await this.plugin.setSharedPref({ inlineDiffUnit: v as InlineDiffUnit });
+          })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Keep line selection when opening another file")
+      .setDesc(
+        "The diff pane is reused for every diff. Off: opening another file " +
+          "leaves line-selection mode, so a diff never arrives already in it. " +
+          "On: the mode stays. The ticked lines are dropped either way — they " +
+          "point at lines of the diff that was on screen."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.keepLineSelection).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ keepLineSelection: v });
         })(); })
       );
 

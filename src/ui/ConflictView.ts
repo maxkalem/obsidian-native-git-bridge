@@ -1,6 +1,8 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import { CONFLICT_COLOR_VARS } from "./colors";
 import { markInvisibles } from "./DiffView";
+import { renderInlineRuns } from "./diffDom";
+import { pairLineBlocks, type InlineDiffUnit, type InlineRun } from "../git/inlineDiff";
 import { parseConflictFile, resolveBlock, type ParsedConflictFile } from "../git/conflictParser";
 
 export const NGB_CONFLICT_VIEW = "native-git-bridge-conflict";
@@ -20,6 +22,8 @@ export interface ConflictViewActions {
   markersVisible(): boolean;
   /** Shared preference: render whitespace glyphs (· → ␍), as in the diff pane. */
   showInvisibles(): boolean;
+  /** Shared preference: compare the two sides by word or by character. */
+  inlineUnit(): InlineDiffUnit;
   /**
    * Shared preference: custom colours as CSS variables, or null while the
    * "custom colours" toggle is off (the theme's own values then apply).
@@ -141,11 +145,21 @@ export class ConflictView extends ItemView {
     const list = c.createDiv({ cls: "ngb-conf-list" });
     const rawMarkers = this.actions.markersVisible();
     let lineNo = 1;
-    /** A physical file line: exactly ONE number per line (wraps continue with an empty gutter). */
-    const row = (num: number | null, text: string, cls: string) => {
+    /**
+     * A physical file line: exactly ONE number per line (wraps continue with an
+     * empty gutter).
+     *
+     * `runs` marks what differs from the line's counterpart on the other side of
+     * the block. The pane already answers "these two blocks disagree"; without
+     * this it does not answer "about what", which on a long block of prose is
+     * the only question the reader actually has.
+     */
+    const row = (num: number | null, text: string, cls: string, runs?: InlineRun[] | null) => {
       const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
       r.createSpan({ cls: "ngb-conf-num", text: num === null ? "" : String(num) });
-      r.createSpan({ cls: "ngb-conf-text", text: text === "" ? " " : text });
+      const body = r.createSpan({ cls: "ngb-conf-text" });
+      if (runs === undefined || runs === null) body.setText(text === "" ? " " : text);
+      else renderInlineRuns(body, runs, cls.includes("ngb-conf-theirs") ? "after" : "before");
       return r;
     };
     /**
@@ -182,26 +196,36 @@ export class ConflictView extends ItemView {
       // incoming side's marker label — a branch name, or the first characters
       // of the merged commit's hash.
       const remote = shortRefLabel(seg.theirsLabel);
-      const oursChip = `LOCAL — yours (${seg.oursLabel || "HEAD"})`;
-      const theirsChip = `REMOTE — theirs${remote ? ` (${remote})` : ""}`;
-      const keepOursLabel = "Keep local";
-      const keepTheirsLabel = remote ? `Keep remote (${remote})` : "Keep remote";
+      const oursChip = `Local (${seg.oursLabel || "HEAD"})`;
+      const theirsChip = `Remote${remote ? ` (${remote})` : ""}`;
+      // The ref belongs in the chip, which truncates, and not in the button.
+      // A button labelled "Keep remote (7a201ba…)" is as wide as the ref it
+      // names, and on a phone it overhung the row and covered the text beside
+      // it. What the button does does not change with the ref.
+      const keepOursLabel = "Keep Local";
+      const keepTheirsLabel = "Keep Remote";
       const keepOurs = () => void this.applyResolution(idx, "ours");
       const keepTheirs = () => void this.applyResolution(idx, "theirs");
+      // The k-th line of "ours" against the k-th line of "theirs", the same
+      // rule the diff pane pairs a run of deletions with a run of insertions
+      // by, and the same function.
+      const marks = pairLineBlocks(seg.ours, seg.theirs, this.actions.inlineUnit());
 
+      // Whichever row opens the block carries the marker the stylesheet puts a
+      // line of air above, so two blocks never read as one.
       if (rawMarkers) {
-        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours");
+        row(lineNo++, `<<<<<<< ${seg.oursLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-ours ngb-conf-block-start");
         chromeRow(null, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
       } else {
-        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head", keepOursLabel, keepOurs);
+        chromeRow(lineNo++, oursChip, "ngb-conf-ours-head ngb-conf-block-start", keepOursLabel, keepOurs);
       }
-      for (const l of seg.ours) row(lineNo++, l, "ngb-conf-ours");
+      seg.ours.forEach((l, k) => row(lineNo++, l, "ngb-conf-ours", marks.before[k]));
       if (seg.base !== undefined) {
         row(lineNo++, rawMarkers ? "|||||||" : "……… common ancestor:", "ngb-conf-base ngb-conf-raw");
         for (const l of seg.base) row(lineNo++, l, "ngb-conf-base");
       }
       row(lineNo++, rawMarkers ? "=======" : "———", "ngb-conf-divider ngb-conf-raw");
-      for (const l of seg.theirs) row(lineNo++, l, "ngb-conf-theirs");
+      seg.theirs.forEach((l, k) => row(lineNo++, l, "ngb-conf-theirs", marks.after[k]));
       if (rawMarkers) {
         row(lineNo++, `>>>>>>> ${seg.theirsLabel}`.trimEnd(), "ngb-conf-raw ngb-conf-theirs");
         chromeRow(null, theirsChip, "ngb-conf-theirs-head", keepTheirsLabel, keepTheirs);
@@ -236,9 +260,12 @@ export class ConflictView extends ItemView {
  * Human identification of the incoming side from the `>>>>>>>` marker label:
  * a bare commit hash is abbreviated to its first 8 characters, a branch/ref
  * name is kept (trimmed if very long), and an empty label stays empty.
+ *
+ * Both abbreviations end in an ellipsis, so a shortened hash cannot be mistaken
+ * for a short ref that happens to be hexadecimal.
  */
 export function shortRefLabel(label: string): string {
   const l = label.trim();
-  if (/^[0-9a-f]{12,40}$/i.test(l)) return l.slice(0, 8);
+  if (/^[0-9a-f]{12,40}$/i.test(l)) return `${l.slice(0, 8)}…`;
   return l.length > 24 ? `${l.slice(0, 24)}…` : l;
 }

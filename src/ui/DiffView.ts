@@ -1,6 +1,7 @@
 import { ItemView, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import { DIFF_COLOR_VARS } from "./colors";
-import { renderUnifiedDiff } from "./diffDom";
+import { renderHunkRange, renderUnifiedDiff } from "./diffDom";
+import type { InlineDiffUnit } from "../git/inlineDiff";
 import { describeDiffBudget, overrideWarning, type DiffBudgetNotice } from "../git/diffBudget";
 import { hunkActionsFor, supportsLineSelection, type HunkActionPlan } from "../git/hunkActions";
 import { buildHunkPatch, selectableLines, selectionHasChanges } from "../git/hunkPatch";
@@ -54,6 +55,13 @@ export interface DiffViewActions {
   wrapLines(): boolean;
   /** Shared preference: render whitespace glyphs (· → ␍). */
   showInvisibles(): boolean;
+  /** Shared preference: compare changed lines by word or by character. */
+  inlineUnit(): InlineDiffUnit;
+  /**
+   * Shared preference: leave line-picking mode on when the pane is pointed at
+   * a different diff. Off (the default) turns it off with every new file.
+   */
+  keepLineSelection(): boolean;
   /**
    * Shared preference: custom colours as CSS variables, or null while the
    * "custom colours" toggle is off (the theme's own values then apply).
@@ -134,8 +142,10 @@ export function gutterWidthCh(root: ParentNode): number {
     const t = (el.textContent ?? "").trim();
     if (t.length > digits) digits = t.length;
   }
-  // two numbers side by side + one column for the prefix + cell padding
-  let width = 2 * digits + 4;
+  // Two numbers side by side + one column for the prefix + cell padding + the
+  // separation between the three, without which three-digit numbers touch and
+  // read as one six-digit number.
+  let width = 2 * digits + 5;
   // Picking mode puts a checkbox first in the same cell. Measured rather than
   // assumed, for the same reason the digits are: the wrapped layout gives this
   // column a fixed width, and a guess that is too small pushes its contents
@@ -202,8 +212,15 @@ export class DiffView extends ItemView {
         label: typeof s.label === "string" ? s.label : `${s.from} → ${s.to}`,
       };
       // The pane is reused for every diff, so an override accepted for one file
-      // must not silently apply to the next.
-      if (changed) this.overrideKb = null;
+      // must not silently apply to the next. Line-picking mode is the same
+      // story and a sharper one: the picks are coordinates into the diff that
+      // was on screen, they mean nothing in another file, and a mode left on
+      // means the next file opens with checkboxes the reader did not ask for.
+      if (changed) {
+        this.overrideKb = null;
+        if (!this.actions.keepLineSelection()) this.picking = false;
+        this.picked.clear();
+      }
       await this.loadAndRender();
     }
     return super.setState(state, result as never);
@@ -277,7 +294,8 @@ export class DiffView extends ItemView {
     }
     const plans = hunkActionsFor(this.state?.from ?? "", this.state?.to ?? "");
     renderUnifiedDiff(box, res.diff, {
-      hunkBar: plans.length === 0 ? undefined : (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
+      unit: this.actions.inlineUnit(),
+      hunkBar: (bar, hunk, i) => this.renderHunkBar(bar, hunk, i, plans),
       lineCheckbox: this.picking
         ? (b, hunkIndex, lineIndex) => {
             const key = `${hunkIndex}:${lineIndex}`;
@@ -299,12 +317,17 @@ export class DiffView extends ItemView {
   }
 
   /**
-   * One hunk's controls: its actions, and the toggle that switches the pane
-   * between whole-hunk and picked-lines.
+   * One hunk's controls: its actions, which lines of the file it is, and the
+   * toggle that switches the pane between whole-hunk and picked-lines.
    *
    * The toggle sits beside the actions rather than in the pane header because it
    * changes what those very buttons do, and a control that changes another
-   * control belongs next to it.
+   * control belongs next to it. It used to be pushed to the far end with
+   * `margin-left: auto`, which worked only in the wrapped layout: without
+   * wrapping the table is as wide as the longest line of code, so "the far end"
+   * was somewhere off the right of the horizontal scroller and the toggle could
+   * not be reached at all. Every control now sits at the start of the row, in
+   * the order it is used.
    */
   private renderHunkBar(
     bar: HTMLElement,
@@ -327,11 +350,15 @@ export class DiffView extends ItemView {
       btn.addEventListener("click", () => { void this.runHunkAction(plan, hunk, hunkIndex); });
     }
 
+    // Directly after the actions: it names what they would act on.
+    renderHunkRange(bar, hunk);
+
     if (!supportsLineSelection(this.state?.from ?? "", this.state?.to ?? "")) return;
-    const toggle = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-hunk-pick-toggle" });
-    toggle.setAttribute("aria-label", this.picking ? "Select hunk" : "Select lines");
-    setIcon(toggle, this.picking ? "square" : "list-checks");
-    if (!Platform.isPhone) toggle.createSpan({ text: this.picking ? "Select hunk" : "Select lines" });
+    const toggle = bar.createEl("button", { cls: "ngb-hunk-btn ngb-hunk-pick-toggle" });
+    const toggleLabel = this.picking ? "Select hunk" : "Select lines";
+    toggle.setAttribute("aria-label", toggleLabel);
+    setIcon(toggle.createSpan({ cls: "ngb-hunk-btn-icon" }), this.picking ? "square" : "list-checks");
+    if (!Platform.isPhone) toggle.createSpan({ text: toggleLabel });
     toggle.addEventListener("click", () => {
       this.picking = !this.picking;
       // Leaving the mode drops the picks: keeping them invisible would mean a
@@ -362,9 +389,13 @@ export class DiffView extends ItemView {
       const hunk = hunks[i];
       if (!hunk) return;
       const empty = !selectionHasChanges(hunk, this.selectionFor(hunk, i));
-      for (const b of Array.from(bar.querySelectorAll<HTMLButtonElement>(".ngb-hunk-btn"))) {
-        b.disabled = empty;
-      }
+      // The ACTIONS only. The mode toggle carries the same class so it looks
+      // like its neighbours, and disabling it with them was a trap: unticking
+      // the last line left the user in picking mode with no way back out of it.
+      const actions = Array.from(bar.querySelectorAll<HTMLButtonElement>(".ngb-hunk-btn")).filter(
+        (b) => !b.hasClass("ngb-hunk-pick-toggle")
+      );
+      for (const b of actions) b.disabled = empty;
     });
   }
 

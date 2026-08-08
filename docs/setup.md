@@ -98,6 +98,8 @@ An existing single-vault setup is migrated automatically the first time the new 
 
 If you move a vault to another folder, the runner finds it again by the marker it left in the runtime folder and keeps the profile. If a vault is deleted, its profile stays behind and is reported as broken; it is never re-pointed at some other repository.
 
+Because a deleted vault leaves its profile behind, profiles can outnumber the repositories actually on the device, and nothing in the vault would show that. The installer therefore ends by listing every profile it can see — how many there are, which one belongs to the vault you just installed for, and, for each, the directory it points at with a note when that directory is gone or is no longer a git work tree. It deletes nothing: a profile carries that vault's token, so removing one is `rm ~/.config/native-git-bridge/profiles/<id>.conf` and your decision.
+
 ## Step 3c: a vault that is not a repository yet
 
 *Settings → Native Git Bridge → Repository for this vault → **Set up repository***, also in the setup guide and the command palette. It looks at what the vault actually is and offers only the steps that apply:

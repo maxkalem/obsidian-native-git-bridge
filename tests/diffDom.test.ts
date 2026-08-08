@@ -162,10 +162,48 @@ describe("hunk controls and line picking", () => {
 +d
 `;
 
-  it("draws no bar when the caller asks for none", () => {
+  it("draws no controls when the caller asks for none, only the line range", () => {
+    // The bar itself always exists: it carries the range, which is a fact about
+    // the hunk rather than something only an actionable pane needs. What a pane
+    // with no actions must not grow is a button.
     const root = __fakeEl("div", "ngb-diff-view");
     renderUnifiedDiff(root, TWO_HUNKS);
-    expect(__findAllByClass(root, "ngb-hunk-bar")).toHaveLength(0);
+    expect(__findAllByClass(root, "ngb-hunk-bar")).toHaveLength(2);
+    expect(__findAllByClass(root, "ngb-hunk-btn")).toHaveLength(0);
+    // Taken from the lines that actually arrived, not from the `@@` counts:
+    // this fixture's first hunk claims two lines a side and carries one, and
+    // the label has to agree with the numbers in the gutter beside it.
+    expect(__findAllByClass(root, "ngb-hunk-range").map((e: Any) => e.textContent)).toEqual([
+      "1",
+      "9-10",
+    ]);
+  });
+
+  it("names the OLD side when a hunk only deletes", () => {
+    // A pure deletion has no lines on the new side, so there is no range there
+    // to report; saying nothing would leave the one hunk that needs explaining
+    // unlabelled.
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, "+++ b/f.md\n@@ -4,2 +3,0 @@\n-gone\n-also gone\n");
+    expect(__findAllByClass(root, "ngb-hunk-range").map((e: Any) => e.textContent)).toEqual(["4-5"]);
+  });
+
+  it("marks both ends of every hunk so the stylesheet can separate them", () => {
+    // Half the air below the closing row, half above the next header, and the
+    // rule between the two. A gap belonging entirely to one side reads as
+    // attached to it, and the rule has to cross the number gutter as well —
+    // which needs a class on the row, not on the code cell.
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS);
+    expect(__findAllByClass(root, "ngb-hunk-start")).toHaveLength(2);
+    expect(__findAllByClass(root, "ngb-hunk-end")).toHaveLength(2);
+  });
+
+  it("puts the closing marker on the LAST line of each hunk", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS);
+    const ends = __findAllByClass(root, "ngb-hunk-end");
+    expect(ends.map((tr: Any) => __textOf(tr)).map((t: string) => t.trim().endsWith("b") || t.trim().endsWith("d"))).toEqual([true, true]);
   });
 
   it("puts one bar per hunk, inside that hunk's header row", () => {

@@ -460,7 +460,19 @@ export class StatusModal extends Modal {
   }
 }
 
-/** Plain-text preview of a file version (mono, scrollable). */
+/**
+ * Read-only preview of one file version, numbered and wrapped.
+ *
+ * Rendered with the diff pane's own table and class names rather than a `pre`:
+ * this answers a question about the same file the diff pane answers questions
+ * about, and two monospaced views of one file that number their lines
+ * differently — or, as here, one that numbers them and one that does not — make
+ * the reader translate between them.
+ *
+ * Wrapping is not optional here, unlike in the diff pane. There is nothing to
+ * align against on a second side, so horizontal scrolling would only hide text
+ * inside a modal that cannot be widened.
+ */
 export class TextPreviewModal extends Modal {
   constructor(
     app: App,
@@ -476,8 +488,30 @@ export class TextPreviewModal extends Modal {
     this.titleEl.setText(this.title);
     const c = this.contentEl;
     c.createDiv({ cls: "ngb-settings-note", text: this.meta });
-    const box = c.createDiv({ cls: "ngb-output ngb-output-tall" });
-    box.createEl("pre", { text: this.text });
+    const box = c.createDiv({ cls: "ngb-diff-view ngb-diff-wrap ngb-preview-view" });
+    const tbody = box
+      .createDiv({ cls: "d2h-code-wrapper" })
+      .createEl("table", { cls: "d2h-diff-table" })
+      .createEl("tbody", { cls: "d2h-diff-tbody" });
+    // A file that ends with a newline does not have an extra empty last line;
+    // the newline terminates the line before it. Numbering one anyway would
+    // claim the file is a line longer than it is.
+    const body = this.text.endsWith("\n") ? this.text.slice(0, -1) : this.text;
+    const lines = body === "" ? [] : body.split("\n");
+    lines.forEach((line, i) => {
+      const tr = tbody.createEl("tr");
+      const gutter = tr.createEl("td", { cls: "d2h-code-linenumber d2h-cntx" });
+      gutter.createDiv({ cls: "line-num1", text: String(i + 1) });
+      const code = tr.createEl("td", { cls: "d2h-cntx" }).createDiv({ cls: "d2h-code-line" });
+      code.createSpan({ cls: "d2h-code-line-ctn", text: line.replace(/\r$/, "") });
+    });
+    // The gutter width is measured from the numbers, exactly as the diff pane
+    // measures it: `table-layout: fixed` needs an explicit width on this
+    // column, and a guess too small pushes the numbers past the cell border.
+    box.style.setProperty("--ngb-diff-gutter-w", `${String(lines.length).length + 2}ch`);
+    if (lines.length === 0) {
+      box.createEl("p", { cls: "ngb-settings-note", text: "This version of the file is empty." });
+    }
   }
 
   onClose(): void {

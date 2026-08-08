@@ -265,9 +265,54 @@ NGB_RUNTIME_DIR="$RUNTIME_DIR"
 NGB_TOKEN="$TOKEN"
 CONF
 chmod 600 "$PROFILE_FILE"
-OTHER_COUNT=$(( $(ls -1 "$PROFILES_DIR"/*.conf 2>/dev/null | wc -l) - 1 ))
 say "-- Runner installed to $CONF_DIR/runner.sh (profile chmod 600)."
-[ "$OTHER_COUNT" -gt 0 ] && say "-- $OTHER_COUNT other vault(s) stay paired; one runner drains them all."
+
+# Every profile on the device, numbered, with the one just written marked.
+#
+# A bare count answers "how many" but not "which of them are still real", and
+# the failure this exists to catch is accumulation: a vault that was moved or
+# deleted leaves a profile behind, and the only visible symptom is that the
+# number of profiles quietly exceeds the number of repositories on the phone.
+# Naming each directory, and saying which no longer holds a repository, turns
+# that into something the reader can act on. Nothing is deleted here: a profile
+# carries the vault's token, and removing one is the user's decision.
+list_profiles() {
+  total=0
+  for f in "$PROFILES_DIR"/*.conf; do
+    [ -f "$f" ] || continue
+    total=$(( total + 1 ))
+  done
+  [ "$total" -gt 0 ] || return 0
+  n=0
+  mine=0
+  for f in "$PROFILES_DIR"/*.conf; do
+    [ -f "$f" ] || continue
+    n=$(( n + 1 ))
+    [ "$f" = "$PROFILE_FILE" ] && mine="$n"
+  done
+  say ""
+  say "== Profiles on this device: $total (this vault is #$mine) =="
+  n=0
+  for f in "$PROFILES_DIR"/*.conf; do
+    [ -f "$f" ] || continue
+    n=$(( n + 1 ))
+    pid="$(profile_value "$f" NGB_PROFILE_ID)"
+    dir="$(profile_value "$f" NGB_REPO_DIR)"
+    mark=""
+    [ "$f" = "$PROFILE_FILE" ] && mark="  <- this vault"
+    state=""
+    if [ ! -d "$dir" ]; then
+      state="  MISSING (directory is gone)"
+    elif ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
+      state="  NOT A REPOSITORY (no git work tree there)"
+    fi
+    sayr "  $n. ${pid:-<unreadable>}  ${dir:-<unreadable>}$state$mark"
+  done
+  say "One runner drains all of them. A profile you no longer want is one file:"
+  sayr "  rm $PROFILES_DIR/<profile-id>.conf"
+  say ""
+}
+list_profiles
 
 # 5b. Nested vaults: a vault opened INSIDE another vault's repository is its own
 # repository, and the outer one would otherwise offer the inner working tree for

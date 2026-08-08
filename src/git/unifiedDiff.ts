@@ -10,7 +10,7 @@
  * git implementation, no templating, nothing that builds markup.
  */
 
-import { inlineDiff, worthHighlighting, type InlineRun } from "./inlineDiff";
+import { pairLineBlocks, type InlineDiffUnit, type InlineRun } from "./inlineDiff";
 
 export type DiffLineKind = "context" | "insert" | "delete";
 
@@ -66,7 +66,7 @@ const HUNK_RE = /^@@+ -(\d+)(?:,\d+)?(?: -\d+(?:,\d+)?)* \+(\d+)(?:,\d+)? @@/;
  * and `git diff` without a pathspec both produce that, even though the plugin
  * currently asks for one path at a time.
  */
-export function parseUnifiedDiff(diff: string): DiffFile[] {
+export function parseUnifiedDiff(diff: string, unit: InlineDiffUnit = "word"): DiffFile[] {
   const files: DiffFile[] = [];
   let file: DiffFile | null = null;
   let hunk: DiffHunk | null = null;
@@ -162,8 +162,31 @@ export function parseUnifiedDiff(diff: string): DiffFile[] {
     // guessed at.
   }
 
-  for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines);
+  for (const f of files) for (const h of f.hunks) pairChangedLines(h.lines, unit);
   return files;
+}
+
+/**
+ * The span of file lines a hunk covers, as `first-last`, for the label beside
+ * its controls.
+ *
+ * Taken from the rendered lines rather than from the `@@` header's counts: the
+ * runner may cut a diff at a hunk boundary but nothing guarantees the counts
+ * describe what actually arrived, and the numbers in the gutter are what the
+ * reader is comparing this label against.
+ *
+ * The NEW side is the one shown, because that is the file as it will be. A
+ * hunk that only deletes has no new lines, so the old side answers instead and
+ * the caller says which side it got.
+ */
+export function hunkLineRange(hunk: DiffHunk): { side: "new" | "old"; from: number; to: number } | null {
+  for (const side of ["new", "old"] as const) {
+    const nums = hunk.lines
+      .map((l) => (side === "new" ? l.newNumber : l.oldNumber))
+      .filter((n): n is number => n !== null);
+    if (nums.length > 0) return { side, from: Math.min(...nums), to: Math.max(...nums) };
+  }
+  return null;
 }
 
 /**
@@ -192,12 +215,10 @@ function hunkCounts(header: string): { old: number; new: number } {
  * deletion is compared with the k-th insertion. Leftovers on either side are a
  * plain removal or a plain addition and get no highlighting.
  *
- * Positional pairing is chosen over anything cleverer because it is
- * predictable: the reader can see why two lines are being compared. A
- * similarity search would sometimes pair line 1 with line 4 and leave the
- * reader wondering.
+ * Finding those runs is this function's job; comparing them is
+ * `pairLineBlocks`, which the conflict pane asks the same question of.
  */
-function pairChangedLines(lines: DiffLine[]): void {
+function pairChangedLines(lines: DiffLine[], unit: InlineDiffUnit): void {
   let i = 0;
   while (i < lines.length) {
     if (lines[i]!.kind !== "delete") {
@@ -208,17 +229,23 @@ function pairChangedLines(lines: DiffLine[]): void {
     while (d < lines.length && lines[d]!.kind === "delete") d++;
     let a = d;
     while (a < lines.length && lines[a]!.kind === "insert") a++;
-    const dels = d - i;
-    const adds = a - d;
-    for (let k = 0; k < Math.min(dels, adds); k++) {
-      const del = lines[i + k]!;
-      const ins = lines[d + k]!;
+    const dels = lines.slice(i, d);
+    const adds = lines.slice(d, a);
+    const runs = pairLineBlocks(
+      dels.map((l) => l.text),
+      adds.map((l) => l.text),
+      unit
+    );
+    for (let k = 0; k < Math.min(dels.length, adds.length); k++) {
+      const del = dels[k]!;
+      const ins = adds[k]!;
       del.paired = true;
       ins.paired = true;
-      const r = inlineDiff(del.text, ins.text);
-      if (worthHighlighting(r.before)) {
-        del.runs = r.before;
-        ins.runs = r.after;
+      const b = runs.before[k];
+      const af = runs.after[k];
+      if (b !== null && b !== undefined && af !== null && af !== undefined) {
+        del.runs = b;
+        ins.runs = af;
       }
     }
     i = a > i ? a : i + 1;
