@@ -62,6 +62,19 @@ export class HistoryView extends ItemView {
    * until the panel was closed.
    */
   private waitTicker: number | null = null;
+  /**
+   * Bumped by every `refresh()`. A load carries the epoch it started under, so
+   * a page that arrives after a refresh can tell that it belongs to a list
+   * which no longer exists and drop itself.
+   */
+  private loadEpoch = 0;
+  /**
+   * A refresh asked for while a request was in flight, to be run when that
+   * request answers. Two requests are never in flight at once: the panel has
+   * one operation lock behind it, and a scope change in the branch graph has
+   * to obey the same rule.
+   */
+  private refreshQueued = false;
 
   constructor(leaf: WorkspaceLeaf, private actions: HistoryViewActions) {
     super(leaf);
@@ -84,6 +97,7 @@ export class HistoryView extends ItemView {
 
   /** Reload from the first page (also wired to external refreshes). */
   async refresh(): Promise<void> {
+    this.loadEpoch += 1;
     this.entries = [];
     this.skip = 0;
     this.exhausted = false;
@@ -93,6 +107,13 @@ export class HistoryView extends ItemView {
     // old offset over would drop the user into the middle of a list they asked
     // to rebuild.
     this.savedScroll = 0;
+    if (this.loading) {
+      // A request is already in flight. Racing a second one against it is the
+      // thing to avoid; its answer describes the list this refresh just threw
+      // away, so let it finish, let it discard itself, and reload after it.
+      this.refreshQueued = true;
+      return;
+    }
     await this.loadMore();
   }
 
@@ -190,6 +211,7 @@ export class HistoryView extends ItemView {
 
   private async loadMore(): Promise<void> {
     if (this.loading) return;
+    const epoch = this.loadEpoch;
     this.loading = true;
     this.applyLoadingState();
     if (this.moreBtn) {
@@ -204,6 +226,19 @@ export class HistoryView extends ItemView {
     waiting?.remove();
     this.stopWaitTicker();
     this.loading = false;
+    if (epoch !== this.loadEpoch) {
+      // `refresh()` rebuilt the list while this request was out. The page
+      // describes the old list: appending it would show the state from BEFORE
+      // the refresh as its result, and would advance `skip` by a length that
+      // belongs to a different list. Drop it, and run the refresh that waited.
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        await this.loadMore();
+      } else {
+        this.applyLoadingState();
+      }
+      return;
+    }
     this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;

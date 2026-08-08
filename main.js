@@ -3254,6 +3254,19 @@ var HistoryView = class extends import_obsidian11.ItemView {
      * until the panel was closed.
      */
     this.waitTicker = null;
+    /**
+     * Bumped by every `refresh()`. A load carries the epoch it started under, so
+     * a page that arrives after a refresh can tell that it belongs to a list
+     * which no longer exists and drop itself.
+     */
+    this.loadEpoch = 0;
+    /**
+     * A refresh asked for while a request was in flight, to be run when that
+     * request answers. Two requests are never in flight at once: the panel has
+     * one operation lock behind it, and a scope change in the branch graph has
+     * to obey the same rule.
+     */
+    this.refreshQueued = false;
   }
   getViewType() {
     return NGB_HISTORY_VIEW;
@@ -3270,11 +3283,16 @@ var HistoryView = class extends import_obsidian11.ItemView {
   }
   /** Reload from the first page (also wired to external refreshes). */
   async refresh() {
+    this.loadEpoch += 1;
     this.entries = [];
     this.skip = 0;
     this.exhausted = false;
     this.renderShell();
     this.savedScroll = 0;
+    if (this.loading) {
+      this.refreshQueued = true;
+      return;
+    }
     await this.loadMore();
   }
   /** Redraw from the already-loaded commits (layout toggles; no round trip). */
@@ -3352,6 +3370,7 @@ var HistoryView = class extends import_obsidian11.ItemView {
   }
   async loadMore() {
     if (this.loading) return;
+    const epoch = this.loadEpoch;
     this.loading = true;
     this.applyLoadingState();
     if (this.moreBtn) {
@@ -3364,6 +3383,15 @@ var HistoryView = class extends import_obsidian11.ItemView {
     waiting?.remove();
     this.stopWaitTicker();
     this.loading = false;
+    if (epoch !== this.loadEpoch) {
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        await this.loadMore();
+      } else {
+        this.applyLoadingState();
+      }
+      return;
+    }
     this.applyLoadingState();
     if (this.moreBtn) {
       this.moreBtn.disabled = false;
