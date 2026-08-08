@@ -17,7 +17,8 @@
     "android",
     "sparse-checkout"
   ],
-  "license": "MIT",
+  "author": "maxkalem",
+  "license": "GPL-3.0-only",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "esbuild": "^0.21.5",

@@ -10,9 +10,9 @@
 - isomorphic-git does not honor skip-worktree/sparse-checkout index extensions (`sparse-checkout` is unimplemented there), so letting it touch a native sparse index risks staging mass deletions, which is the failure this project prevents. Hence the Android-side incompatibility warning when both plugins are enabled.
 
 ## kometenstaub/obsidian-version-history-diff
-- [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff), MIT license (attribution required if code reused; we reuse none in Phase 2).
+- [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff), MIT license. Read as a reference only. No code from it is used anywhere in this repository, so its attribution requirement never applied.
 - Integrates with obsidian-git through that plugin's own (private) API; no provider-registration surface for third parties → own views first (SHIPPED: history panel + diff pane), optional upstream adapter PR second.
-- Its rendering approach was adopted for our diff pane: git's unified diff → diff2html (`diffStyle: "char"`, line-by-line) → `sanitizeHTMLToDom`. No code was copied; the diff2html CSS in styles.css carries the MIT attribution and follows their Obsidian-variable adaptation.
+- Its rendering approach was adopted for our diff pane: git's unified diff, rendered line by line with intra-line highlighting. Until 0.6.2 that rendering went through diff2html; 0.6.2 replaced it with `src/git/unifiedDiff.ts`, `src/git/inlineDiff.ts` and `src/ui/diffDom.ts`, which build the nodes directly and left the plugin with no runtime dependencies. No code was ever copied from either project. What is borrowed is presentation: the `d2h-*` class names and the diff rules in styles.css are adapted from diff2html's MIT-licensed stylesheet and carry its notice, and keying those colours to Obsidian's theme variables is an idea this project saw in Version History Diff before doing its own. This repository is GPLv3; MIT material may be redistributed inside it as long as the MIT notice travels with it.
 
 ## Termux
 - RUN_COMMAND intent: requires sender-manifest permission + allow-external-apps; results via PendingIntent (Java only) or `EXTRA_RESULT_DIRECTORY` files (≥ 0.115).

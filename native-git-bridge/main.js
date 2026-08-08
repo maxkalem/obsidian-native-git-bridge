@@ -7691,9 +7691,12 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     new ResultModal(this.app, "Set up Native Git Bridge", lines, { actions }).open();
   }
   /**
-   * Version advice for the three independently updated parts. Until Obsidian
-   * itself offers the update (this plugin is not in the community catalogue
-   * yet), a mismatch can only be reported — never auto-fixed.
+   * Version advice for the three independently updated parts. Obsidian can
+   * only ever offer the plugin half of it, and the plugin is currently
+   * delisted from the community catalogue pending the next release, so a
+   * mismatch here can only be reported, never auto-fixed. The runner and the
+   * companion live outside Obsidian and would need a manual step even if the
+   * catalogue listing were live.
    */
   /**
    * True only when the companion actually reported a version older than this

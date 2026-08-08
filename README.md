@@ -22,7 +22,7 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 - an operation strip with progress, a cancel slot, and directional activity animations on fetch, pull and push;
 - optional auto-refresh at a chosen interval.
 
-**Diff panes** rendered by diff2html with character-level, line-by-line highlighting: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. Optional line wrapping, whitespace glyphs, and optional custom colours for the diff and conflict panes (off by default, light and dark configured separately).
+**Diff panes** rendered by the plugin itself, line by line, with word-level highlighting inside a changed line: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. A hunk, or a set of lines picked in the gutter, can be staged, unstaged or discarded on its own. Large diffs are trimmed at a hunk boundary against a configurable budget, and the pane says how much it is showing. Optional line wrapping, whitespace glyphs, and optional custom colours for the diff and conflict panes (off by default, light and dark configured separately).
 
 **History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`), shows the file as it was at that commit, and can restore the whole file or a single block from it. Every route to a diff or a history — status panel, context menu, command palette — opens these panels; there is one surface per question.
 
@@ -146,4 +146,14 @@ bash "<vault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "<vault>"
 
 ## License
 
-MIT. No code was copied from [obsidian-git](https://github.com/Vinzent03/obsidian-git) or [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff) (both MIT); they were read to see what users already expect, and some of their interface conventions are followed here (a history panel whose commits expand into changed files, a diff pane, a go-to-file button on rows). Diff rendering bundles [diff2html](https://github.com/rtfpessoa/diff2html) (MIT), a render-only library; git itself always runs natively in Termux. The diff stylesheet in `styles.css` is adapted from diff2html's MIT-licensed CSS with the Obsidian-variable adaptations pioneered by Version History Diff.
+Copyright (C) 2026 maxkalem.
+
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License, version 3**, as published by the Free Software Foundation. It is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY, without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+GPLv3 is a deliberate choice rather than a default: anyone may use, study, change and redistribute this plugin, and anyone who distributes a changed version has to pass the same freedoms on, with source. Closing the source, or folding this code into something proprietary, is what the licence exists to prevent.
+
+No code was copied from [obsidian-git](https://github.com/Vinzent03/obsidian-git) or [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff). Both were read as references, to see what users already expect, and some of their interface conventions are followed here: a history panel whose commits expand into changed files, a diff pane, a go-to-file button on rows.
+
+Diff rendering used to bundle [diff2html](https://github.com/rtfpessoa/diff2html) and no longer does. 0.6.2 replaced it with this repository's own parser and DOM builder, which left the plugin with no runtime dependencies at all. What remains from it is presentation: the `d2h-*` class names and the diff rules in `styles.css` are adapted from diff2html's MIT-licensed stylesheet, and that MIT notice is kept in `styles.css` beside them. MIT-licensed material may be redistributed inside a GPLv3 work as long as its notice travels with it, which is why the notice is there.
+
+git itself always runs natively in Termux.

@@ -4,6 +4,6 @@
   "version": "0.6.2",
   "minAppVersion": "1.13.4",
   "description": "Android only. Run Git on your vault through the real Git binary in Termux, with sparse-checkout safety. No background services, no servers, no open ports.",
-  "author": "Native Git Bridge contributors",
+  "author": "maxkalem",
   "isDesktopOnly": false
 }

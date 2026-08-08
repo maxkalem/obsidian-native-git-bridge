@@ -107,7 +107,7 @@ Where it could surprise someone, we say so rather than hide it: after a clone th
 - Credentials never touch the plugin: authentication lives entirely in Termux (PAT via credential helper, SSH, or GitHub's OAuth device flow through `gh`). Remote URLs are redacted in logs and results; the pairing token is never logged.
 - No force push, no root, no destructive auto-repair. Restores, discards and merge aborts require explicit typed confirmation.
 - Before any commit or push, protected sparse paths must show no Git changes, or the operation is blocked. Staging uses pathspec excludes, so protected paths cannot enter the index through the bridge at all.
-- The diff pane renders git's unified diff through the bundled **diff2html** library (MIT, render-only: no JavaScript Git implementation is involved), and its HTML output is inserted exclusively via Obsidian's `sanitizeHTMLToDom`, never raw `innerHTML`.
+- The diff pane parses git's unified diff and builds the DOM node by node (`src/git/unifiedDiff.ts`, `src/ui/diffDom.ts`). No JavaScript Git implementation is involved, no HTML string is assembled, and no `innerHTML` is written. This replaced the bundled diff2html in 0.6.2 and left the plugin with no runtime dependencies at all.
 
 Full model, including accepted residual risks and a dated review log: [threat-model.md](threat-model.md).
 
@@ -120,3 +120,11 @@ What is **not** machine-verified: there is no Android device or emulator in CI. 
 ## Distribution of the companion APK
 
 Built and signed by the release workflow and attached to each GitHub release as `git-bridge-companion-<version>.apk`, carrying the same version number as the plugin. It is signed with a private release key (not a shared test key), so Android update-installs it over the previous version and a forged "update" cannot be installed on top of it.
+
+## Licensing
+
+The plugin, the Termux runner and the companion app are one work under the **GNU General Public License, version 3** (`LICENSE`, SPDX `GPL-3.0-only`). The choice is deliberate: the point of this project is a Git frontend that a user can inspect, and a proprietary derivative of it would be exactly the thing it exists to avoid.
+
+`package.json` declares no runtime dependencies, so nothing third-party is bundled into `main.js`. One piece of third-party material is redistributed and is marked as such: the diff rules in `styles.css` and the `d2h-*` class names are adapted from [diff2html](https://github.com/rtfpessoa/diff2html)'s MIT-licensed stylesheet, and the MIT notice sits beside them in the file. MIT material may be redistributed inside a GPLv3 work provided its notice travels with it, which is why the notice is kept rather than folded away. The library itself was removed in 0.6.2.
+
+No code was taken from [obsidian-git](https://github.com/Vinzent03/obsidian-git) or [Version History Diff](https://github.com/kometenstaub/obsidian-version-history-diff). Both were read as references while deciding what users expect from a Git panel; the reasoning is recorded in [research-notes.md](research-notes.md) and [ADR-001-android-invocation.md](ADR-001-android-invocation.md).
