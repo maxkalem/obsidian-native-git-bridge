@@ -122,6 +122,8 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
+var ROWS_PER_GROUP_CHOICES = [10, 20, 30, 50, 100, 250, 1e3];
+var DEFAULT_ROWS_PER_GROUP_SETTING = 30;
 var DIFF_LIMIT_CHOICES_KB = [50, 100, 200, 500, 1024];
 var DEFAULT_DIFF_LIMIT_KB = 100;
 var DIFF_LIMIT_ABSOLUTE_MAX_KB = 4096;
@@ -150,6 +152,8 @@ var DEFAULT_DEVICE_SETTINGS = {
   menuGitignore: true,
   menuSparse: true,
   menuExclude: true,
+  deleteUntrackedPermanently: false,
+  rowsPerGroup: DEFAULT_ROWS_PER_GROUP_SETTING,
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
@@ -1342,6 +1346,27 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
         })();
       })
     );
+    new import_obsidian4.Setting(containerEl).setName("Rows shown per group").setDesc(
+      "How many rows the status panel draws in each group before it offers the rest. Every group can be long at once, and a folder of a few thousand new files arrives as one Git entry that expands into a row each. The group's count always states the true total. Device-local: what it costs is render time here."
+    ).addDropdown((d) => {
+      for (const n of ROWS_PER_GROUP_CHOICES) d.addOption(String(n), String(n));
+      d.setValue(String(s.rowsPerGroup)).onChange((v) => {
+        void (async () => {
+          const n = Number(v);
+          if (!Number.isFinite(n) || n <= 0) return;
+          await this.plugin.updateDeviceSettings({ rowsPerGroup: n });
+        })();
+      });
+    });
+    new import_obsidian4.Setting(containerEl).setName("Delete new files permanently").setDesc(
+      "Off: deleting untracked files moves them to Obsidian's trash (.trash in the vault), which is the only way back for a file Git never recorded. On: they are deleted from disk. Device-local, because what it decides is whether .trash grows on this device."
+    ).addToggle(
+      (t) => t.setValue(s.deleteUntrackedPermanently).onChange((v) => {
+        void (async () => {
+          await this.plugin.updateDeviceSettings({ deleteUntrackedPermanently: v });
+        })();
+      })
+    );
     new import_obsidian4.Setting(containerEl).setName("Notifications").setHeading();
     new import_obsidian4.Setting(containerEl).setName("Show a result window on success").setDesc(
       "Off: successful operations only update the status panel (and the log). Failures, conflicts and safety blocks are always shown as a window."
@@ -1999,6 +2024,18 @@ var CompanionIntentTransport = class {
   }
 };
 
+// src/git/untrackedTargets.ts
+function untrackedTargets(untracked, scope) {
+  if (scope === null || scope === "" || scope === ".") return [...untracked];
+  const bare = scope.endsWith("/") ? scope.slice(0, -1) : scope;
+  if (bare === "") return [...untracked];
+  const under = `${bare}/`;
+  const at = untracked.filter((u) => u === bare || u === under || u.startsWith(under));
+  if (at.length > 0) return at;
+  if (untracked.some((u) => u.endsWith("/") && bare.startsWith(u))) return [bare];
+  return [];
+}
+
 // src/ops/OperationLock.ts
 var OperationLock = class {
   constructor(onChange) {
@@ -2626,14 +2663,27 @@ function actionSlots(scope, group, hasItems = true) {
       return [
         none,
         { icon: "plus", tooltip: `Stage the new files${where}`, action: "stage" },
-        // Trashing every new file in the whole group in one tap is deliberately
-        // not offered; on a folder it is, because the blast radius is visible.
-        scope === "folder" ? { icon: "trash", tooltip: "Move the new files in this folder to Obsidian's trash", action: "discard", warn: true } : none
+        // `trash`, not `undo-2`: there is nothing to revert to. The icon says
+        // which of the two things a control does, at every scope — revert to
+        // what is committed, or delete something git never had. The wording
+        // stays neutral about the trash because a device setting decides
+        // whether the deletion is reversible; the confirmation says which.
+        { icon: "trash", tooltip: `Delete the new files${where}`, action: "discard", warn: true }
       ];
     default:
       return [none, none, none];
   }
 }
+function groupFileCount(items, children) {
+  let n = 0;
+  for (const it of items) {
+    const kids = it.path.endsWith("/") ? children?.[it.path] : void 0;
+    n += kids !== void 0 && kids.length > 0 ? kids.length : 1;
+  }
+  return n;
+}
+var DEFAULT_ROWS_PER_GROUP = 30;
+var GROUP_PAGES_CEILING = 10;
 var CHANGE_LABEL = {
   M: "modified",
   A: "added",
@@ -2663,6 +2713,21 @@ var StatusView = class extends import_obsidian10.ItemView {
      * must show the notes inside it as actionable rows.
      */
     this.collapsedDirs = /* @__PURE__ */ new Set();
+    /**
+     * Rows the user asked to see beyond the budget, per group. Absent means the
+     * plain budget. Not persisted: it is a rendering allowance for this session,
+     * not a preference.
+     */
+    this.groupLimits = /* @__PURE__ */ new Map();
+    /** Rows drawn in the group being rendered right now; reset per group. */
+    this.drawn = 0;
+    /**
+     * Files the user asked to see inside one tree folder, keyed "<group>:<path>"
+     * like `collapsedDirs`. Tree layout budgets per folder so the "more" control
+     * sits under the folder it belongs to; the group ceiling above is what keeps
+     * the total bounded.
+     */
+    this.folderLimits = /* @__PURE__ */ new Map();
     /**
      * The scrolling half of the panel. The toolbar, the operation strip and the
      * branch line stay put while this scrolls, so the controls are reachable
@@ -2718,6 +2783,7 @@ var StatusView = class extends import_obsidian10.ItemView {
   }
   async onOpen() {
     this.render();
+    this.actions.syncState();
   }
   onPaneMenu(menu) {
     menu.addItem(
@@ -2786,9 +2852,16 @@ var StatusView = class extends import_obsidian10.ItemView {
     (0, import_obsidian10.setIcon)(histBtn, "history");
     histBtn.addEventListener("click", this.actions.openHistory);
     const head = headEl.createDiv({ cls: "ngb-sv-header" });
-    head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
-    head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
-    if (d) {
+    const loaded = d != null && d.statusLoaded !== false;
+    const working = d?.state === "syncing";
+    head.createSpan({
+      cls: `ngb-sv-dot ngb-sv-${loaded ? d.state : working ? "syncing" : "unknown"}`
+    });
+    head.createSpan({
+      cls: "ngb-sv-state",
+      text: loaded ? stateLabel(d.state) : working ? stateLabel("syncing") : "not checked yet"
+    });
+    if (loaded) {
       head.createSpan({
         cls: "ngb-settings-note",
         text: ` ${d.branch ?? "\u2014"} \u2191${d.ahead} \u2193${d.behind}`
@@ -2818,7 +2891,14 @@ var StatusView = class extends import_obsidian10.ItemView {
       false
     );
     if (d.conflicted.length + d.staged.length + d.unstaged.length + d.untracked.length === 0) {
-      body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      if (d.statusLoaded === false) {
+        body.createEl("p", {
+          cls: "ngb-settings-note",
+          text: "No status read yet \u2014 refresh to see the repository."
+        });
+      } else {
+        body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      }
     }
     const foot = body.createDiv({ cls: "ngb-sv-footer" });
     const kv = foot.createDiv({ cls: "ngb-sv-kv" });
@@ -2876,7 +2956,8 @@ var StatusView = class extends import_obsidian10.ItemView {
     for (const s of actionSlots("group", group, items.length > 0)) {
       gslot(s.icon, s.tooltip, s.action ? () => this.actions.groupAction(group, s.action) : void 0, s.warn);
     }
-    renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
+    const total = groupFileCount(items, this.data?.untrackedChildren);
+    renderCountBadge(header, total, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
@@ -2888,17 +2969,107 @@ var StatusView = class extends import_obsidian10.ItemView {
       list.createDiv({ cls: "ngb-sv-empty", text: "Nothing staged yet." });
       return;
     }
+    this.drawn = 0;
     if (this.data?.treeView) {
       this.renderTreeItems(list, group, items);
-      return;
-    }
-    for (const it of items) {
-      this.renderRow(list, group, it, 0);
-      const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : void 0;
-      if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
-        for (const c of children) this.renderRow(list, group, { path: c, code: "?" }, 1);
+    } else {
+      for (const it of items) {
+        if (!this.hasRowBudget(group)) break;
+        this.renderRow(list, group, it, 0);
+        const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : void 0;
+        if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
+          for (const c of children) {
+            if (!this.hasRowBudget(group)) break;
+            this.renderRow(list, group, { path: c, code: "?" }, 1);
+          }
+        }
       }
     }
+    this.renderRowOverflow(list, group, items);
+  }
+  /** One page: the device's row budget. */
+  page() {
+    const n = this.data?.rowsPerGroup ?? DEFAULT_ROWS_PER_GROUP;
+    return n > 0 ? n : DEFAULT_ROWS_PER_GROUP;
+  }
+  /**
+   * How many rows this group may draw in total.
+   *
+   * List layout: one page, because there is no structure to hang a partial
+   * listing on and the group-level row is the whole answer. Tree layout: the
+   * cost ceiling, since the per-folder budget already limits each folder and
+   * this only stops a group with a very large number of folders.
+   */
+  rowLimit(group) {
+    const base = this.page() * (this.data?.treeView ? GROUP_PAGES_CEILING : 1);
+    return this.groupLimits.get(group) ?? base;
+  }
+  /** Files drawn inside one tree folder before it offers the rest. */
+  folderLimit(key) {
+    return this.folderLimits.get(key) ?? this.page();
+  }
+  /**
+   * The files directly inside one tree folder, up to that folder's page, and
+   * the control that adds the next page.
+   *
+   * The control is a row of the file list, indented with the files it belongs
+   * to, because that is where the user is looking when a folder stops short.
+   * `depth` is the folder's own depth; `-1` means the group's root, whose files
+   * sit at depth 0.
+   */
+  renderFolderItems(list, group, key, items, depth) {
+    const limit = this.folderLimit(key);
+    let shown = 0;
+    for (const it of items) {
+      if (shown >= limit) break;
+      if (!this.hasRowBudget(group)) return;
+      this.renderRow(list, group, it, depth + 1);
+      shown += 1;
+    }
+    if (shown >= items.length) return;
+    const rest = items.length - shown;
+    const row = list.createDiv({
+      cls: `ngb-sv-file ngb-sv-more-children ngb-ind-${Math.min(Math.max(depth + 1, 1), 6)}`
+    });
+    row.setText(`${shown}/${items.length} files \u2022 Tap for more`);
+    row.setAttribute(
+      "aria-label",
+      `Showing ${shown} of ${items.length} files here; tap to show ${Math.min(rest, this.page())} more`
+    );
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.folderLimits.set(key, shown + this.page());
+      this.render();
+    });
+  }
+  hasRowBudget(group) {
+    return this.drawn < this.rowLimit(group);
+  }
+  /**
+   * The "N of M shown" row, at the end of the group in BOTH layouts. Tree
+   * layout flattens files into a path tree, so there is no "after this folder"
+   * to hang it under; the same place in both is what keeps the two layouts
+   * answering alike.
+   */
+  renderRowOverflow(list, group, items) {
+    if (this.data?.treeView && this.drawn < this.rowLimit(group)) return;
+    const total = groupFileCount(items, this.data?.untrackedChildren);
+    const shown = this.drawn;
+    if (shown >= total) return;
+    const page = this.data?.rowsPerGroup ?? DEFAULT_ROWS_PER_GROUP;
+    const rest = total - shown;
+    const row = list.createDiv({ cls: "ngb-sv-empty ngb-sv-more-children" });
+    row.setText(`${shown}/${total} rows \u2022 Tap for more`);
+    row.setAttribute(
+      "aria-label",
+      `Showing ${shown} rows of ${total} files in this group; tap to show ${Math.min(rest, page)} more`
+    );
+    row.setAttribute("aria-label", `Show more rows in this group`);
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.groupLimits.set(group, shown + page);
+      this.render();
+    });
   }
   /**
    * Right click (desktop) and long press (touch) on any row or header. The
@@ -2978,10 +3149,14 @@ var StatusView = class extends import_obsidian10.ItemView {
       }
     }
     const tree = buildPathTree(expanded, (i) => i.path);
-    for (const it of tree.rootItems) this.renderRow(list, group, it, 0);
-    for (const f of tree.folders) this.renderFolderNode(list, group, f, 0);
+    this.renderFolderItems(list, group, `${group}:`, tree.rootItems, -1);
+    for (const f of tree.folders) {
+      if (!this.hasRowBudget(group)) return;
+      this.renderFolderNode(list, group, f, 0);
+    }
   }
   renderFolderNode(list, group, node, depth) {
+    this.drawn += 1;
     const rowEl = list.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
     const key = `${group}:${node.path}`;
     const collapsed = this.collapsedDirs.has(key);
@@ -3011,10 +3186,14 @@ var StatusView = class extends import_obsidian10.ItemView {
     }
     renderCountBadge(rowEl, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
-    for (const it of node.items) this.renderRow(list, group, it, depth + 1);
-    for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);
+    this.renderFolderItems(list, group, key, node.items, depth);
+    for (const ch of node.children) {
+      if (!this.hasRowBudget(group)) return;
+      this.renderFolderNode(list, group, ch, depth + 1);
+    }
   }
   renderRow(list, group, it, depth) {
+    this.drawn += 1;
     {
       const rowEl = list.createDiv({
         cls: depth === 0 ? "ngb-sv-file" : `ngb-sv-file ngb-ind-${Math.min(depth, 6)}`
@@ -3083,7 +3262,11 @@ var StatusView = class extends import_obsidian10.ItemView {
       } else {
         act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file" && hit);
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file" && hit);
+      if (group === "untracked") {
+        act("trash", "Delete new file", () => this.actions.discard(it.path, group), true, busy === "discard-file" && hit);
+      } else {
+        act("undo-2", "Discard changes", () => this.actions.discard(it.path, group), true, busy === "discard-file" && hit);
+      }
       const codeEl = rowEl.createSpan({
         cls: `ngb-sv-file-code ngb-code-${it.code}`,
         text: it.code
@@ -3168,7 +3351,9 @@ function buildMenuEntries(scope, f) {
       out.push({
         action: "discard",
         title: scope.group === "untracked" ? `Git: Delete new file${single2 ? "" : "s"}${where}${n}` : `Git: Discard changes${where}${n}`,
-        icon: "undo-2",
+        // `trash` for content git never had, `undo-2` for a revert to the
+        // committed version. The same pairing the panel's buttons use.
+        icon: scope.group === "untracked" ? "trash" : "undo-2",
         danger: true
       });
     }
@@ -5203,7 +5388,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         openConflict: (p, pos) => void this.openConflict(p, pos),
         stage: (p) => void this.cmdStageFile(p),
         unstage: (p) => void this.cmdUnstageFile(p),
-        discard: (p) => this.cmdDiscardFile(p),
+        discard: (p, group) => this.discardPath(p, group),
+        syncState: () => this.pushStatusToView(),
         fileMenu: (p, group, pos) => {
           const menu = new import_obsidian15.Menu();
           this.buildGitMenu(menu, p, group);
@@ -6365,12 +6551,17 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     if (!marker) return;
     const outcome = await this.client.awaitResult(marker.id, 1, void 0);
     if (outcome.kind === "result") {
+      const r = outcome.result;
       this.log.add(
         "info",
         marker.action,
-        `Recovered result for operation ${marker.id} finished while Obsidian was closed (ok=${outcome.result.ok}).`
+        `Recovered result for operation ${marker.id} finished while Obsidian was closed (ok=${r.ok}).`
       );
       await this.client.consume(marker.id);
+      this.absorbStatusData(r.data ?? {});
+      if (!r.ok) {
+        this.renderMutationError(`Native Git: ${marker.action} finished while Obsidian was closed`, r);
+      }
     } else if (isMarkerStale(marker)) {
       this.log.add("warn", marker.action, `Cleared stale operation lock ${marker.id} from a previous session.`);
     } else {
@@ -6533,7 +6724,6 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
     const cancel = new CancelToken();
     this.activeCancel = cancel;
     this.statusBar?.set("syncing");
-    this.pushStatusToView();
     this.log.add("info", action, `Queued request ${req.id}.`);
     void this.openStatusPanel(false);
     const startedAt = Date.now();
@@ -7793,6 +7983,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       runningAction: this.runningAction ?? void 0,
       runningPath: this.runningPath ?? void 0,
       treeView: this.sharedPrefs.treeView,
+      rowsPerGroup: this.deviceSettings.rowsPerGroup,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? void 0,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled"
@@ -7803,7 +7994,13 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         if (this.lastStatus) view.setData(summaryToViewData(this.lastStatus.status, extra, state));
         else
           view.setData({
-            state,
+            // No status has been read, so the empty lists below are "not
+            // asked", not "nothing there", and the panel is told which. It used
+            // to render this as Clean with a working tree clean line and ↑0 ↓0,
+            // which on a device sitting in an unfinished merge was a clean bill
+            // of health for a repository with six conflicts in it.
+            statusLoaded: false,
+            state: this.progressText ? "syncing" : "unknown",
             ahead: 0,
             behind: 0,
             staged: [],
@@ -8101,17 +8298,17 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       void this.cmdUnstageFile(folderPath);
       return;
     }
-    if (group === "untracked") {
-      this.confirmTrashUntrackedFolder(folderPath);
-      return;
-    }
-    this.cmdDiscardFile(folderPath);
+    this.discardPath(folderPath, group);
   }
   /**
    * Group-header buttons. "Stage" in the tracked-changes group must not sweep
    * in untracked files, so it stages the repository root in `update` mode; the
-   * untracked group uses a plain add. Discard maps to the repository-wide
-   * discard command, which keeps staged content and untracked files.
+   * untracked group uses a plain add.
+   *
+   * Discard has to branch on the group, which it did not: it always ran the
+   * repository-wide discard, and that command keeps untracked files by design.
+   * So the Untracked group's own "delete the new files" entry ran an operation
+   * that deletes none of them, under a confirmation that said as much.
    */
   groupAction(group, kind) {
     if (kind === "unstage") {
@@ -8119,11 +8316,36 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       return;
     }
     if (kind === "discard") {
-      this.cmdDiscardAll();
+      if (group === "untracked") {
+        this.confirmDeleteUntracked("Every new file in the repository.", this.untrackedUnder(null));
+      } else {
+        this.cmdDiscardAll();
+      }
       return;
     }
-    if (group === "unstaged") void this.cmdStageFile(".", "update");
-    else void this.cmdStageAll();
+    if (group === "untracked") {
+      void this.stageEntries(this.untrackedUnder(null));
+      return;
+    }
+    void this.cmdStageFile(".", "update");
+  }
+  /** Stage a handful of paths, one request each, stopping at the first failure. */
+  async stageEntries(paths) {
+    if (paths.length === 0) {
+      this.notify("Nothing to stage: no new files.");
+      return;
+    }
+    for (const p of paths) {
+      const result = await this.runOperation("stage-file", {
+        path: p.endsWith("/") ? p.slice(0, -1) : p,
+        mode: "all",
+        protectedPaths: this.effectiveProtectedPaths()
+      });
+      if (!result) return;
+      if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
+      this.absorbStatusData(result.data ?? {});
+    }
+    this.notify(`Staged ${paths.length} new entr${paths.length === 1 ? "y" : "ies"}.`);
   }
   /**
    * The group's own context menu: the bulk versions of the per-file entries,
@@ -8195,38 +8417,92 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       }
     ).open();
   }
-  /** Move every untracked entry under a folder to Obsidian's trash, confirmed. */
-  confirmTrashUntrackedFolder(folderPath) {
-    const st = this.lastStatus?.status;
-    if (!st) return;
-    const prefix = `${folderPath}/`;
-    const targets = st.untracked.filter((u) => u.startsWith(prefix) || u === prefix);
-    if (targets.length === 0) return;
+  /**
+   * The one route that deletes untracked content, whatever the scope.
+   *
+   * There used to be three, and they disagreed. A folder row in tree layout
+   * moved its files to Obsidian's trash; the same row in list layout went
+   * through the runner and unlinked them; a single file row unlinked; and the
+   * group menu entry called the repository-wide discard, which keeps untracked
+   * files, so it deleted nothing at all while saying it would. Reversibility is
+   * not something a user should have to infer from which layout they picked.
+   *
+   * `targets` are untracked entries as git reported them, so a whole untracked
+   * directory travels as one entry and its contents are not enumerated here.
+   */
+  confirmDeleteUntracked(scopeLine, targets) {
+    if (targets.length === 0) {
+      this.notify("Nothing to delete: no new files in that scope.");
+      return;
+    }
+    const permanent = this.deviceSettings.deleteUntrackedPermanently;
+    const many = targets.length !== 1;
+    const count = `${targets.length} untracked entr${many ? "ies" : "y"}`;
     new ConfirmModal(
       this.app,
       {
-        title: "Move new files to trash?",
+        title: permanent ? "Delete new files?" : "Move new files to trash?",
         body: [
-          `Folder: ${folderPath}`,
-          `${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} will move to Obsidian's trash (.trash in the vault) \u2014 this is reversible from there.`
-        ],
-        confirmLabel: "Move to trash",
+          scopeLine,
+          permanent ? `${count} will be deleted from disk. Nothing Git has recorded is touched, and this cannot be undone: a file Git never saw is in no history.` : `${count} will move to Obsidian's trash (.trash in the vault), so this is reversible from there.`,
+          ...targets.slice(0, 8),
+          many && targets.length > 8 ? `\u2026and ${targets.length - 8} more` : ""
+        ].filter((l) => l !== ""),
+        confirmLabel: permanent ? "Delete from disk" : "Move to trash",
+        icon: "trash",
         danger: true
       },
       async (confirmed) => {
         if (!confirmed) return;
+        if (permanent) {
+          for (const t of targets) {
+            const result = await this.runOperation("discard-file", {
+              path: t.endsWith("/") ? t.slice(0, -1) : t,
+              protectedPaths: this.effectiveProtectedPaths()
+            });
+            if (!result) return;
+            if (!result.ok) return this.renderMutationError("Native Git: delete failed", result);
+            this.absorbStatusData(result.data ?? {});
+          }
+          this.notify(`Deleted ${count}.`);
+          return;
+        }
+        let moved = 0;
         for (const t of targets) {
           const p = t.endsWith("/") ? t.slice(0, -1) : t;
           try {
             await this.app.vault.adapter.trashLocal(p);
+            moved += 1;
           } catch (e) {
             this.log.add("error", "discard-file", `Trash failed for ${p}: ${String(e)}`);
           }
         }
-        this.notify(`Moved ${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} to the trash.`);
+        this.notify(
+          moved === targets.length ? `Moved ${count} to the trash.` : `Moved ${moved} of ${targets.length} untracked entries to the trash; the rest are in the operation log.`
+        );
         await this.cmdStatus(true);
       }
     ).open();
+  }
+  /**
+   * The single decision behind every "discard" control in the panel and its
+   * menus, at file and folder scope: untracked content is deleted (reversibly
+   * unless the device says otherwise), tracked content goes back to what is
+   * committed. One place decides, so a row button, a context-menu entry and a
+   * folder row can no longer disagree the way they did.
+   */
+  discardPath(path, group) {
+    if (group === "untracked") {
+      this.confirmDeleteUntracked(`Path: ${path}`, this.untrackedUnder(path));
+      return;
+    }
+    this.cmdDiscardFile(path);
+  }
+  /** Untracked entries git reported at or under `path`; `null` for all of them. */
+  untrackedUnder(path) {
+    const st = this.lastStatus?.status;
+    if (!st) return [];
+    return untrackedTargets(st.untracked, path);
   }
   async cmdUnstageFile(path) {
     const result = await this.runOperation("unstage-file", {

@@ -1,7 +1,11 @@
 import { App, Platform, PluginSettingTab, Setting } from "obsidian";
 import type NativeGitBridgePlugin from "../main";
 import { validateProtectedPaths } from "./pathValidation";
-import { DEFAULT_DEVICE_SETTINGS, DIFF_LIMIT_CHOICES_KB } from "./DeviceLocalSettingsStore";
+import {
+  DEFAULT_DEVICE_SETTINGS,
+  DIFF_LIMIT_CHOICES_KB,
+  ROWS_PER_GROUP_CHOICES,
+} from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
 import { OperationLogModal } from "../ui/OperationLogModal";
 import { RUNNER_MIN_VERSION } from "../constants";
@@ -270,6 +274,36 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(s.menuExclude).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ menuExclude: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Rows shown per group")
+      .setDesc(
+        "How many rows the status panel draws in each group before it offers the rest. " +
+          "Every group can be long at once, and a folder of a few thousand new files arrives " +
+          "as one Git entry that expands into a row each. The group's count always states the " +
+          "true total. Device-local: what it costs is render time here."
+      )
+      .addDropdown((d) => {
+        for (const n of ROWS_PER_GROUP_CHOICES) d.addOption(String(n), String(n));
+        d.setValue(String(s.rowsPerGroup)).onChange((v) => { void (async () => {
+          const n = Number(v);
+          if (!Number.isFinite(n) || n <= 0) return;
+          await this.plugin.updateDeviceSettings({ rowsPerGroup: n });
+        })(); });
+      });
+
+    new Setting(containerEl)
+      .setName("Delete new files permanently")
+      .setDesc(
+        "Off: deleting untracked files moves them to Obsidian's trash (.trash in the vault), " +
+          "which is the only way back for a file Git never recorded. On: they are deleted from " +
+          "disk. Device-local, because what it decides is whether .trash grows on this device."
+      )
+      .addToggle((t) =>
+        t.setValue(s.deleteUntrackedPermanently).onChange((v) => { void (async () => {
+          await this.plugin.updateDeviceSettings({ deleteUntrackedPermanently: v });
         })(); })
       );
 

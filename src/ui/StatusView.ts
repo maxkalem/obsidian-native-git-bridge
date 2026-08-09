@@ -30,6 +30,22 @@ export interface StatusViewData {
    * the files rendered as actionable child rows underneath it.
    */
   untrackedChildren?: Record<string, string[]>;
+  /**
+   * Rows drawn per group before the panel offers the rest (device-local). Falls
+   * back to `DEFAULT_ROWS_PER_GROUP` when absent.
+   */
+  rowsPerGroup?: number;
+  /**
+   * `false` when no status has been read from the repository yet, so the empty
+   * lists above mean "not asked" rather than "nothing there".
+   *
+   * The panel has to say which, because the two look identical and one of them
+   * is a lie the user can act on: it reported "Clean — working tree clean, ↑0
+   * ↓0" on a device that was sitting in an unfinished merge with six conflicts,
+   * because the push builds an empty summary when it has none. Absent means
+   * loaded, so nothing that already sets real data has to change.
+   */
+  statusLoaded?: boolean;
   sparse?: SparseStateSummary;
   activeOperation?: string;
   /** Progress line shown at the bottom while an operation runs. */
@@ -99,7 +115,18 @@ export interface StatusViewActions {
   openConflict: (path: string, pos: { x: number; y: number }) => void;
   stage: (path: string) => void;
   unstage: (path: string) => void;
-  discard: (path: string) => void;
+  /**
+   * The group is part of the request, not a detail the receiver can infer: an
+   * untracked path has nothing to revert to and takes the delete route, a
+   * tracked one goes back to what is committed. The row knows which group it is
+   * in; nothing downstream should have to guess.
+   */
+  discard: (path: string, group: Group) => void;
+  /**
+   * "Tell me the current state." Called when the panel opens, because the
+   * plugin's push cannot reach a panel that did not exist when it fired.
+   */
+  syncState: () => void;
   /**
    * Open the Git menu for a path (long press / right click). `group` is the
    * panel group the row belongs to, so the entries reflect the state the
@@ -148,16 +175,70 @@ export function actionSlots(scope: "group" | "folder", group: Group, hasItems = 
       return [
         none,
         { icon: "plus", tooltip: `Stage the new files${where}`, action: "stage" },
-        // Trashing every new file in the whole group in one tap is deliberately
-        // not offered; on a folder it is, because the blast radius is visible.
-        scope === "folder"
-          ? { icon: "trash", tooltip: "Move the new files in this folder to Obsidian's trash", action: "discard", warn: true }
-          : none,
+        // `trash`, not `undo-2`: there is nothing to revert to. The icon says
+        // which of the two things a control does, at every scope — revert to
+        // what is committed, or delete something git never had. The wording
+        // stays neutral about the trash because a device setting decides
+        // whether the deletion is reversible; the confirmation says which.
+        { icon: "trash", tooltip: `Delete the new files${where}`, action: "discard", warn: true },
       ];
     default:
       return [none, none, none];
   }
 }
+
+/**
+ * How many FILES a group holds, which is not how many entries git printed.
+ * A fully untracked directory arrives as one `dir/` entry, and the panel lists
+ * its contents from `untrackedChildren`; the count has to agree with the rows
+ * the user can see, not with the length of git's list.
+ *
+ * Pure and exported for the test: the number and the rows come from two
+ * different places, and that is exactly how they drifted apart.
+ */
+export function groupFileCount(
+  items: Array<{ path: string }>,
+  children?: Record<string, string[]>
+): number {
+  let n = 0;
+  for (const it of items) {
+    const kids = it.path.endsWith("/") ? children?.[it.path] : undefined;
+    n += kids !== undefined && kids.length > 0 ? kids.length : 1;
+  }
+  return n;
+}
+
+/**
+ * How many rows the panel draws per group before it stops and offers the rest.
+ *
+ * Every group can be long at once — a conflicted merge, a large staged set, the
+ * changes beside it, and an untracked directory git collapsed into one entry
+ * that holds thousands of files (2415 in one inbox folder on the device this was
+ * measured on). Each row costs about a dozen DOM nodes, and the cost is paid
+ * again on every re-render: with that folder open the spinner took two seconds
+ * to appear, and four groups at a hundred rows each would be four hundred rows
+ * before anything is visible.
+ *
+ * The budget is per group, so one long group cannot starve the others, and the
+ * group's count still states the true total: nothing is hidden from git, the
+ * rows are simply not built until asked for. Configurable per device, because
+ * what it buys is render time on that device.
+ */
+export const DEFAULT_ROWS_PER_GROUP = 30;
+
+/**
+ * How many pages a group may draw in TREE layout before it stops altogether.
+ *
+ * The per-folder budget below puts the truncation where the user can see it,
+ * which a per-group one cannot: with several folders cut short, a single row at
+ * the end of the group says nothing about where the missing files are. But a
+ * budget that is only per folder is not a budget at all — fifty folders at
+ * thirty files each is fifteen hundred rows, which is the cost this whole
+ * mechanism exists to bound. So the per-folder rule decides placement and this
+ * one decides cost, and they are separate because they answer different
+ * questions.
+ */
+export const GROUP_PAGES_CEILING = 10;
 
 const CHANGE_LABEL: Record<string, string> = {
   M: "modified",
@@ -191,6 +272,21 @@ export class StatusView extends ItemView {
    * must show the notes inside it as actionable rows.
    */
   private collapsedDirs = new Set<string>();
+  /**
+   * Rows the user asked to see beyond the budget, per group. Absent means the
+   * plain budget. Not persisted: it is a rendering allowance for this session,
+   * not a preference.
+   */
+  private groupLimits = new Map<Group, number>();
+  /** Rows drawn in the group being rendered right now; reset per group. */
+  private drawn = 0;
+  /**
+   * Files the user asked to see inside one tree folder, keyed "<group>:<path>"
+   * like `collapsedDirs`. Tree layout budgets per folder so the "more" control
+   * sits under the folder it belongs to; the group ceiling above is what keeps
+   * the total bounded.
+   */
+  private folderLimits = new Map<string, number>();
   /**
    * The scrolling half of the panel. The toolbar, the operation strip and the
    * branch line stay put while this scrolls, so the controls are reachable
@@ -254,6 +350,16 @@ export class StatusView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.render();
+    // Ask for the current state instead of waiting to be told.
+    //
+    // A panel gets its data from the plugin's push, and that push returns early
+    // when no panel exists yet. So a panel that appears WHILE an operation runs
+    // — restored by the workspace at startup, or opened by hand a second later
+    // — was built with no running action, and the per-second progress update
+    // deliberately does not re-render (it would restart the toolbar
+    // animations), so the refresh icon stayed still for the whole operation
+    // while the progress line ticked beside it.
+    this.actions.syncState();
   }
 
   onPaneMenu(menu: Menu): void {
@@ -363,9 +469,20 @@ export class StatusView extends ItemView {
 
     // --- header line ---
     const head = headEl.createDiv({ cls: "ngb-sv-header" });
-    head.createSpan({ cls: `ngb-sv-dot ngb-sv-${d?.state ?? "unknown"}` });
-    head.createSpan({ cls: "ngb-sv-state", text: d ? stateLabel(d.state) : "not checked yet" });
-    if (d) {
+    // `d` is null before the first push, and `statusLoaded === false` after a
+    // push that had no status to give: both mean "nothing was read".
+    const loaded = d != null && d.statusLoaded !== false;
+    const working = d?.state === "syncing";
+    head.createSpan({
+      cls: `ngb-sv-dot ngb-sv-${loaded ? d.state : working ? "syncing" : "unknown"}`,
+    });
+    head.createSpan({
+      cls: "ngb-sv-state",
+      text: loaded ? stateLabel(d.state) : working ? stateLabel("syncing") : "not checked yet",
+    });
+    // The branch and the ahead/behind counts come from a status that was read.
+    // Printing "↑0 ↓0" from an empty summary states two facts nobody checked.
+    if (loaded) {
       head.createSpan({
         cls: "ngb-settings-note",
         text: ` ${d.branch ?? "—"} ↑${d.ahead} ↓${d.behind}`,
@@ -408,7 +525,17 @@ export class StatusView extends ItemView {
     if (
       d.conflicted.length + d.staged.length + d.unstaged.length + d.untracked.length === 0
     ) {
-      body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      // Only when a status was actually read. Otherwise this line asserted a
+      // clean tree over an unfinished merge, which is the one claim in this
+      // panel a user might commit or push on.
+      if (d.statusLoaded === false) {
+        body.createEl("p", {
+          cls: "ngb-settings-note",
+          text: "No status read yet — refresh to see the repository.",
+        });
+      } else {
+        body.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });
+      }
     }
 
     // --- footer: details + progress (bottom of the panel, never covering content) ---
@@ -489,8 +616,12 @@ export class StatusView extends ItemView {
     for (const s of actionSlots("group", group, items.length > 0)) {
       gslot(s.icon, s.tooltip, s.action ? () => this.actions.groupAction(group, s.action!) : undefined, s.warn);
     }
-    // Same right-hand column as the rows below it.
-    renderCountBadge(header, items.length, (n) => `${n} files in ${title.toLowerCase()}`);
+    // Same right-hand column as the rows below it, and the same NUMBER: files,
+    // not git's entries. The untracked group is one entry, `Private/!inbox/1/`,
+    // with 2415 files behind it, so a header reading "1" above a folder row
+    // reading "2.4k" was the panel disagreeing with itself.
+    const total = groupFileCount(items, this.data?.untrackedChildren);
+    renderCountBadge(header, total, (n) => `${n} files in ${title.toLowerCase()}`);
     header.addEventListener("click", () => {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
@@ -505,20 +636,139 @@ export class StatusView extends ItemView {
       list.createDiv({ cls: "ngb-sv-empty", text: "Nothing staged yet." });
       return;
     }
+    this.drawn = 0;
     if (this.data?.treeView) {
       this.renderTreeItems(list, group, items);
-      return;
-    }
-    for (const it of items) {
-      this.renderRow(list, group, it, 0);
-      // An untracked FOLDER is a grouping control, not a replacement for the
-      // file rows inside it: render its files (reported by a v5+ runner) as
-      // actionable child rows, collapsible via the folder row's chevron.
-      const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : undefined;
-      if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
-        for (const c of children) this.renderRow(list, group, { path: c, code: "?" }, 1);
+    } else {
+      for (const it of items) {
+        if (!this.hasRowBudget(group)) break;
+        this.renderRow(list, group, it, 0);
+        // An untracked FOLDER is a grouping control, not a replacement for the
+        // file rows inside it: render its files (reported by a v5+ runner) as
+        // actionable child rows, collapsible via the folder row's chevron.
+        const children = group === "untracked" ? this.data?.untrackedChildren?.[it.path] : undefined;
+        if (children && children.length > 0 && !this.collapsedDirs.has(it.path)) {
+          for (const c of children) {
+            if (!this.hasRowBudget(group)) break;
+            this.renderRow(list, group, { path: c, code: "?" }, 1);
+          }
+        }
       }
     }
+    // Outside the layout branch, deliberately. It used to sit after the list
+    // loop, and the tree layout returned before reaching it, so on a device in
+    // tree layout the panel stopped at the budget with nothing saying why and
+    // no way to see the rest.
+    this.renderRowOverflow(list, group, items);
+  }
+
+  /** One page: the device's row budget. */
+  private page(): number {
+    const n = this.data?.rowsPerGroup ?? DEFAULT_ROWS_PER_GROUP;
+    return n > 0 ? n : DEFAULT_ROWS_PER_GROUP;
+  }
+
+  /**
+   * How many rows this group may draw in total.
+   *
+   * List layout: one page, because there is no structure to hang a partial
+   * listing on and the group-level row is the whole answer. Tree layout: the
+   * cost ceiling, since the per-folder budget already limits each folder and
+   * this only stops a group with a very large number of folders.
+   */
+  private rowLimit(group: Group): number {
+    const base = this.page() * (this.data?.treeView ? GROUP_PAGES_CEILING : 1);
+    return this.groupLimits.get(group) ?? base;
+  }
+
+  /** Files drawn inside one tree folder before it offers the rest. */
+  private folderLimit(key: string): number {
+    return this.folderLimits.get(key) ?? this.page();
+  }
+
+  /**
+   * The files directly inside one tree folder, up to that folder's page, and
+   * the control that adds the next page.
+   *
+   * The control is a row of the file list, indented with the files it belongs
+   * to, because that is where the user is looking when a folder stops short.
+   * `depth` is the folder's own depth; `-1` means the group's root, whose files
+   * sit at depth 0.
+   */
+  private renderFolderItems(
+    list: HTMLElement,
+    group: Group,
+    key: string,
+    items: { path: string; code: string; origPath?: string }[],
+    depth: number
+  ): void {
+    const limit = this.folderLimit(key);
+    let shown = 0;
+    for (const it of items) {
+      if (shown >= limit) break;
+      // The group ceiling still applies: a group of very many folders stops
+      // here rather than drawing a page in each of them.
+      if (!this.hasRowBudget(group)) return;
+      this.renderRow(list, group, it, depth + 1);
+      shown += 1;
+    }
+    if (shown >= items.length) return;
+    const rest = items.length - shown;
+    const row = list.createDiv({
+      cls: `ngb-sv-file ngb-sv-more-children ngb-ind-${Math.min(Math.max(depth + 1, 1), 6)}`,
+    });
+    // Short on purpose: this sits in a file list on a phone, where a sentence
+    // wraps to two lines and stops looking like a control.
+    row.setText(`${shown}/${items.length} files • Tap for more`);
+    row.setAttribute(
+      "aria-label",
+      `Showing ${shown} of ${items.length} files here; tap to show ${Math.min(rest, this.page())} more`
+    );
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.folderLimits.set(key, shown + this.page());
+      this.render();
+    });
+  }
+
+  private hasRowBudget(group: Group): boolean {
+    return this.drawn < this.rowLimit(group);
+  }
+
+  /**
+   * The "N of M shown" row, at the end of the group in BOTH layouts. Tree
+   * layout flattens files into a path tree, so there is no "after this folder"
+   * to hang it under; the same place in both is what keeps the two layouts
+   * answering alike.
+   */
+  private renderRowOverflow(
+    list: HTMLElement,
+    group: Group,
+    items: { path: string }[]
+  ): void {
+    // Tree layout answers per folder, so the group-level row appears only when
+    // the COST ceiling stopped the render — a group with more folders than the
+    // ceiling allows pages. Otherwise every folder speaks for itself.
+    if (this.data?.treeView && this.drawn < this.rowLimit(group)) return;
+    const total = groupFileCount(items, this.data?.untrackedChildren);
+    const shown = this.drawn;
+    if (shown >= total) return;
+    const page = this.data?.rowsPerGroup ?? DEFAULT_ROWS_PER_GROUP;
+    const rest = total - shown;
+    const row = list.createDiv({ cls: "ngb-sv-empty ngb-sv-more-children" });
+    // "rows", not "files": a folder row is a row and not a file, so the unit is
+    // named rather than implied. Same short shape as the per-folder control.
+    row.setText(`${shown}/${total} rows • Tap for more`);
+    row.setAttribute(
+      "aria-label",
+      `Showing ${shown} rows of ${total} files in this group; tap to show ${Math.min(rest, page)} more`
+    );
+    row.setAttribute("aria-label", `Show more rows in this group`);
+    row.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.groupLimits.set(group, shown + page);
+      this.render();
+    });
   }
 
   /**
@@ -604,6 +854,11 @@ export class StatusView extends ItemView {
       for (const it of items) {
         const children = this.data?.untrackedChildren?.[it.path];
         if (it.path.endsWith("/") && children && children.length > 0) {
+          // Every child, uncapped. An earlier version capped here and the tree
+          // then knew nothing about the rest, so a folder holding 2415 files
+          // offered "60 of 300" — the cap's own number, reported as the truth.
+          // Building the nodes is cheap; it was drawing them that cost two
+          // seconds, and the row budget is what bounds that.
           for (const c of children) expanded.push({ path: c, code: "?" });
         } else {
           expanded.push(it);
@@ -611,8 +866,14 @@ export class StatusView extends ItemView {
       }
     }
     const tree = buildPathTree(expanded, (i) => i.path);
-    for (const it of tree.rootItems) this.renderRow(list, group, it, 0);
-    for (const f of tree.folders) this.renderFolderNode(list, group, f, 0);
+    // The group's root files are a "folder" too, keyed by the empty path, so
+    // they get their own page and their own control rather than borrowing the
+    // ceiling and disappearing without explanation.
+    this.renderFolderItems(list, group, `${group}:`, tree.rootItems, -1);
+    for (const f of tree.folders) {
+      if (!this.hasRowBudget(group)) return;
+      this.renderFolderNode(list, group, f, 0);
+    }
   }
 
   private renderFolderNode(
@@ -621,6 +882,8 @@ export class StatusView extends ItemView {
     node: PathTreeNode<{ path: string; code: string; origPath?: string }>,
     depth: number
   ): void {
+    // A folder row is a row: it costs the same nodes and the same layout pass.
+    this.drawn += 1;
     const rowEl = list.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
     const key = `${group}:${node.path}`;
     const collapsed = this.collapsedDirs.has(key);
@@ -661,8 +924,11 @@ export class StatusView extends ItemView {
     // files in THIS state it holds.
     renderCountBadge(rowEl, node.count, (n) => `${n} files in ${node.path}/`);
     if (collapsed) return;
-    for (const it of node.items) this.renderRow(list, group, it, depth + 1);
-    for (const ch of node.children) this.renderFolderNode(list, group, ch, depth + 1);
+    this.renderFolderItems(list, group, key, node.items, depth);
+    for (const ch of node.children) {
+      if (!this.hasRowBudget(group)) return;
+      this.renderFolderNode(list, group, ch, depth + 1);
+    }
   }
 
   private renderRow(
@@ -671,6 +937,10 @@ export class StatusView extends ItemView {
     it: { path: string; code: string; origPath?: string },
     depth: number
   ): void {
+    // Counted here rather than at each call site: the tree layout draws rows
+    // from three places, one of them recursive, and a budget that only some of
+    // them respect is not a budget.
+    this.drawn += 1;
     {
       const rowEl = list.createDiv({
         cls: depth === 0 ? "ngb-sv-file" : `ngb-sv-file ngb-ind-${Math.min(depth, 6)}`,
@@ -762,7 +1032,13 @@ export class StatusView extends ItemView {
       } else {
         act("plus", "Stage", () => this.actions.stage(it.path), false, busy === "stage-file" && hit);
       }
-      act("undo-2", "Discard changes", () => this.actions.discard(it.path), true, busy === "discard-file" && hit);
+      // Same rule as the group and folder rows: `trash` where there is nothing
+      // to revert to, `undo-2` where the file has a committed version.
+      if (group === "untracked") {
+        act("trash", "Delete new file", () => this.actions.discard(it.path, group), true, busy === "discard-file" && hit);
+      } else {
+        act("undo-2", "Discard changes", () => this.actions.discard(it.path, group), true, busy === "discard-file" && hit);
+      }
 
       // The change letter lives at the END of the row: next to the file name it
       // read like part of the file name.

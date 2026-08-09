@@ -43,6 +43,20 @@ export interface DeviceLocalSettings {
   /** File context menu: show the .git/info/exclude add/remove entries. */
   menuExclude: boolean;
   /**
+   * Delete new (untracked) files outright instead of moving them to Obsidian's
+   * trash. Off by default: a file git never saw is not in any history, so the
+   * trash is the only way back. Device-local, because what it really decides is
+   * whether `.trash` on THIS device is allowed to grow.
+   */
+  deleteUntrackedPermanently: boolean;
+  /**
+   * Rows the status panel draws per group before it offers the rest.
+   * Device-local: what it buys is render time on this device, and the phone
+   * that carries a few thousand untracked files is not the machine that decides
+   * for the others.
+   */
+  rowsPerGroup: number;
+  /**
    * Epoch ms of the last "you still have an old repository set aside" reminder.
    * Device-local: the copy sits on THIS device's disk, and so does the decision
    * about it.
@@ -69,6 +83,14 @@ export interface DeviceLocalSettings {
 }
 
 /** Selectable budgets, in KB. The default is deliberately modest. */
+/**
+ * Offered row budgets for the status panel. 30 is the default because four
+ * groups can be long at once and 4 × 30 is a panel that draws instantly; the
+ * upper end is there for a small repository where seeing everything matters
+ * more than the milliseconds.
+ */
+export const ROWS_PER_GROUP_CHOICES = [10, 20, 30, 50, 100, 250, 1000] as const;
+export const DEFAULT_ROWS_PER_GROUP_SETTING = 30;
 export const DIFF_LIMIT_CHOICES_KB = [50, 100, 200, 500, 1024] as const;
 export const DEFAULT_DIFF_LIMIT_KB = 100;
 /**
@@ -104,6 +126,8 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   menuGitignore: true,
   menuSparse: true,
   menuExclude: true,
+  deleteUntrackedPermanently: false,
+  rowsPerGroup: DEFAULT_ROWS_PER_GROUP_SETTING,
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,

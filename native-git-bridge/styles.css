@@ -247,6 +247,25 @@
   color: var(--text-faint); font-size: var(--font-smaller);
   flex: 0 0 auto; margin-left: var(--size-4-1);
 }
+/* The "N of M shown" control. In list layout it sits at the end of the group; in
+   tree layout one appears inside each folder that stopped short, indented with
+   the files it belongs to and therefore carrying `.ngb-sv-file` as well. Reads
+   as a note, behaves as a button: it is the only way to see the rest of what the
+   panel deliberately did not draw. */
+.ngb-sv-more-children {
+  cursor: pointer; text-decoration-line: underline; text-decoration-style: dotted;
+  color: var(--text-faint); font-size: var(--font-ui-smaller);
+}
+/* As a file row it would otherwise stretch its text across the whole width and
+   read as a file name; the underline should end where the words do.
+   `padding-top`/`padding-bottom`, never the `padding` shorthand: the indentation
+   of a nested row IS `padding-left` (see .ngb-ind-*), and this selector carries
+   two classes, so the shorthand won that cascade and reset the indent to zero.
+   The control then sat flush against the group's left edge instead of lining up
+   with the files it belongs to, which is where it was first seen on a device. */
+.ngb-sv-file.ngb-sv-more-children {
+  display: block; padding-top: 2px; padding-bottom: 2px;
+}
 .ngb-sv-empty {
   color: var(--text-faint); font-size: var(--font-ui-smaller);
   padding: 2px 0 2px var(--size-4-3);

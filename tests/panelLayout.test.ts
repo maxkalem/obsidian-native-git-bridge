@@ -6,7 +6,13 @@ import {
   __setPlatformAndroid,
   __textOf,
 } from "./mocks/obsidian";
-import { StatusView, type StatusViewActions, type StatusViewData } from "../src/ui/StatusView";
+import {
+  StatusView,
+  DEFAULT_ROWS_PER_GROUP,
+  GROUP_PAGES_CEILING,
+  type StatusViewActions,
+  type StatusViewData,
+} from "../src/ui/StatusView";
 import { HistoryView, type HistoryViewActions } from "../src/ui/HistoryView";
 
 /**
@@ -43,6 +49,7 @@ function statusActions(): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
+    syncState: noop,
   } as unknown as StatusViewActions;
 }
 
@@ -81,6 +88,140 @@ function renderHistory(): Any {
 }
 
 beforeEach(() => __resetObsidianMock());
+
+/** The untracked group starts collapsed, so a test about its rows must open it. */
+function renderUntrackedExpanded(over: Partial<StatusViewData>): Any {
+  const v = new StatusView(leaf, statusActions()) as Any;
+  v.collapsed.untracked = false;
+  v.setData(statusData(over));
+  return v.contentEl;
+}
+
+describe("group header counts agree with the rows under them", () => {
+  it("counts the files behind a collapsed untracked directory, not the entry", () => {
+    // The header read "1" while the folder row under it read "2.4k": git prints
+    // one `dir/` entry and the panel lists its contents from untrackedChildren.
+    // Asserted through a RENDER, not on the pure function alone: the function
+    // was right and the call site still passed items.length.
+    const c = renderStatus({
+      state: "dirty",
+      untracked: ["Private/!inbox/1/"],
+      untrackedChildren: {
+        "Private/!inbox/1/": Array.from({ length: 2415 }, (_, i) => `Private/!inbox/1/f${i}.md`),
+      },
+    });
+    const badges = __findAllByClass(c, "ngb-sv-count").map((e: Any) => e.textContent);
+    expect(badges).toContain("2.4k");
+    expect(badges).not.toContain("1");
+  });
+
+  it("draws one page of a huge untracked directory and offers the rest", () => {
+    // 2415 rows at about a dozen DOM nodes each were redrawn on every render,
+    // which is what delayed the spinner by two seconds on the device while the
+    // header count stayed instant. The count is unaffected: it comes from the
+    // data, not from the rows.
+    const c = renderUntrackedExpanded({
+      state: "dirty",
+      untracked: ["Private/!inbox/1/"],
+      untrackedChildren: {
+        "Private/!inbox/1/": Array.from({ length: 2415 }, (_, i) => `Private/!inbox/1/f${i}.md`),
+      },
+    });
+    // The budget counts ROWS, and the folder row is one of them.
+    expect(__findAllByClass(c, "ngb-sv-file")).toHaveLength(DEFAULT_ROWS_PER_GROUP);
+    const more = __findAllByClass(c, "ngb-sv-more-children");
+    expect(more).toHaveLength(1);
+    expect(more[0].textContent).toBe(`${DEFAULT_ROWS_PER_GROUP}/2415 rows • Tap for more`);
+    expect(__findAllByClass(c, "ngb-sv-count").map((e: Any) => e.textContent)).toContain("2.4k");
+  });
+
+  it("does not offer more when the group fits in the budget", () => {
+    const c = renderUntrackedExpanded({
+      state: "dirty",
+      untracked: ["small/"],
+      untrackedChildren: { "small/": ["small/a.md", "small/b.md"] },
+    });
+    expect(__findAllByClass(c, "ngb-sv-more-children")).toHaveLength(0);
+    expect(__findAllByClass(c, "ngb-sv-file")).toHaveLength(3);
+  });
+
+  it("offers the rest in TREE layout too, not only in the list", () => {
+    // The control used to be rendered after the list loop, and the tree branch
+    // returned before reaching it. On the device, in tree layout, the panel
+    // simply stopped at the budget with nothing saying why.
+    const c = renderUntrackedExpanded({
+      state: "dirty",
+      treeView: true,
+      untracked: ["big/"],
+      untrackedChildren: { "big/": Array.from({ length: 500 }, (_, i) => `big/f${i}.md`) },
+    });
+    const more = __findAllByClass(c, "ngb-sv-more-children");
+    expect(more).toHaveLength(1);
+    // Inside the folder it belongs to, indented with its files, not parked at
+    // the end of the group where it would name nothing.
+    expect(more[0].hasClass("ngb-ind-1")).toBe(true);
+    expect(more[0].hasClass("ngb-sv-file")).toBe(true);
+    // The whole folder, not the cap's own number: an earlier version expanded
+    // only as many children as the ceiling allowed and then reported that.
+    expect(more[0].textContent).toBe(`${DEFAULT_ROWS_PER_GROUP}/500 files • Tap for more`);
+  });
+
+  it("gives each tree folder its own budget and its own control", () => {
+    // A single control at the end of the group cannot say WHICH folders were
+    // cut short. Two truncated folders, two controls.
+    const c = renderStatus({
+      state: "dirty",
+      treeView: true,
+      rowsPerGroup: 5,
+      unstaged: [
+        ...Array.from({ length: 20 }, (_, i) => ({ path: `a/f${i}.md`, index: " ", worktree: "M" })),
+        ...Array.from({ length: 20 }, (_, i) => ({ path: `b/f${i}.md`, index: " ", worktree: "M" })),
+      ] as Any,
+    });
+    expect(__findAllByClass(c, "ngb-sv-more-children")).toHaveLength(2);
+    // Five files drawn in each folder, plus the two folder rows and the two
+    // controls: the folders do not share one page between them.
+    expect(__findAllByClass(c, "ngb-code-M")).toHaveLength(10);
+  });
+
+  it("stops a group of very many folders at the cost ceiling", () => {
+    // The per-folder rule alone is not a budget: without a ceiling this would
+    // draw a page in each of a hundred folders. When the ceiling bites, the
+    // group-level row is what explains it.
+    const c = renderStatus({
+      state: "dirty",
+      treeView: true,
+      rowsPerGroup: 2,
+      unstaged: Array.from({ length: 100 }, (_, i) => ({
+        path: `d${i}/f.md`,
+        index: " ",
+        worktree: "M",
+      })) as Any,
+    });
+    // 2 rows per page, ten pages: twenty rows and no more.
+    expect(__findAllByClass(c, "ngb-sv-file")).toHaveLength(2 * GROUP_PAGES_CEILING);
+    const more = __findAllByClass(c, "ngb-sv-more-children");
+    expect(more.some((e: Any) => e.textContent.endsWith("rows • Tap for more"))).toBe(true);
+  });
+
+  it("budgets every group separately, so one long group cannot starve another", () => {
+    // Four long groups at once is the case the per-group budget exists for:
+    // a conflicted merge, a staged set, the changes beside it and the new
+    // files. A single shared budget would have drawn the first group only.
+    const files = (n: number, p: string) =>
+      Array.from({ length: n }, (_, i) => ({ path: `${p}/f${i}.md`, index: "M", worktree: "M" }));
+    const c = renderStatus({
+      state: "dirty",
+      staged: files(50, "s") as Any,
+      unstaged: files(50, "u") as Any,
+      conflicted: files(50, "c") as Any,
+      rowsPerGroup: 5,
+    });
+    // Three groups (untracked is empty and collapsed), five rows each.
+    expect(__findAllByClass(c, "ngb-sv-file")).toHaveLength(15);
+    expect(__findAllByClass(c, "ngb-sv-more-children")).toHaveLength(3);
+  });
+});
 
 describe("every panel builds all three regions", () => {
   for (const phone of [true, false]) {

@@ -31,6 +31,7 @@ import {
   sparseExclusionPaths,
 } from "./git/parsers";
 import { evaluateSparseSafety, type SparseRepairPlan } from "./git/sparseSafety";
+import { untrackedTargets } from "./git/untrackedTargets";
 import {
   hasControlChars,
   validateProtectedPaths,
@@ -243,7 +244,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           openConflict: (p, pos) => void this.openConflict(p, pos),
           stage: (p) => void this.cmdStageFile(p),
           unstage: (p) => void this.cmdUnstageFile(p),
-          discard: (p) => this.cmdDiscardFile(p),
+          discard: (p, group) => this.discardPath(p, group),
+          syncState: () => this.pushStatusToView(),
           fileMenu: (p, group, pos) => {
             const menu = new Menu();
             this.buildGitMenu(menu, p, group);
@@ -1545,12 +1547,27 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Was a result produced while we were gone?
     const outcome = await this.client.awaitResult(marker.id, 1, undefined);
     if (outcome.kind === "result") {
+      const r = outcome.result;
       this.log.add(
         "info",
         marker.action,
-        `Recovered result for operation ${marker.id} finished while Obsidian was closed (ok=${outcome.result.ok}).`
+        `Recovered result for operation ${marker.id} finished while Obsidian was closed (ok=${r.ok}).`
       );
       await this.client.consume(marker.id);
+      // A recovered result used to be logged and dropped, which is the worst
+      // possible handling of the one case it exists for: a pull that finished
+      // in Termux after Obsidian was gone can have left the repository in a
+      // merge with conflict markers in the files. The user got one info line in
+      // a log they had no reason to open, no error, and a panel with no status
+      // at all — so the next thing they saw was a repository that looked clean.
+      //
+      // Treated exactly like a live result now: the fresh status the runner
+      // attaches to failures is absorbed, and a failure is reported through the
+      // same path, which is what puts the conflict window back on screen.
+      this.absorbStatusData(r.data ?? {});
+      if (!r.ok) {
+        this.renderMutationError(`Native Git: ${marker.action} finished while Obsidian was closed`, r);
+      }
     } else if (isMarkerStale(marker)) {
       this.log.add("warn", marker.action, `Cleared stale operation lock ${marker.id} from a previous session.`);
     } else {
@@ -1749,7 +1766,6 @@ export default class NativeGitBridgePlugin extends Plugin {
     const cancel = new CancelToken();
     this.activeCancel = cancel;
     this.statusBar?.set("syncing");
-    this.pushStatusToView();
     this.log.add("info", action, `Queued request ${req.id}.`);
     // Progress is rendered at the BOTTOM of the status panel (a top notice would
     // cover the editor on mobile). The panel is opened if it is not visible yet.
@@ -1760,6 +1776,12 @@ export default class NativeGitBridgePlugin extends Plugin {
     // acted row only, instead of every control sharing the action name.
     this.runningPath = typeof args["path"] === "string" ? args["path"] : null;
     this.progressText = `${action}… 0s`;
+    // ONE push, not two. There used to be another immediately after
+    // `statusBar.set("syncing")`, four lines up, which re-rendered the whole
+    // panel for a state the push below re-renders anyway. On a device with a
+    // large untracked folder open that doubled the freeze before the spinner
+    // appeared: the user measured two seconds expanded against none collapsed,
+    // and expanding the same folder took under one.
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
@@ -3223,6 +3245,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       runningAction: this.runningAction ?? undefined,
       runningPath: this.runningPath ?? undefined,
       treeView: this.sharedPrefs.treeView,
+      rowsPerGroup: this.deviceSettings.rowsPerGroup,
       lastSyncAt: this.store.getValue(LAST_SYNC_KEY) ?? undefined,
       fetchedAt: this.lastStatus?.fetchedAt,
       bridge: this.deviceSettings.termuxIntegrationEnabled ? "companion app" : "disabled",
@@ -3233,7 +3256,13 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (this.lastStatus) view.setData(summaryToViewData(this.lastStatus.status, extra, state));
         else
           view.setData({
-            state,
+            // No status has been read, so the empty lists below are "not
+            // asked", not "nothing there", and the panel is told which. It used
+            // to render this as Clean with a working tree clean line and ↑0 ↓0,
+            // which on a device sitting in an unfinished merge was a clean bill
+            // of health for a repository with six conflicts in it.
+            statusLoaded: false,
+            state: this.progressText ? "syncing" : "unknown",
             ahead: 0,
             behind: 0,
             staged: [],
@@ -3572,18 +3601,18 @@ export default class NativeGitBridgePlugin extends Plugin {
       void this.cmdUnstageFile(folderPath);
       return;
     }
-    if (group === "untracked") {
-      this.confirmTrashUntrackedFolder(folderPath);
-      return;
-    }
-    this.cmdDiscardFile(folderPath);
+    this.discardPath(folderPath, group);
   }
 
   /**
    * Group-header buttons. "Stage" in the tracked-changes group must not sweep
    * in untracked files, so it stages the repository root in `update` mode; the
-   * untracked group uses a plain add. Discard maps to the repository-wide
-   * discard command, which keeps staged content and untracked files.
+   * untracked group uses a plain add.
+   *
+   * Discard has to branch on the group, which it did not: it always ran the
+   * repository-wide discard, and that command keeps untracked files by design.
+   * So the Untracked group's own "delete the new files" entry ran an operation
+   * that deletes none of them, under a confirmation that said as much.
    */
   groupAction(group: Group, kind: "stage" | "unstage" | "discard"): void {
     if (kind === "unstage") {
@@ -3591,11 +3620,44 @@ export default class NativeGitBridgePlugin extends Plugin {
       return;
     }
     if (kind === "discard") {
-      this.cmdDiscardAll();
+      if (group === "untracked") {
+        this.confirmDeleteUntracked("Every new file in the repository.", this.untrackedUnder(null));
+      } else {
+        this.cmdDiscardAll();
+      }
       return;
     }
-    if (group === "unstaged") void this.cmdStageFile(".", "update");
-    else void this.cmdStageAll();
+    // Stage exactly the group, which is not what this did. "Untracked" ran
+    // `stage-all` (`git add -A`), so tapping + on the new files also staged
+    // every tracked modification in the Changes group beside it. The new files
+    // are few entries even when they hold thousands of files, because git
+    // collapses an untracked directory, so one request per entry is cheap.
+    if (group === "untracked") {
+      void this.stageEntries(this.untrackedUnder(null));
+      return;
+    }
+    // `git add -u .`: tracked modifications only, which is what this group
+    // holds. See §12 for why staging it exactly still needs a runner argument.
+    void this.cmdStageFile(".", "update");
+  }
+
+  /** Stage a handful of paths, one request each, stopping at the first failure. */
+  private async stageEntries(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      this.notify("Nothing to stage: no new files.");
+      return;
+    }
+    for (const p of paths) {
+      const result = await this.runOperation("stage-file", {
+        path: p.endsWith("/") ? p.slice(0, -1) : p,
+        mode: "all",
+        protectedPaths: this.effectiveProtectedPaths(),
+      });
+      if (!result) return;
+      if (!result.ok) return this.renderMutationError("Native Git: stage failed", result);
+      this.absorbStatusData(result.data ?? {});
+    }
+    this.notify(`Staged ${paths.length} new entr${paths.length === 1 ? "y" : "ies"}.`);
   }
 
   /**
@@ -3682,40 +3744,101 @@ export default class NativeGitBridgePlugin extends Plugin {
     ).open();
   }
 
-  /** Move every untracked entry under a folder to Obsidian's trash, confirmed. */
-  private confirmTrashUntrackedFolder(folderPath: string): void {
-    const st = this.lastStatus?.status;
-    if (!st) return;
-    const prefix = `${folderPath}/`;
-    // Untracked entries under the folder as git reported them: whole
-    // untracked directories move as one, plus individual files.
-    const targets = st.untracked.filter((u) => u.startsWith(prefix) || u === prefix);
-    if (targets.length === 0) return;
+  /**
+   * The one route that deletes untracked content, whatever the scope.
+   *
+   * There used to be three, and they disagreed. A folder row in tree layout
+   * moved its files to Obsidian's trash; the same row in list layout went
+   * through the runner and unlinked them; a single file row unlinked; and the
+   * group menu entry called the repository-wide discard, which keeps untracked
+   * files, so it deleted nothing at all while saying it would. Reversibility is
+   * not something a user should have to infer from which layout they picked.
+   *
+   * `targets` are untracked entries as git reported them, so a whole untracked
+   * directory travels as one entry and its contents are not enumerated here.
+   */
+  private confirmDeleteUntracked(scopeLine: string, targets: string[]): void {
+    if (targets.length === 0) {
+      this.notify("Nothing to delete: no new files in that scope.");
+      return;
+    }
+    const permanent = this.deviceSettings.deleteUntrackedPermanently;
+    const many = targets.length !== 1;
+    const count = `${targets.length} untracked entr${many ? "ies" : "y"}`;
     new ConfirmModal(
       this.app,
       {
-        title: "Move new files to trash?",
+        title: permanent ? "Delete new files?" : "Move new files to trash?",
         body: [
-          `Folder: ${folderPath}`,
-          `${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} will move to Obsidian's trash (.trash in the vault) — this is reversible from there.`,
-        ],
-        confirmLabel: "Move to trash",
+          scopeLine,
+          permanent
+            ? `${count} will be deleted from disk. Nothing Git has recorded is touched, and this cannot be undone: a file Git never saw is in no history.`
+            : `${count} will move to Obsidian's trash (.trash in the vault), so this is reversible from there.`,
+          ...targets.slice(0, 8),
+          many && targets.length > 8 ? `…and ${targets.length - 8} more` : "",
+        ].filter((l) => l !== ""),
+        confirmLabel: permanent ? "Delete from disk" : "Move to trash",
+        icon: "trash",
         danger: true,
       },
       async (confirmed) => {
         if (!confirmed) return;
+        if (permanent) {
+          // The runner deletes the untracked files under each entry; it never
+          // does a blind recursive remove. One request per entry, and an entry
+          // is a whole untracked directory, so this is not one per file.
+          for (const t of targets) {
+            const result = await this.runOperation("discard-file", {
+              path: t.endsWith("/") ? t.slice(0, -1) : t,
+              protectedPaths: this.effectiveProtectedPaths(),
+            });
+            if (!result) return;
+            if (!result.ok) return this.renderMutationError("Native Git: delete failed", result);
+            this.absorbStatusData(result.data ?? {});
+          }
+          this.notify(`Deleted ${count}.`);
+          return;
+        }
+        let moved = 0;
         for (const t of targets) {
           const p = t.endsWith("/") ? t.slice(0, -1) : t;
           try {
             await this.app.vault.adapter.trashLocal(p);
+            moved += 1;
           } catch (e) {
             this.log.add("error", "discard-file", `Trash failed for ${p}: ${String(e)}`);
           }
         }
-        this.notify(`Moved ${targets.length} untracked entr${targets.length === 1 ? "y" : "ies"} to the trash.`);
+        this.notify(
+          moved === targets.length
+            ? `Moved ${count} to the trash.`
+            : `Moved ${moved} of ${targets.length} untracked entries to the trash; the rest are in the operation log.`
+        );
         await this.cmdStatus(true);
       }
     ).open();
+  }
+
+  /**
+   * The single decision behind every "discard" control in the panel and its
+   * menus, at file and folder scope: untracked content is deleted (reversibly
+   * unless the device says otherwise), tracked content goes back to what is
+   * committed. One place decides, so a row button, a context-menu entry and a
+   * folder row can no longer disagree the way they did.
+   */
+  discardPath(path: string, group: Group): void {
+    if (group === "untracked") {
+      this.confirmDeleteUntracked(`Path: ${path}`, this.untrackedUnder(path));
+      return;
+    }
+    this.cmdDiscardFile(path);
+  }
+
+  /** Untracked entries git reported at or under `path`; `null` for all of them. */
+  private untrackedUnder(path: string | null): string[] {
+    const st = this.lastStatus?.status;
+    if (!st) return [];
+    return untrackedTargets(st.untracked, path);
   }
 
   async cmdUnstageFile(path: string): Promise<void> {

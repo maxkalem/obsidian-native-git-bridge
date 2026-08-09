@@ -82,7 +82,9 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
           scope.group === "untracked"
             ? `Git: Delete new file${single ? "" : "s"}${where}${n}`
             : `Git: Discard changes${where}${n}`,
-        icon: "undo-2",
+        // `trash` for content git never had, `undo-2` for a revert to the
+        // committed version. The same pairing the panel's buttons use.
+        icon: scope.group === "untracked" ? "trash" : "undo-2",
         danger: true,
       });
     }

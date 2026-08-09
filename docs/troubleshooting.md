@@ -59,13 +59,17 @@ GIT_TERMINAL_PROMPT=0 git -C /path/to/vault ls-remote --heads origin
 
 No credential is ever visible from the plugin side: remote URLs are redacted in results and in `runner.log`.
 
+## An operation finished after you closed Obsidian
+
+The runner is one-shot and keeps going once it has been triggered, so an operation can finish in Termux with Obsidian already gone. Its result is picked up on the next start, and from 0.6.3 it is treated exactly like a live one: the fresh status it carries is applied, and a failure is reported the way it would have been at the time, which is what puts a conflict window back on screen. It used to be recorded in the operation log and otherwise dropped, so a pull that had left the repository mid-merge produced no error at all and the panel opened with no status.
+
 ## SAFETY_BLOCKED: sparse checkout safety check failed
 
 The central guarantee of this plugin. Protected paths appeared as git changes (status or staged), so commit/push/sync stopped before touching anything. This happens when sparse checkout got disabled or its rules changed, or something staged protected paths outside the bridge. Do **not** commit from another tool. Run *Native Git Bridge: Verify sparse safety* to see the exact entries, then *Native Git Bridge: Reapply sparse checkout*.
 
 The repair button is labelled for what it will do, which depends on where the blocking entry lives:
 
-- **Delete files locally** — the paths are files that are new here. All of them go to Obsidian's trash, folders included, file by file.
+- **Delete files locally** — the paths are files that are new here. All of them go to Obsidian's trash, folders included, file by file. The sparse repair always uses the trash, whatever *Delete new files permanently* is set to: it is repairing a state the user did not ask for, so it does not get to be the irreversible one.
 - **Remove from index** — the paths are staged additions with no file on disk. See below.
 - **Delete and unstage** — a mix of the two.
 

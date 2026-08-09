@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { actionSlots, isRowAffected, type Group } from "../src/ui/StatusView";
+import { actionSlots, groupFileCount, isRowAffected, type Group } from "../src/ui/StatusView";
 
 /**
  * Group headers and folder rows must occupy the SAME action columns as the
@@ -46,9 +46,45 @@ describe("actionSlots", () => {
     expect(actionSlots("group", "untracked", false).every((s) => s.icon === null)).toBe(true);
   });
 
-  it("does not offer a one-tap trash for every new file in the group", () => {
-    expect(actionSlots("group", "untracked").some((s) => s.icon === "trash")).toBe(false);
+  /**
+   * This reverses an earlier decision, deliberately. The group used to have no
+   * delete button, on the argument that a folder shows its blast radius and a
+   * group does not. What that produced was worse: the capability existed in the
+   * group's context menu, so the panel had one answer and the menu another, and
+   * the menu's answer ran the repository-wide discard, which keeps untracked
+   * files and therefore deleted none of them. The button is here now, the
+   * confirmation lists what it will touch, and deletion is reversible by
+   * default.
+   */
+  it("offers the delete at every scope, group included", () => {
+    expect(actionSlots("group", "untracked").some((s) => s.icon === "trash")).toBe(true);
     expect(actionSlots("folder", "untracked").some((s) => s.icon === "trash")).toBe(true);
+  });
+
+  it("counts the files a group holds, not the entries git printed", () => {
+    const items = [{ path: "Private/!inbox/1/" }, { path: "top.md" }];
+    const children = { "Private/!inbox/1/": Array.from({ length: 2415 }, (_, i) => `f${i}.md`) };
+    // The header used to read "1" over a folder row reading "2.4k".
+    expect(groupFileCount(items, children)).toBe(2416);
+    // No children reported (an older runner, or a directory git did not expand)
+    // still counts as the one entry it is, rather than as nothing.
+    expect(groupFileCount(items, {})).toBe(2);
+    expect(groupFileCount(items, undefined)).toBe(2);
+    expect(groupFileCount([], children)).toBe(0);
+    // A plain file is never looked up in the children map.
+    expect(groupFileCount([{ path: "a.md" }], { "a.md": ["x", "y"] })).toBe(1);
+  });
+
+  it("keeps one icon per meaning: trash for new files, undo for a revert", () => {
+    // The icon has to say which of the two things happens, and it must say the
+    // same thing at every scope. Mixing them is what made the untracked folder
+    // row mean "reversible" in one layout and "gone" in the other.
+    for (const scope of ["group", "folder"] as const) {
+      expect(actionSlots(scope, "untracked").some((s) => s.icon === "undo-2")).toBe(false);
+      expect(actionSlots(scope, "unstaged").some((s) => s.icon === "undo-2")).toBe(true);
+      expect(actionSlots(scope, "unstaged").some((s) => s.icon === "trash")).toBe(false);
+      expect(actionSlots(scope, "staged").some((s) => s.icon === "trash")).toBe(false);
+    }
   });
 });
 

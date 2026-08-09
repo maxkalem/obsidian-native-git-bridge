@@ -344,6 +344,66 @@ describe("runOperation guards", () => {
   });
 });
 
+describe("a result that landed while Obsidian was closed", () => {
+  /**
+   * The case this recovery exists for is the dangerous one: a pull that
+   * finished in Termux after Obsidian was gone can have left the repository in
+   * a merge with conflict markers in the files. It used to be logged as one
+   * info line and dropped — no error, no status — so the next thing the user
+   * saw was a panel with nothing in it, which then read as a clean repository.
+   */
+  function conflictResult(id: string): string {
+    return JSON.stringify({
+      protocolVersion: 1,
+      id,
+      action: "pull",
+      ok: false,
+      exitCode: 1,
+      runnerVersion: 12,
+      // A failed action carries fresh status as well as its error payload,
+      // which is exactly what makes dropping it a loss.
+      data: {
+        conflicts: "Notes/a.md\nNotes/b.md",
+        branchInfo: "# branch.oid abc123\n# branch.head main\n# branch.ab +1 -2\nu UU N... Notes/a.md",
+        mergeInProgress: "true",
+      },
+      error: { code: "CONFLICT", message: "A merge is already in progress.", stdout: "", stderr: "" },
+    });
+  }
+
+  async function recoverA(h: Harness, id: string): Promise<void> {
+    h.adapter.files.set(paths.resultFile(id), conflictResult(id));
+    (h.plugin as Any).store.setValue(
+      "active-op",
+      JSON.stringify({ id, action: "pull", startedAt: Date.now() })
+    );
+    await (h.plugin as Any).reconcileAfterRestart();
+  }
+
+  it("reports the failure instead of only logging it", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await recoverA(h, "r-20260809T001500Z-recov1");
+    expect(__openedModals).toContain("ConflictModal");
+  });
+
+  it("absorbs the status it carried, so the panel is not left empty", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await recoverA(h, "r-20260809T001500Z-recov2");
+    // An unfinished merge is the state the panel must show; before this, the
+    // plugin had no status at all and rendered a clean working tree.
+    expect((h.plugin as Any).lastStatus?.mergeInProgress).toBe(true);
+  });
+
+  it("still consumes the result file", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await recoverA(h, "r-20260809T001500Z-recov3");
+    expect(resultFiles(h.adapter)).toHaveLength(0);
+  });
+});
+
 describe("runOperation round trip through the transport seam", () => {
   it("submits, triggers the companion URI, polls, consumes, releases", async () => {
     const h = await loadPlugin();
