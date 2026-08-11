@@ -2020,6 +2020,13 @@ check '[ ! -e "$GONE" ]' "an object is absent with no empty file left behind"
 # `-p`, not `-e`: readability is the question, and `-e` answers from presence.
 check '! git cat-file -p "$GONE_SHA" >/dev/null 2>&1' "…and git really cannot read it"
 check 'git -C "$ROOT/remote.git" cat-file -e "$GONE_SHA"' "…while the remote still has it"
+# Three probes with no runner code in them, because a CI run on a newer git
+# failed the scan check below while the object turned out READABLE again by
+# the end of the sub-phase, with no fetch in between — something heals it or
+# hides it, and these say WHICH premise broke on that git, not just that one did.
+check '! git cat-file -e "$GONE_SHA" 2>/dev/null' "PROBE: -e agrees it is absent (no local pack holds it)"
+check '[ -z "$(git config --get-regexp "promisor|partialclone" 2>/dev/null || true)" ]' "PROBE: no promisor config that could lazily heal it"
+check 'git fsck --connectivity-only --no-reflogs --no-progress 2>&1 | grep -q "$GONE_SHA"' "PROBE: plain fsck itself names it, before any runner code"
 
 # The state the device was left in: nothing to remove, the object still gone.
 # scan must REPORT it, and the targeted fetch must bring it back.
@@ -2436,7 +2443,10 @@ check '[ "$(git config --get remote.origin.promisor)" = "true" ]' "origin is a p
 check '[ "$(git config --get remote.origin.partialclonefilter)" = "blob:none" ]' "the filter is recorded"
 check '[ "$(git config --get core.repositoryformatversion)" = "1" ]' "format version raised for the extension"
 check 'jq -e ".data.partialFilter == \"blob:none\"" "$RES" >/dev/null' "status reports the filter"
-check 'jq -e ".data.partialShed == \"false\"" "$RES" >/dev/null' "git 2.34 cannot shed (repack --filter is 2.42+), and the result says so"
+# False on every git: on 2.34 the version gate skips the shed, and on newer
+# git the unpushed-commits guard fires first (phase 17's fixture commits are
+# never pushed). Either way an enable here must not shed, and must say so.
+check 'jq -e ".data.partialShed == \"false\"" "$RES" >/dev/null' "the enable did not shed here, and the result says so"
 
 echo "# phase 18: the shed waits while unpushed commits exist"
 # Phase 17's fixture commits were never pushed, so blobs exist here that the
