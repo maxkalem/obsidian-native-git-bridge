@@ -111,6 +111,22 @@ export interface SparseRepairPlan {
   trash: string[];
   /** Paths to drop from the index (`git rm --cached`). */
   unstage: string[];
+  /**
+   * Conflicted paths inside a protected directory, to be reset to the committed
+   * version.
+   *
+   * They used to sit in `blocked`, and that was a loop with no way out of it:
+   * the sync is blocked by the sparse gate, the merge cannot be committed while
+   * a path is unmerged, this repair refused to touch it, and resolving it is
+   * refused too — deliberately — because it is inside a protected path. So the
+   * user pressed sync, repaired, pressed sync, repaired.
+   *
+   * `git reset -- <path>` restores the entry from HEAD and drops the conflict.
+   * Nothing on disk is touched and nothing committed is lost: HEAD's version is
+   * exactly what a sparse-hidden path should have, because this device never
+   * edits those files.
+   */
+  resolveToHead: string[];
   /** Paths the plugin refuses to touch, with why. */
   blocked: { path: string; reason: string }[];
 }
@@ -123,7 +139,7 @@ export function planSparseRepair(report: SparseSafetyReport): SparseRepairPlan {
     else byPath.set(v.path, [v]);
   }
 
-  const plan: SparseRepairPlan = { trash: [], unstage: [], blocked: [] };
+  const plan: SparseRepairPlan = { trash: [], unstage: [], blocked: [], resolveToHead: [] };
   for (const [path, vs] of byPath) {
     // Untracked entries carry "?" in BOTH columns; either one is the signal.
     const untracked = vs.some((v) => v.index === "?" || v.worktree === "?");
@@ -138,8 +154,17 @@ export function planSparseRepair(report: SparseSafetyReport): SparseRepairPlan {
     // additions — and trashing the file plus dropping the index entry of a path
     // that is mid-conflict destroys the merge state. Any "U" in either column,
     // or "A" in both, is a conflict.
+    // `DD` (both deleted) is unmerged for the same reason `AA` is: git reports
+    // an unmerged path with the same letter in both columns and no `U` at all.
+    // It used to fall through to the "tracked in HEAD" branch and be declared
+    // unrepairable, which was true of the repair it was offered and false of
+    // the one it needed.
     const unmerged = vs.some(
-      (v) => v.index === "U" || v.worktree === "U" || (v.index === "A" && v.worktree === "A")
+      (v) =>
+        v.index === "U" ||
+        v.worktree === "U" ||
+        (v.index === "A" && v.worktree === "A") ||
+        (v.index === "D" && v.worktree === "D")
     );
 
     // "In HEAD" is the only question that matters, and it is answered two ways.
@@ -151,10 +176,7 @@ export function planSparseRepair(report: SparseSafetyReport): SparseRepairPlan {
     const tracked =
       indexCodes.some((c) => c !== "?" && c !== "." && c !== "A") || (!untracked && worktreeOnly);
     if (unmerged) {
-      plan.blocked.push({
-        path,
-        reason: "conflicted (unmerged) — finish or abort the merge first",
-      });
+      plan.resolveToHead.push(path);
       continue;
     }
     if (tracked) {

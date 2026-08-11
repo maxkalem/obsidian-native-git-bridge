@@ -49,6 +49,8 @@ function actions(over: Partial<DiffViewActions> = {}): DiffViewActions {
     keepLineSelection: () => false,
     colors: () => null,
     progressText: () => "",
+    openFileAt: () => undefined,
+    restoreBlock: () => Promise.resolve(),
     applyPatch: () => Promise.resolve(true),
     confirmDiscard: () => Promise.resolve(true),
     ...over,

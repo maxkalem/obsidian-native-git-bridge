@@ -22,7 +22,17 @@ export interface DeviceLocalSettings {
   /** Merge derived sparse exclusions into the protected set (default on). */
   autoProtectSparse: boolean;
   opTimeoutSeconds: number;
-  autoPullOnOpen: boolean;
+  /**
+   * What to do when Obsidian opens, if anything.
+   *
+   * "pull" was a boolean and is the default still, because it only brings work
+   * in. "sync" also commits and pushes, which on launch means publishing edits
+   * nobody has looked at yet — in a vault where opening the app already
+   * rewrites `workspace-mobile.json`, that is a commit every single time. It is
+   * offered because some people want exactly that, and it is not the default
+   * because nobody should get it without asking.
+   */
+  onOpenAction: "nothing" | "pull" | "sync";
   autoSyncOnClose: boolean;
   periodicSyncMinutes: number;
   minAutoSyncIntervalMinutes: number;
@@ -113,7 +123,7 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   derivedProtectedPaths: [],
   autoProtectSparse: true,
   opTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
-  autoPullOnOpen: false,
+  onOpenAction: "nothing",
   autoSyncOnClose: false,
   periodicSyncMinutes: 0,
   minAutoSyncIntervalMinutes: 15,

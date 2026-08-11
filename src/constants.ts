@@ -21,6 +21,12 @@ export const REQUESTS_DIR = "requests";
 export const RESULTS_DIR = "results";
 export const CANCEL_DIR = "cancel";
 export const DONE_DIR = "done";
+/**
+ * Where the runner streams stderr while a request is still running, one file
+ * per request id. Read while waiting so a long operation can say what it is
+ * doing; kept afterwards so the shared log bundle can carry it.
+ */
+export const PROGRESS_DIR = "progress";
 
 export const POLL_INTERVAL_MS = 400;
 export const DEFAULT_TIMEOUT_SECONDS = 90;
@@ -34,11 +40,55 @@ export const DEFAULT_TIMEOUT_SECONDS = 90;
 export const ACTION_TIMEOUT_SECONDS: Readonly<Record<string, number>> = {
   "clone-into-vault": 900,
   "adopt-remote": 900,
+  // The repair steps. Each ends with `git fsck --connectivity-only`, which is
+  // minutes on a vault of real size, so none of them fits the ordinary 90 s.
+  // The two fetch steps get the clone-sized budget: the refetch downloads the
+  // whole history, and the targeted fetch is cheap on the wire but still pays
+  // for the fsck that verifies it.
+  "repair-scan": 600,
+  "repair-fetch-missing": 900,
+  "repair-refetch": 900,
+  "repair-reset-upstream": 300,
 };
+
+/**
+ * Actions that talk to a remote, and the floor their budget may not go below.
+ *
+ * The setting is one number for every action, and it was the network ones that
+ * paid for that. On a device where a local `status` takes seven seconds and
+ * staging one file takes eight, a budget of ten leaves a pull no chance at all
+ * — and what the user then sees is not "this took too long" but a bridge check
+ * that says the runtime folder is healthy, because it is. The runner was
+ * working the whole time.
+ *
+ * A floor rather than a fixed override: someone who raises the setting means it
+ * for these too, and clone still has its own much larger number above.
+ */
+export const NETWORK_ACTIONS: ReadonlySet<string> = new Set(["fetch", "pull", "push", "sync"]);
+export const MIN_NETWORK_TIMEOUT_SECONDS = 120;
+
+/** The budget one request actually gets, from the action and the device setting. */
+export function timeoutSecondsFor(action: string, settingSeconds: number): number {
+  const fixed = ACTION_TIMEOUT_SECONDS[action];
+  if (fixed !== undefined) return fixed;
+  const base = Number.isFinite(settingSeconds) && settingSeconds > 0
+    ? Math.floor(settingSeconds)
+    : DEFAULT_TIMEOUT_SECONDS;
+  return NETWORK_ACTIONS.has(action) ? Math.max(base, MIN_NETWORK_TIMEOUT_SECONDS) : base;
+}
 export const RESULT_RETENTION_MS = 24 * 60 * 60 * 1000;
 export const STALE_LOCK_MS = 30 * 60 * 1000;
 export const DISPLAY_OUTPUT_LIMIT = 100 * 1024;
 export const LOG_MAX_ENTRIES = 200;
+
+/**
+ * When a wait stops being a wait and becomes a question.
+ *
+ * Half a minute: past that, a local action has certainly failed to be local, and
+ * "is this thing working?" is what the user is actually asking. Used only by the
+ * opt-in that opens the output panel by itself.
+ */
+export const LONG_OPERATION_SECONDS = 30;
 
 export const SPARSE_SAFETY_WARNING =
   "Sparse checkout safety check failed. The excluded directories appear as Git changes. " +

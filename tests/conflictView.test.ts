@@ -39,6 +39,7 @@ function actions(text: string, unit: InlineDiffUnit = "word"): ConflictViewActio
     stageFile: () => Promise.resolve(),
     markersVisible: () => false,
     showInvisibles: () => false,
+    wrapLines: () => false,
     inlineUnit: () => unit,
     colors: () => null,
   };

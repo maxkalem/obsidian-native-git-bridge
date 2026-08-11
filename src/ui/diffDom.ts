@@ -100,8 +100,14 @@ function renderHunkHeader(
   opts: DiffRenderOptions
 ): void {
   const tr = tbody.createEl("tr", { cls: "ngb-hunk-start" });
-  tr.createEl("td", { cls: "d2h-code-linenumber d2h-info" });
+  // ONE cell spanning both columns, not an empty gutter cell followed by the
+  // content. The gutter cell was always empty on a `@@` row, and its only
+  // effect was to start this row's content at the gutter's width — so the
+  // sticky bar below began that far to the right and only reached the pane's
+  // left edge after the reader had scrolled that far. Sticking at zero from the
+  // start is what makes the controls not move at all.
   const cell = tr.createEl("td", { cls: "d2h-info" });
+  cell.setAttribute("colspan", "2");
   cell.createDiv({ cls: "d2h-code-line", text: header });
   // The bar exists even with no controls: it carries the line range, which is
   // information about the hunk rather than something only an actionable pane
@@ -140,16 +146,30 @@ function renderLine(
 
   const tr = tbody.createEl("tr");
   const gutter = tr.createEl("td", { cls: `d2h-code-linenumber ${cls}` });
-  // The checkbox goes FIRST in the gutter, left of the numbers: it belongs to
-  // the row, and on a phone the left edge is the only part of a wide diff that
-  // is reliably reachable without scrolling sideways.
+  const num1 = gutter.createDiv({
+    cls: "line-num1",
+    text: line.oldNumber === null ? "" : String(line.oldNumber),
+  });
+  const num2 = gutter.createDiv({
+    cls: "line-num2",
+    text: line.newNumber === null ? "" : String(line.newNumber),
+  });
+  // The checkbox goes INTO the number column that has no number: an added line
+  // has no old number, a deleted line has no new one, and exactly the lines
+  // that can be picked are the lines with a gap.
+  //
+  // It used to sit before both numbers, which widened the gutter by its own
+  // width — so turning line-picking on shifted every number and every +/- to
+  // the right, and the diff appeared to move under the reader. Placed in the
+  // gap, it costs nothing and the columns do not move at all.
   if (opts.lineCheckbox) {
-    const box = gutter.createEl("input", { cls: "ngb-line-pick" });
-    box.type = "checkbox";
-    opts.lineCheckbox(box, hunkIndex, lineIndex);
+    const slot = line.oldNumber === null ? num1 : line.newNumber === null ? num2 : null;
+    if (slot !== null) {
+      const box = slot.createEl("input", { cls: "ngb-line-pick" });
+      box.type = "checkbox";
+      opts.lineCheckbox(box, hunkIndex, lineIndex);
+    }
   }
-  gutter.createDiv({ cls: "line-num1", text: line.oldNumber === null ? "" : String(line.oldNumber) });
-  gutter.createDiv({ cls: "line-num2", text: line.newNumber === null ? "" : String(line.newNumber) });
   // The prefix lives in the STICKY gutter, not in the code cell: in the code
   // cell it scrolled away horizontally and, when lines wrap, read like content.
   gutter.createSpan({

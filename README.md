@@ -1,5 +1,10 @@
 # Native Git Bridge
 
+[![Downloads](https://img.shields.io/github/downloads/maxkalem/obsidian-native-git-bridge/total?style=flat&logo=github&label=Downloads&color=success&cacheSeconds=3600)](https://github.com/maxkalem/obsidian-native-git-bridge/releases)
+[![GitHub stars](https://img.shields.io/github/stars/maxkalem/obsidian-native-git-bridge?style=flat&logo=github&label=Stars&cacheSeconds=300)](https://github.com/maxkalem/obsidian-native-git-bridge/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/maxkalem/obsidian-native-git-bridge?style=flat&label=Release&cacheSeconds=3600)](https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest)
+[![License](https://img.shields.io/github/license/maxkalem/obsidian-native-git-bridge?style=flat&label=License&cacheSeconds=86400)](LICENSE)
+
 ## Description
 
 > **Android only.** This plugin needs Termux and a small companion app; it cannot work on desktop, where it loads, explains itself and disables every operation. On desktop use plain Git or [obsidian-git](https://github.com/Vinzent03/obsidian-git). Its natural habitat is a vault shared between a desktop (any Git tooling) and an Android device (this bridge).
@@ -25,6 +30,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 **Diff panes** rendered by the plugin itself, line by line, with highlighting inside a changed line: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. A hunk, or a set of lines picked in the gutter, can be staged, unstaged or discarded on its own, and each hunk says which lines of the file it is. Large diffs are trimmed at a hunk boundary against a configurable budget, and the pane says how much it is showing. Optional line wrapping, whitespace glyphs, a choice between comparing changed lines by word or by character, and optional custom colours for the diff and conflict panes (off by default, light and dark configured separately).
 
 **History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`), shows the file as it was at that commit, and can restore the whole file or a single block from it. Every route to a diff or a history — status panel, context menu, command palette — opens these panels; there is one surface per question.
+
+**A live output panel**: what Termux is saying while it says it. Tapping the state line that counts the seconds opens git's own output as it arrives, the elapsed time against the budget it is spent from, and — the part that matters when the output is silent — whether the request ever reached Termux at all. The runner log and the streams of earlier operations sit below it, collapsed. Optionally opens by itself once an operation has run for thirty seconds.
 
 **Merge conflicts**, resolved manually and only on an explicit choice: a resolution pane (same display preferences as the diff panes) with keep-local / keep-remote per block, the local and remote lines of a block compared against each other so the pane says what actually differs rather than only that something does, whole-file resolution from the context menu for anything the pane cannot display, git's own merge message prefilled for the commit that follows.
 
@@ -143,6 +150,12 @@ bash "<vault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "<vault>"
 3. Settings -> Community plugins -> enable "Native Git Bridge".
 4. In the plugin settings press "Copy command" and paste the command into Termux. Everything else is set up automatically: the pairing token is imported by the plugin on its own.
 
+
+## If it is useful to you
+
+Stars are the only signal this project gets about whether the work is worth continuing, so if the plugin does something for you, [star it on GitHub](https://github.com/maxkalem/obsidian-native-git-bridge) — it takes a second and it is read.
+
+[![GitHub Repo stars](https://img.shields.io/github/stars/maxkalem/obsidian-native-git-bridge?style=social&cacheSeconds=300)](https://github.com/maxkalem/obsidian-native-git-bridge/stargazers)
 
 ## License
 

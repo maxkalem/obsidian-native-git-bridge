@@ -156,6 +156,43 @@ describe("BridgeClient recovery paths", () => {
     expect(fs.files.has(`${paths.doneDir}/invalid-1754300000.json`)).toBe(true);
   });
 
+  it("sweeps stale progress streams, which nothing else would ever remove", async () => {
+    // They deliberately outlive their request so a bundle shared afterwards can
+    // carry them, so this is the only thing standing between the runtime folder
+    // and one file per operation forever.
+    const fs = memFS();
+    const nowRef = { t: Date.parse("2026-08-05T00:00:00Z") };
+    const c = client(fs, nowRef);
+    fs.files.set(paths.progressFile("r-20260801T000000Z-old"), "fetching");
+    fs.files.set(paths.progressFile("r-20260804T235900Z-new"), "fetching");
+    const removed = await c.cleanupOld();
+    expect(removed).toBe(1);
+    expect(fs.files.has(paths.progressFile("r-20260804T235900Z-new"))).toBe(true);
+  });
+
+  it("reads the stream of a request in flight, and answers null when there is none", async () => {
+    const fs = memFS();
+    const c = client(fs, { t: 0 });
+    // An older runner writes no stream, and a request rejected before it began
+    // never gets one. Neither is a failure: the operation works without it.
+    expect(await c.readProgress("r-20260805T100000Z-none")).toBeNull();
+    fs.files.set(paths.progressFile("r-20260805T100000Z-live"), "sync: fetching from origin\n");
+    expect(await c.readProgress("r-20260805T100000Z-live")).toContain("fetching from origin");
+    // Present but empty is also nothing to show.
+    fs.files.set(paths.progressFile("r-20260805T100000Z-blank"), "");
+    expect(await c.readProgress("r-20260805T100000Z-blank")).toBeNull();
+  });
+
+  it("readProgress swallows a torn read rather than failing the operation", async () => {
+    // The runner appends while this reads. A half-read is worth nothing and
+    // worth no complaint either — the next poll is 400 ms away.
+    const fs = memFS();
+    const failing: RuntimeFS = { ...fs, read: async () => Promise.reject(new Error("EIO")) };
+    fs.files.set(paths.progressFile("r-20260805T100000Z-torn"), "x");
+    const c = client(failing, { t: 0 });
+    await expect(c.readProgress("r-20260805T100000Z-torn")).resolves.toBeNull();
+  });
+
   it("cleanupOld survives an unreadable directory and an fs.remove failure", async () => {
     const fs = memFS();
     const nowRef = { t: Date.parse("2026-08-05T00:00:00Z") };

@@ -24,6 +24,37 @@ describe("OperationLog", () => {
     expect(log.list()[0]!.detail).toContain("***@");
   });
 
+  /**
+   * The `user:password` form was the only one the redaction knew, and it is not
+   * the form a token arrives in. GitHub and GitLab tokens are carried as the
+   * USERNAME with no password at all, so a failing fetch could put a live token
+   * into a log the user then shares as a file.
+   */
+  it("redacts a token carried as the username, with no password", () => {
+    expect(redact("fatal: could not read from https://ghp_liveTokenHere@github.com/x/y.git")).toBe(
+      "fatal: could not read from https://***@github.com/x/y.git"
+    );
+    expect(redact("https://oauth2:glpat-abc123def@gitlab.com/x.git")).toContain("https://***@");
+  });
+
+  it("keeps the ssh user, which is not a secret", () => {
+    // Blanking it would turn every ssh remote in a log into the same string and
+    // buy nothing: `git` is the universal SSH user for every forge.
+    expect(redact("ssh://git@github.com/x/y.git")).toBe("ssh://git@github.com/x/y.git");
+  });
+
+  it("redacts a token that arrives with no URL around it", () => {
+    expect(redact("remote: ghp_abcdefghijklmnop rejected")).toBe("remote: ghp_*** rejected");
+    expect(redact("Authorization: Bearer eyJhbGciOiJIUzI1")).toBe("Authorization: Bearer ***");
+    expect(redact("github_pat_11ABCDEFG0abcdefg")).toBe("github_pat_***");
+  });
+
+  it("leaves an ordinary URL alone", () => {
+    expect(redact("cloning https://github.com/maxkalem/vault.git")).toBe(
+      "cloning https://github.com/maxkalem/vault.git"
+    );
+  });
+
   it("caps the ring buffer", () => {
     const store = new DeviceLocalSettingsStore(null, "v");
     const log = new OperationLog(store);

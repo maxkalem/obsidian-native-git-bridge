@@ -9,8 +9,9 @@ ok()   { PASS=$((PASS+1)); echo "  ok - $*"; }
 bad()  { FAIL=$((FAIL+1)); echo "  FAIL - $*"; }
 check(){ if eval "$1"; then ok "$2"; else bad "$2"; fi; }
 
-ROOT="$(mktemp -d)"
-trap 'rm -rf "$ROOT"' EXIT
+ROOT="${NGB_E2E_ROOT:-$(mktemp -d)}"
+mkdir -p "$ROOT"
+[ -n "${NGB_E2E_KEEP:-}" ] || trap 'rm -rf "$ROOT"' EXIT
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUNNER="$SCRIPT_DIR/native-git-bridge/termux/native-git-bridge-runner.sh"
 
@@ -587,8 +588,12 @@ check '[ ! -d "$RUNTIME/.runner.lock" ]' "no lock left inside the vault runtime 
 check '[ ! -d "$ROOT/conf/.runner.lock" ]' "global lock released on exit"
 
 echo "# handshake: runner reports its protocol version"
-check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "12" ]' "runnerVersion = 12 reported to the plugin"
-check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=12"' "runner announces its version on stdout (companion probe)"
+# Read from the script rather than pinned to a literal: this assertion is about
+# the two channels AGREEING, not about which number they carry, and a pinned
+# number turns every runner release into a failing test that says nothing.
+RUNNER_V="$(sed -n 's/^RUNNER_VERSION=//p' "$RUNNER" | head -1)"
+check '[ "$(jq -r ".runnerVersion" "$RUNTIME/results/r-20260804T150000Z-conc01.json")" = "$RUNNER_V" ]' "runnerVersion reported to the plugin matches the script"
+check 'bash "$RUNNER" | grep -q "NGB_RUNNER_VERSION=$RUNNER_V"' "runner announces the same version on stdout (companion probe)"
 
 echo "# resilience: interrupted requests are requeued on the next run"
 req "r-20260804T150100Z-intr01" status "$TOKEN"
@@ -1755,6 +1760,554 @@ check 'jq -e ".error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "re-applying an 
 check 'jq -er ".error.message" "$RES" | grep -qi "out of date"' "…and the message tells the user to refresh the diff"
 check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "…and fresh status still rides along"
 
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# phase 12: sync commits BEFORE the merge, but only when the merge needs it.
+#
+# git will not merge over a dirty path it has to change, and will not create a
+# file that already exists untracked. It refuses whether or not the merge would
+# actually conflict — the refusal is about the working tree, not the content.
+# Pulling before committing therefore had a state with no exit: sync stopped
+# before it ever reached its own commit step, and pressing sync again repeated
+# it forever.
+#
+# Committing unconditionally would cost a merge commit on every sync. So the
+# runner asks git which paths the merge brings in, intersects them with what is
+# dirty here, and commits first only when they overlap.
+# ---------------------------------------------------------------------------
+echo "# phase 12: sync commits before the merge only when it has to"
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+git push -q origin "$MAIN_BRANCH" 2>/dev/null || true
+
+# A second clone stands in for the other device.
+rm -rf "$ROOT/other"
+git clone -q "$ROOT/remote.git" "$ROOT/other"
+git -C "$ROOT/other" config user.email e2e@example.com
+git -C "$ROOT/other" config user.name "e2e other"
+sync_req() { # $1 id, $2 message
+  req "$1" sync "$TOKEN" \
+    "{\"protectedPaths\":[\"Private/Hidden\",\"Projects/Archive\"],\"message\":\"$2\"}"
+  bash "$RUNNER"
+}
+
+# --- a file both sides touched, in different places ------------------------
+# The merge is clean; git still refuses it while the file is dirty here. This
+# is the case that had no way out, and it is the common one: two devices
+# editing the same long note.
+{ for i in $(seq 1 40); do echo "рядок $i"; done; } > "$ROOT/vault/Notes/shared.md"
+git add Notes/shared.md >/dev/null 2>&1
+git commit -qm "e2e: shared base" >/dev/null 2>&1
+git push -q origin "$MAIN_BRANCH"
+git -C "$ROOT/other" pull -q --no-rebase
+sed -i '1s/.*/рядок 1 — the other device/' "$ROOT/other/Notes/shared.md"
+git -C "$ROOT/other" commit -qam "other device: top of shared.md" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+sed -i '40s/.*/рядок 40 — typed here, never committed/' "$ROOT/vault/Notes/shared.md"
+check '[ -n "$(git status --porcelain -- Notes/shared.md)" ]' "the colliding file is dirty here"
+
+sync_req "r-20260810T090000Z-sync01" "e2e: sync over a collision"
+RES="$RUNTIME/results/r-20260810T090000Z-sync01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "sync survives a file the incoming merge also changes"
+check 'jq -er ".data.steps" "$RES" | grep -q "committed-before-merge"' "…by committing before the merge"
+check 'jq -er ".data.steps" "$RES" | grep -q "merged"' "…and the merge then ran"
+check '[ -z "$(git status --porcelain -- Notes/shared.md)" ]' "nothing of the local edit is left uncommitted"
+check 'grep -q "the other device" Notes/shared.md' "…their line arrived"
+check 'grep -q "typed here, never committed" Notes/shared.md' "…and ours survived it"
+
+# --- a dirty file the merge does NOT touch ---------------------------------
+# Nothing may be committed early here: that would put a merge commit on every
+# sync for no reason.
+printf 'only they changed this\n' > "$ROOT/other/Notes/theirs.md"
+git -C "$ROOT/other" pull -q --no-rebase >/dev/null 2>&1
+git -C "$ROOT/other" add -A >/dev/null 2>&1
+git -C "$ROOT/other" commit -qm "other device: theirs.md" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+printf 'edited here, unrelated\n' > "$ROOT/vault/Notes/ours.md"
+
+sync_req "r-20260810T090010Z-sync02" "e2e: sync with no collision"
+RES="$RUNTIME/results/r-20260810T090010Z-sync02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "sync with nothing colliding still succeeds"
+check '! jq -er ".data.steps" "$RES" | grep -q "committed-before-merge"' "…and does NOT commit before the merge"
+check 'jq -er ".data.steps" "$RES" | grep -q ",committed"' "…it still commits, in its own step, after the merge"
+check '[ -f Notes/theirs.md ]' "their file arrived"
+
+# --- a real content conflict -----------------------------------------------
+# Committing first does not make disagreements go away, and must not: it turns
+# an inescapable refusal into an ordinary conflict, which this plugin has a
+# pane for.
+git -C "$ROOT/other" pull -q --no-rebase >/dev/null 2>&1
+sed -i '20s/.*/рядок 20 — theirs/' "$ROOT/other/Notes/shared.md"
+git -C "$ROOT/other" commit -qam "other device: line 20" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+sed -i '20s/.*/рядок 20 — ours/' "$ROOT/vault/Notes/shared.md"
+
+sync_req "r-20260810T090020Z-sync03" "e2e: sync into a real conflict"
+RES="$RUNTIME/results/r-20260810T090020Z-sync03.json"
+check 'jq -e ".error.code == \"CONFLICT\"" "$RES" >/dev/null' "a genuine disagreement is reported as a conflict"
+check 'jq -er ".data.steps" "$RES" | grep -q "committed-before-merge"' "…after the local edit was committed, so the file has two sides"
+check 'jq -er ".data.conflicts" "$RES" | grep -q "Notes/shared.md"' "…and the conflicted path is named"
+check 'git status --porcelain -- Notes/shared.md | grep -q "^UU"' "the working tree really is mid-merge"
+git merge --abort >/dev/null 2>&1 || true
+
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# phase 13: repairing an object database that git was killed in the middle of.
+#
+# A zero-byte file under .git/objects is what remains when git created the file
+# and was stopped before writing to it. Android does that to Termux in the
+# background. Every command that walks the tree then fails, with a message
+# about the operation rather than about the repository.
+# ---------------------------------------------------------------------------
+echo "# phase 13: repairing a damaged object database"
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# Break it the way the device broke it: truncate a real object to zero bytes.
+# The victim is MADE, not found: a fresh commit's tree is reachable, loose, in
+# no local pack, and pushed so the remote can give it back — `find | head -1`
+# used to pick whatever the filesystem listed first, sometimes an unreachable
+# leftover, and the number of checks in this phase moved from run to run.
+git merge --abort >/dev/null 2>&1 || true
+git fetch -q origin && git reset -q --hard "origin/$MAIN_BRANCH"
+printf 'a note whose tree gets truncated\n' > Notes/truncated.md
+git add Notes/truncated.md >/dev/null 2>&1
+git commit -qm "e2e: an object to truncate" >/dev/null 2>&1
+git push -q origin "$MAIN_BRANCH"
+VSHA="$(git rev-parse "HEAD^{tree}")"
+VICTIM=".git/objects/${VSHA:0:2}/${VSHA:2}"
+check '[ -f "$VICTIM" ]' "there is a loose, reachable object to damage"
+chmod u+w "$VICTIM" 2>/dev/null || true
+: > "$VICTIM"
+check '[ ! -s "$VICTIM" ]' "the object file is now empty, as a killed git leaves it"
+
+# The repair is four short actions now, sequenced by the plugin: scan (remove
+# empties, report what is missing and whose it is), fetch-missing (exactly the
+# named objects), refetch (the whole history, always behind the user's yes),
+# reset-upstream (the exit for damage inside local-only history). The DECISIONS
+# between them live in TypeScript with their own unit tests; what is proven
+# here is each primitive against a real repository.
+req "r-20260810T100000Z-rep01" repair-scan "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100000Z-rep01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-scan runs"
+check '[ "$(jq -r .data.removedCount "$RES")" -ge 1 ]' "…and removes the empty file"
+check '[ ! -e "$VICTIM" ]' "…no empty object file is left behind"
+check 'jq -er ".data.removedObjects" "$RES" | grep -q "/"' "…and the result names what it removed"
+# No branchInfo assertion HERE, deliberately: the truncated object is HEAD's
+# own tree, so until it is recovered even `git status` cannot read the branch —
+# the scan reports what it can and the fields are legitimately thin.
+check 'jq -e ".data | has(\"aheadCount\") and has(\"hasUpstream\") and has(\"cacheTreeBroken\")" "$RES" >/dev/null' "…and it reports whose the damage might be"
+
+# Whatever the scan said is missing, the targeted fetch brings back: the victim
+# is a reachable object the remote still has.
+check 'jq -r ".data.fsckMissing" "$RES" | grep -q "$VSHA"' "…and the scan names the truncated object as missing"
+ARGS="$(jq -r '.data.fsckMissing' "$RES" | grep -oE '[0-9a-f]{40}' | sort -u | jq -R . | jq -sc '{oids:.}')"
+req "r-20260810T100001Z-rep01b" repair-fetch-missing "$TOKEN" "$ARGS"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100001Z-rep01b.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-fetch-missing runs"
+check '[ -z "$(jq -r ".data.fsckMissing" "$RES")" ]' "…and nothing is missing afterwards"
+check '[ "$(jq -r .data.recoveredBy "$RES")" = "targeted" ]' "…recovered by asking, not by downloading the history"
+check 'git cat-file -p "$VSHA" >/dev/null 2>&1' "…the truncated object is back and readable"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "…and fresh status rides along now that the repository is readable again"
+
+# The validation half: garbage ids never reach git as arguments.
+req "r-20260810T100002Z-repbad" repair-fetch-missing "$TOKEN" '{"oids":["--upload-pack=/bin/true"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100002Z-repbad.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "repair-fetch-missing refuses a non-hex id"
+check '[ "$(jq -r .error.code "$RES")" = "BAD_REQUEST" ]' "…as a bad request, before git sees it"
+req "r-20260810T100003Z-repempty" repair-fetch-missing "$TOKEN" '{"oids":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100003Z-repempty.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "…and an empty list is refused too"
+
+# Objects that are damaged but NOT empty must survive: they may be recoverable,
+# and that is a decision for a person, not for a script.
+#
+# The victim is made for the job, and both properties matter.
+#
+# It must be REACHABLE: `find … | head -1` returned whatever the filesystem
+# listed first, sometimes an unreachable leftover from an earlier phase, and a
+# corrupt object nothing points at is genuinely harmless — the repair rightly
+# said nothing was wrong, so these checks failed on about half the runs.
+#
+# It must exist ONLY as a loose file: an object that is also inside a pack is
+# read from the pack, so corrupting the loose copy changes nothing.
+#
+# And it is a TREE, not a blob, which is a real limit of this action rather than
+# a convenience. The verification is `git fsck --connectivity-only`, chosen
+# because `--full` took between four and thirty-nine minutes on the user's vault
+# — longer than the action's own budget. Connectivity walks the graph, so it
+# parses commits and trees and notices when one cannot be inflated; it never
+# reads blob CONTENT, so a corrupt blob is invisible to it. That is documented as
+# a limitation, and `git fsck --full` in Termux is the tool for it.
+printf 'a note whose tree will be damaged\n' > Notes/fragile.md
+git add Notes/fragile.md >/dev/null 2>&1
+git commit -qm "e2e: an object to damage" >/dev/null 2>&1
+OTHER_SHA="$(git rev-parse "HEAD^{tree}")"
+OTHER=".git/objects/${OTHER_SHA:0:2}/${OTHER_SHA:2}"
+if [ -n "$OTHER_SHA" ] && [ -f "$OTHER" ]; then
+  chmod u+w "$OTHER" 2>/dev/null || true
+  printf 'garbage that is not a git object' > "$OTHER"
+  # `-p`, not `-e`: existence is not the question, readability is. `cat-file -e`
+  # answers from the file being present and says yes to a file full of garbage.
+  check '! git cat-file -p "$OTHER_SHA" >/dev/null 2>&1' "a reachable object is corrupt but not empty"
+  req "r-20260810T100010Z-rep02" repair-scan "$TOKEN" '{}'
+  bash "$RUNNER"
+  RES="$RUNTIME/results/r-20260810T100010Z-rep02.json"
+  # Damaged content, nothing missing. The scan answers ok — it is a question,
+  # not a verdict — and what it reports is what lets the plugin's decision core
+  # (unit-tested against exactly this shape) name damage rather than absence.
+  check 'jq -e ".ok == true" "$RES" >/dev/null' "the scan itself succeeds on a damaged store"
+  check '[ -n "$(jq -r ".data.fsckRemaining" "$RES")" ]' "…and reports what fsck still sees"
+  check '[ -z "$(jq -r ".data.fsckMissing" "$RES")" ]' "…with nothing listed as missing, because nothing is"
+  check '[ -e "$OTHER" ]' "…while the object is left alone, because it is not empty"
+  check '[ "$(jq -r .data.removedCount "$RES")" = "0" ]' "…removing nothing"
+  # Put the fixture back: a deliberately corrupted object left in place would
+  # make every later check in this phase fail for the wrong reason. The commit
+  # that referenced it goes too, so nothing reachable points at a gap.
+  rm -f "$OTHER"
+  git reset -q --hard HEAD~1 2>/dev/null || true
+  rm -f Notes/fragile.md
+  # The discarded commit lives on in the reflog, and fsck's default is to treat
+  # every reflog entry as a root — which kept the NEXT sub-phase red about an
+  # object nothing in the repository needs. The runner passes `--no-reflogs` for
+  # exactly that reason; this keeps the fixture tidy regardless.
+  git reflog expire --expire=now --all >/dev/null 2>&1 || true
+fi
+
+# The state the device was actually left in, which the first version of this
+# action could not get out of: the empty file has ALREADY been removed by an
+# earlier repair, so there is nothing to remove — and the object is still gone,
+# because deleting a file downloads nothing. The fetch used to be gated on
+# `removed > 0`, so from here every repair did nothing and answered ok=true.
+# Four rounds of that were logged on the device, with `unable to read tree`
+# between each pair.
+cd "$ROOT/vault"
+git merge --abort >/dev/null 2>&1 || true
+git fetch -q origin && git reset -q --hard "origin/$MAIN_BRANCH"
+# The victim needs two properties at once, and getting either wrong makes this
+# phase pass for the wrong reason:
+#
+#   * present on the REMOTE, or the repair cannot recover it and this becomes the
+#     other test — the one about giving up honestly;
+#   * absent from every local PACK, or deleting the loose copy breaks nothing at
+#     all. That bit is easy to get wrong here, because the repair in the first
+#     sub-phase copies a whole pack in, so from that point on almost everything
+#     exists twice and a deleted loose object is simply read from the pack.
+#
+# A commit made and pushed right here has both: its objects are loose (a commit
+# writes loose objects), the remote has them (it was pushed), and no local pack
+# can contain them (every pack here predates them).
+printf 'a note whose tree the remote also has\n' > Notes/recoverable.md
+git add Notes/recoverable.md >/dev/null 2>&1
+git commit -qm "e2e: an object the remote can give back" >/dev/null 2>&1
+git push -q origin "$MAIN_BRANCH"
+GONE_SHA="$(git rev-parse "HEAD^{tree}")"
+GONE=".git/objects/${GONE_SHA:0:2}/${GONE_SHA:2}"
+chmod -R u+w .git/objects 2>/dev/null || true
+rm -f "$GONE"
+check '[ ! -e "$GONE" ]' "an object is absent with no empty file left behind"
+# `-p`, not `-e`: readability is the question, and `-e` answers from presence.
+check '! git cat-file -p "$GONE_SHA" >/dev/null 2>&1' "…and git really cannot read it"
+check 'git -C "$ROOT/remote.git" cat-file -e "$GONE_SHA"' "…while the remote still has it"
+
+# The state the device was left in: nothing to remove, the object still gone.
+# scan must REPORT it, and the targeted fetch must bring it back.
+req "r-20260810T100020Z-rep03" repair-scan "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100020Z-rep03.json"
+check '[ "$(jq -r .data.removedCount "$RES")" = "0" ]' "the scan finds nothing to remove"
+check 'jq -r ".data.fsckMissing" "$RES" | grep -q "$GONE_SHA"' "…and still names the missing object, because deleting a file downloads nothing"
+ARGS="$(jq -r '.data.fsckMissing' "$RES" | grep -oE '[0-9a-f]{40}' | sort -u | jq -R . | jq -sc '{oids:.}')"
+req "r-20260810T100021Z-rep03b" repair-fetch-missing "$TOKEN" "$ARGS"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100021Z-rep03b.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the targeted fetch runs"
+check '[ -z "$(jq -r ".data.fsckRemaining" "$RES")" ]' "…with nothing left missing"
+check 'git cat-file -p "$GONE_SHA" >/dev/null 2>&1' "…the object is back and readable"
+check '[ "$(git config --get extensions.partialclone || true)" = "" ]' "…and the promisor marking is undone, always"
+
+# The bundle's own case: an object the remote never had, because it belongs to a
+# LOCAL, unpushed commit. No fetch can help; the scan must say whose the damage
+# is (aheadCount), the refetch must report honestly, and the exit is
+# repair-reset-upstream — never a re-clone that would discard the local commit.
+printf 'local only\n' > Notes/local-only.md
+git add Notes/local-only.md >/dev/null 2>&1
+git commit -qm "e2e: never pushed" >/dev/null 2>&1
+ORPHAN="$(git rev-parse "HEAD^{tree}")"
+chmod -R u+w .git/objects 2>/dev/null || true
+rm -f ".git/objects/${ORPHAN:0:2}/${ORPHAN:2}"
+check '! git cat-file -e "$ORPHAN" 2>/dev/null' "an object exists nowhere, not even on the remote"
+
+req "r-20260810T100030Z-rep04" repair-scan "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100030Z-rep04.json"
+check 'jq -r ".data.fsckMissing" "$RES" | grep -q "$ORPHAN"' "the scan names the missing object"
+check '[ "$(jq -r .data.aheadCount "$RES")" -ge 1 ]' "…and reports the branch ahead of upstream: the damage is local-only"
+check '[ "$(jq -r .data.hasUpstream "$RES")" = "true" ]' "…with an upstream to rebuild on"
+
+req "r-20260810T100031Z-rep04b" repair-refetch "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100031Z-rep04b.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the refetch itself runs"
+check 'jq -r ".data.fsckMissing" "$RES" | grep -q "$ORPHAN"' "…and reports honestly that the object is still missing"
+
+# The exit. Files on disk must survive byte for byte; the branch lands on the
+# upstream; the old history stays reachable under the backup branch.
+req "r-20260810T100032Z-rep04c" repair-reset-upstream "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100032Z-rep04c.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-reset-upstream runs"
+BACKUP="$(jq -r '.data.backupRef' "$RES")"
+check '[ -n "$BACKUP" ] && git rev-parse --verify -q "refs/heads/$BACKUP" >/dev/null' "…the old history is kept under a visible backup branch"
+check '[ "$(git rev-parse HEAD)" = "$(git rev-parse "origin/$MAIN_BRANCH")" ]' "…the branch sits on the remote state"
+check '[ "$(cat Notes/local-only.md)" = "local only" ]' "…and the file from the abandoned commit is still on disk, byte for byte"
+check 'git status --porcelain | grep -q "Notes/local-only.md"' "…shown as an ordinary uncommitted change for the next sync"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "…fresh status rides along"
+# The index was rebuilt from a readable tree, so git can walk everything again.
+check 'git ls-tree -r HEAD >/dev/null 2>&1' "…and HEAD's tree is readable again"
+
+# A branch with no upstream has nothing to rebuild on, and the action says so
+# instead of guessing. NOT named e2e-no-upstream: phase 5 already owns that
+# name and bound it to an upstream by push -u, so reusing it made the checkout
+# fail silently and the action ran — correctly — on the branch it was left on.
+git checkout -qb e2e-rescue-no-up
+check '[ "$(git branch --show-current)" = "e2e-rescue-no-up" ]' "the fixture really is on a branch with no upstream"
+req "r-20260810T100033Z-rep04d" repair-reset-upstream "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100033Z-rep04d.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "repair-reset-upstream refuses a branch with no upstream"
+check 'jq -r ".error.message" "$RES" | grep -qi "upstream"' "…naming the reason"
+check '! git branch --list "ngb-rescue-*" | grep -q . || [ -n "$BACKUP" ]' "…and leaves no backup branch of its own behind"
+git checkout -q "$MAIN_BRANCH" 2>/dev/null
+
+# The backup branch is deleted through the bridge, because the user is never
+# sent to Termux for it: the action accepts nothing but the rescue-branch name
+# shape, so it cannot serve as a general branch-delete.
+req "r-20260810T100034Z-rep04e" repair-drop-backup "$TOKEN" '{"ref":"master"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100034Z-rep04e.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "repair-drop-backup refuses anything but a rescue branch"
+check '[ "$(jq -r .error.code "$RES")" = "BAD_REQUEST" ]' "…as a bad request, before git sees it"
+check 'git rev-parse --verify -q "refs/heads/$MAIN_BRANCH" >/dev/null' "…and the named branch is untouched"
+ARGS="$(jq -nc --arg r "$BACKUP" '{ref:$r}')"
+req "r-20260810T100035Z-rep04f" repair-drop-backup "$TOKEN" "$ARGS"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100035Z-rep04f.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-drop-backup deletes the rescue branch"
+check '! git rev-parse --verify -q "refs/heads/$BACKUP" >/dev/null 2>&1' "…and it is gone"
+check '[ "$(jq -r .data.droppedRef "$RES")" = "$BACKUP" ]' "…named in the result"
+req "r-20260810T100036Z-rep04g" repair-drop-backup "$TOKEN" "$ARGS"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100036Z-rep04g.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "…and deleting it twice is refused with a reason, not a success"
+
+# Back to the remote's state, drop the reflog that still points at the broken
+# commit, so later phases start from a repository git can walk.
+git branch -D "$BACKUP" >/dev/null 2>&1 || true
+git branch -D e2e-rescue-no-up >/dev/null 2>&1 || true
+rm -f Notes/local-only.md
+git reset -q --hard "origin/$MAIN_BRANCH"
+git reflog expire --expire=now --all >/dev/null 2>&1 || true
+git gc -q --prune=now >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
+# phase 14: resolving a conflict where one side DELETED the file.
+#
+# `git checkout --theirs` on such a path fails with "does not have their
+# version" — true, and useless: the user picked a side, and on this kind of
+# conflict picking the side that deleted the file means deleting it.
+# ---------------------------------------------------------------------------
+echo "# phase 14: delete/modify conflicts have both answers"
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+git merge --abort >/dev/null 2>&1 || true
+# Start from the remote, whatever the earlier phases left behind. This phase is
+# about one specific conflict; inheriting another one would only make its
+# failures unreadable.
+git fetch -q origin
+git reset -q --hard "origin/$MAIN_BRANCH"
+git clean -qfd >/dev/null 2>&1 || true
+git -C "$ROOT/other" fetch -q origin
+git -C "$ROOT/other" reset -q --hard "origin/$MAIN_BRANCH"
+
+printf 'first\nsecond\n' > Notes/gone.md
+git add Notes/gone.md >/dev/null 2>&1
+git commit -qm "e2e: a file to argue about" >/dev/null 2>&1
+git push -q origin "$MAIN_BRANCH"
+git -C "$ROOT/other" pull -q --no-rebase >/dev/null 2>&1
+# They delete it; we change it. The classic delete/modify.
+git -C "$ROOT/other" rm -q Notes/gone.md
+git -C "$ROOT/other" commit -qm "other device: delete it" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+printf 'first\nsecond CHANGED HERE\n' > Notes/gone.md
+git commit -qam "e2e: change it here" >/dev/null 2>&1
+git fetch -q
+git merge --no-edit "origin/$MAIN_BRANCH" >/dev/null 2>&1 || true
+check 'git ls-files -u -- Notes/gone.md | grep -q .' "the file really is in a delete/modify conflict"
+check '[ -z "$(git ls-files -u -- Notes/gone.md | awk "{print \$3}" | grep -x 3)" ]' "…and their side has no version of it"
+
+req "r-20260810T110000Z-dm01" resolve-conflict "$TOKEN" \
+  '{"path":"Notes/gone.md","side":"theirs","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T110000Z-dm01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "choosing the side that deleted it no longer fails"
+check '[ "$(jq -r .data.resolvedBy "$RES")" = "deleted" ]' "…and says it resolved by deleting"
+check '[ ! -e Notes/gone.md ]' "…the file is gone from the working tree"
+check '[ -z "$(git ls-files -u -- Notes/gone.md)" ]' "…and the path is no longer unmerged"
+
+# The mirror: keeping OUR version on the same kind of conflict.
+git merge --abort >/dev/null 2>&1 || true
+git merge --no-edit "origin/$MAIN_BRANCH" >/dev/null 2>&1 || true
+check 'git ls-files -u -- Notes/gone.md | grep -q .' "conflicted again, for the other answer"
+req "r-20260810T110010Z-dm02" resolve-conflict "$TOKEN" \
+  '{"path":"Notes/gone.md","side":"ours","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T110010Z-dm02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "keeping our version works on the same conflict"
+check '[ "$(jq -r .data.resolvedBy "$RES")" = "kept" ]' "…and says it kept a version"
+check '[ -e Notes/gone.md ]' "…the file is still there"
+check 'grep -q "CHANGED HERE" Notes/gone.md' "…and it is ours"
+check '[ -z "$(git ls-files -u -- Notes/gone.md)" ]' "…and the path is resolved"
+
+git merge --abort >/dev/null 2>&1 || true
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# phase 15: a protected path whose NAME needs quoting.
+#
+# git quotes any path with a space or a byte outside ASCII and escapes it in
+# octal. `unstage-protected` compared `ls-files` output against the real bytes
+# the plugin had already unquoted, never matched, took its "already gone from
+# the index" branch and answered ok=true having removed nothing — which is a
+# loop with no exit for anybody whose notes have an em dash in the title.
+# ---------------------------------------------------------------------------
+echo "# phase 15: protected paths whose names need quoting"
+cd "$ROOT/vault"
+git merge --abort >/dev/null 2>&1 || true
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# Exactly the shape from the device: a space AND an em dash, inside a protected
+# directory, staged as an addition with no file on disk afterwards.
+AWKWARD="Private/Hidden/Native Git Bridge — spec.md"
+mkdir -p "Private/Hidden"
+printf 'notes\n' > "$AWKWARD"
+# `git add` refuses a path outside the sparse definition on git 2.35+, and
+# Private/Hidden is exactly that in this fixture. The plumbing has no such
+# guard, which is the same reason the repair itself uses update-index.
+git update-index --add -- "$AWKWARD" >/dev/null 2>&1
+rm -f "$AWKWARD"
+check 'git ls-files --cached -- "$AWKWARD" | grep -q "342"' "git really does quote and octal-escape this name"
+check 'git ls-files --cached -z -- "$AWKWARD" | tr "\\0" "\\n" | grep -qxF -- "$AWKWARD"' "…and -z reports it unquoted, which is what the guard needs"
+
+req "r-20260810T120000Z-q01" unstage-protected "$TOKEN" \
+  "{\"paths\":[$(printf '%s' "$AWKWARD" | jq -Rs .)],\"protectedPaths\":[\"Private/Hidden\"]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T120000Z-q01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "unstage-protected accepts the awkward name"
+check '[ "$(jq -r .data.unstagedProtectedCount "$RES")" = "1" ]' "…and reports the entry it actually removed"
+check '! git ls-files --cached -- "$AWKWARD" | grep -q .' "…the index entry is really gone"
+
+# Idempotent, and still honest about it: a second run removes nothing.
+req "r-20260810T120010Z-q02" unstage-protected "$TOKEN" \
+  "{\"paths\":[$(printf '%s' "$AWKWARD" | jq -Rs .)],\"protectedPaths\":[\"Private/Hidden\"]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T120010Z-q02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "re-running it is not an error"
+check '[ "$(jq -r .data.unstagedProtectedCount "$RES")" = "0" ]' "…and it claims nothing this time"
+
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# phase 16: the progress stream.
+#
+# A long operation used to be silent: stderr went to a `mktemp` file whose name
+# only the runner knew, and was read after git exited. For the fifteen minutes
+# an object repair takes, the plugin could show nothing but its own count of
+# elapsed seconds — three percent in and completely wedged looked identical, and
+# when the repair hit its old 90 s budget the report was a bare timeout.
+#
+# What must hold: a file appears under progress/ named for the request, it names
+# the action and the steps in order, git's own stderr lands in it, and the
+# byte-offset trick still hands each command exactly its own output.
+# ---------------------------------------------------------------------------
+echo "# phase 16: the progress stream of a long operation"
+cd "$ROOT/vault"
+# Start from the remote. Phase 14 deliberately leaves a merge half-finished, and
+# a sync that stops at "a merge is already in progress" would test the stream of
+# an action that never got past its first step.
+git merge --abort >/dev/null 2>&1 || true
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+git fetch -q origin
+git reset -q --hard "origin/$MAIN_BRANCH"
+git clean -qfd >/dev/null 2>&1 || true
+
+req "r-20260810T130000Z-pr01" sync "$TOKEN" '{"message":"progress phase","protectedPaths":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T130000Z-pr01.json"
+PROG="$RUNTIME/progress/r-20260810T130000Z-pr01.txt"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the sync itself succeeds, so the stream describes a whole one"
+check '[ -f "$PROG" ]' "the runner writes a progress file named for the request"
+check 'grep -q "^sync started" "$PROG"' "…which opens by naming the action"
+check 'grep -q "sync: fetching from origin" "$PROG"' "…and announces the step BEFORE taking it"
+check 'grep -q "sync finished" "$PROG"' "…and closes with the verdict"
+# Order matters: a step announced after the fact explains nothing during it.
+check '[ "$(grep -n "sync started" "$PROG" | cut -d: -f1)" -lt "$(grep -n "sync: fetching" "$PROG" | cut -d: -f1)" ]' \
+  "…in the order the runner did them"
+# The file outlives the request on purpose: the shared bundle collects it after.
+check '[ -f "$PROG" ] && [ -f "$RES" ]' "…and survives the result being written, for the log bundle"
+
+# git's own stderr must arrive here, not only the runner's notes. A push has
+# something to say and, with --progress forced, says it to a file too.
+cd "$ROOT/vault"
+printf 'progress phase\n' >> note.md
+req "r-20260810T130010Z-pr02" sync "$TOKEN" '{"message":"progress push","protectedPaths":[]}'
+bash "$RUNNER"
+PROG2="$RUNTIME/progress/r-20260810T130010Z-pr02.txt"
+check 'grep -q "sync: staging changes" "$PROG2"' "the staging step is announced"
+check 'grep -q "sync: pushing to origin/" "$PROG2"' "…and so is the push, with the branch it pushes to"
+check 'grep -qE "(Writing objects|Enumerating objects|To )" "$PROG2"' "git's own transfer output reaches the stream"
+
+# Each command still gets exactly its own stderr back, despite them all sharing
+# one append-only file. If the offset arithmetic were wrong, a later error would
+# carry the earlier commands' output — and every error message in the plugin is
+# built from it.
+req "r-20260810T130020Z-pr03" pull "$TOKEN" '{"protectedPaths":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T130020Z-pr03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "a pull after that push succeeds"
+check '! jq -r ".error.stderr // \"\"" "$RES" | grep -q "Writing objects"' \
+  "…and no result carries a previous command's output"
+
+# The whole stream is a narrative, so a person reading a shared bundle can see
+# where the time went — which is what the file is for.
+check '[ "$(wc -l < "$PROG2")" -ge 4 ]' "the stream reads as a sequence, not a single line"
+
+# A rejected request must leave no stream at all: nothing ran, so there is
+# nothing to account for, and an empty file would read like an action that
+# started and vanished.
+req "r-20260810T130030Z-pr04" sync "wrong-token" '{"protectedPaths":[]}'
+bash "$RUNNER"
+check '[ ! -e "$RUNTIME/progress/r-20260810T130030Z-pr04.txt" ]' \
+  "a request rejected before it ran leaves no stream"
+
+cd "$ROOT/vault"
 git checkout -- . 2>/dev/null || true
 git reset -q 2>/dev/null || true
 

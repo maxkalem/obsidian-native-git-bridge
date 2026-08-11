@@ -24,6 +24,33 @@ export interface GitMenuFlags {
   excluded: boolean;
 }
 
+/**
+ * What the menu says it is about, before it says what it can do.
+ *
+ * A row in the panel truncates its name to one line and the file explorer shows
+ * no path at all, so a long-pressed row could offer eight destructive-sounding
+ * entries without ever naming the file they would touch. `null` for a group:
+ * a group has no path, and every entry already carries its own scope and count.
+ */
+export interface MenuHeader {
+  /** Directory part, without a trailing slash. Empty at the repository root. */
+  dir: string;
+  /** File or folder name; a folder keeps its trailing slash. */
+  name: string;
+}
+
+export function menuHeader(scope: MenuScope): MenuHeader | null {
+  if (scope.kind === "group") return null;
+  const isDir = scope.kind === "folder";
+  const trimmed = scope.path.endsWith("/") ? scope.path.slice(0, -1) : scope.path;
+  const cut = trimmed.lastIndexOf("/");
+  const base = cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+  return {
+    dir: cut >= 0 ? trimmed.slice(0, cut) : "",
+    name: isDir ? `${base}/` : base,
+  };
+}
+
 export type MenuAction =
   | "stage"
   | "unstage"

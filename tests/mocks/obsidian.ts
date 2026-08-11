@@ -18,6 +18,9 @@ export function __resetObsidianMock(): void {
   __notices.length = 0;
   __openedModals.length = 0;
   __protocolHandlers.clear();
+  // Popups and overlays are appended to the shared body; without this one
+  // test's popup is visible to the next one's assertions.
+  __mockDoc.body.empty();
   __setPlatformAndroid(true);
 }
 
@@ -94,8 +97,24 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
     createDiv: (o?: Any) => adopt(el, fakeEl("div", o?.cls ?? "", o?.text ?? "")),
     createSpan: (o?: Any) => adopt(el, fakeEl("span", o?.cls ?? "", o?.text ?? "")),
     appendChild: (child: Any) => adopt(el, child),
-    addEventListener: () => undefined,
+    /**
+     * Listeners are REMEMBERED, not swallowed. They used to be dropped, which
+     * meant a control's behaviour could only be tested by calling the handler
+     * the test itself had constructed — proving nothing about what the code
+     * wired up. `__fire` below is what lets a test tap a real element.
+     *
+     * Still not a DOM: no bubbling, no default actions, no event object beyond
+     * what `__fire` is handed.
+     */
+    listeners: new Map<string, Array<(e: Any) => void>>(),
+    addEventListener: (type: string, fn: (e: Any) => void) => {
+      const cur = el.listeners.get(type) ?? [];
+      cur.push(fn);
+      el.listeners.set(type, cur);
+    },
     onClickEvent: () => undefined,
+    /** Layout is not simulated; a zero rect is honest about that. */
+    getBoundingClientRect: () => ({ top: 0, right: 0, bottom: 0, left: 0, width: 0, height: 0 }),
     remove: () => {
       const sibs = el.parent?.children;
       if (sibs) sibs.splice(sibs.indexOf(el), 1);
@@ -122,7 +141,41 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
       return el;
     },
   };
+  // Obsidian gives every element the document and window it actually lives in,
+  // which is how this plugin supports popout windows. The mock gives every
+  // element the SAME pair, so a popup appended to `el.doc.body` is findable
+  // from the test's own root.
+  el.doc = __mockDoc;
+  el.win = __mockWin;
+  el.ownerDocument = __mockDoc;
   return el;
+}
+
+/**
+ * One shared document/window pair for the whole mock. `body` is a real fake
+ * element, so anything the code appends to it (popups, overlays) can be
+ * asserted on with `__findByClass(__mockDoc.body, …)`.
+ */
+export const __mockWin: Any = {
+  innerWidth: 400,
+  innerHeight: 800,
+  setTimeout: (fn: () => void, ms?: number) => setTimeout(fn, ms) as unknown as number,
+  clearTimeout: (id: number) => clearTimeout(id),
+};
+export const __mockDoc: Any = {
+  createDocumentFragment: () => fakeEl("#fragment"),
+  createTextNode: (t: unknown) => fakeEl("#text", "", String(t ?? "")),
+  createTreeWalker: () => ({ nextNode: () => null }),
+};
+__mockDoc.body = fakeEl("body");
+
+/** Dispatch a recorded listener. Returns false when nothing was listening. */
+export function __fire(el: Any, type: string, event: Any = {}): boolean {
+  const fns = el?.listeners?.get(type);
+  if (!fns || fns.length === 0) return false;
+  const e = { stopPropagation: () => undefined, preventDefault: () => undefined, ...event };
+  for (const fn of fns) fn(e);
+  return true;
 }
 
 function adopt(parent: Any, child: Any): Any {
@@ -193,8 +246,24 @@ export class Menu {
   addItem(): Menu {
     return this;
   }
+  addSeparator(): Menu {
+    return this;
+  }
   showAtMouseEvent(): void {}
+  showAtPosition(): void {}
 }
+
+/**
+ * Obsidian installs `createFragment` as a global, and `MenuItem.setTitle`
+ * accepts what it returns. Without it here, any code path that builds a
+ * fragment throws a ReferenceError inside a test that was asking about
+ * something else entirely.
+ */
+(globalThis as Any).createFragment = (cb?: (f: Any) => void): Any => {
+  const frag = fakeEl("#fragment");
+  cb?.(frag);
+  return frag;
+};
 
 export function setIcon(): void {}
 export function addIcon(): void {}

@@ -10,6 +10,8 @@
  * thousand up is therefore abbreviated, and the exact figure is one tap away.
  */
 
+import { revealOnTap } from "./revealOnTap";
+
 export interface CountBadgeFormat {
   text: string;
   /** Render at a smaller size (the value no longer fits two digits). */
@@ -51,49 +53,7 @@ export function renderCountBadge(
   el.setAttribute("aria-label", describe(count));
   if (!fmt.clamped) return el;
 
-  el.addClass("ngb-sv-count-more");
-  let pop: HTMLElement | null = null;
-  let timer: number | null = null;
-  const clearTimer = () => {
-    if (timer !== null) {
-      window.clearTimeout(timer);
-      timer = null;
-    }
-  };
-  const hide = () => {
-    clearTimer();
-    pop?.remove();
-    pop = null;
-  };
-  const show = () => {
-    clearTimer();
-    if (pop === null) {
-      pop = el.doc.body.createDiv({ cls: "ngb-count-pop", text: describe(count) });
-      const r = el.getBoundingClientRect();
-      // Anchored above the badge and clamped to the viewport, so a badge near
-      // the bottom edge of a phone screen still shows its popup on screen.
-      pop.style.top = `${Math.max(4, r.top - 4)}px`;
-      pop.style.right = `${Math.max(4, el.win.innerWidth - r.right)}px`;
-    }
-  };
-  const arm = () => {
-    clearTimer();
-    timer = el.win.setTimeout(hide, 3000);
-  };
-  el.addEventListener("click", (e) => {
-    e.stopPropagation();
-    show();
-    arm();
-  });
-  // Press-and-hold keeps it open; the timer starts again when released.
-  el.addEventListener("pointerdown", (e) => {
-    e.stopPropagation();
-    show();
-  });
-  for (const ev of ["pointerup", "pointercancel", "pointerleave"]) {
-    el.addEventListener(ev, () => {
-      if (pop !== null) arm();
-    });
-  }
-  return el;
+  // Anchored to the badge's right edge: it lives in the panel's right-hand
+  // column, so a popup that grows leftwards is the one that stays on screen.
+  return revealOnTap(el, describe(count), { align: "right" });
 }

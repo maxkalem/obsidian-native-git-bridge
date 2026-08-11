@@ -62,7 +62,25 @@ export class OperationLog {
 
 /** Redact credentials embedded in URLs (https://user:pass@host -> https://***@host). */
 export function redact(s: string): string {
-  return s.replace(/(\w+:\/\/)[^/\s@]+:[^/\s@]+@/g, "$1***@");
+  return (
+    s
+      // Any userinfo in a URL, not only the `user:password` form. A personal
+      // access token is normally carried as the USERNAME with no password at
+      // all (`https://ghp_…@github.com/…`), and the pattern that only looked
+      // for a colon walked straight past it.
+      //
+      // `git@` is the one exception kept: it is the universal SSH user, it is
+      // not a secret, and blanking it turns every ssh remote in a log into the
+      // same unreadable string.
+      .replace(/(\w+:\/\/)([^/\s@]+)@/g, (m, scheme: string, userinfo: string) =>
+        userinfo === "git" ? m : `${scheme}***@`
+      )
+      // And tokens that appear with no URL around them — an `Authorization`
+      // header echoed by a failing helper, a token pasted into a command. The
+      // prefixes are the ones the hosts actually issue.
+      .replace(/\b(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]{8,}/g, "$1***")
+      .replace(/\b(Bearer|token)\s+[A-Za-z0-9._-]{8,}/gi, "$1 ***")
+  );
 }
 
 function truncate(s: string, max: number): string {

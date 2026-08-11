@@ -12,6 +12,12 @@ The bridge is **three parts that update independently**. Knowing which is which 
 
 **Updating the plugin never updates the runner.** The plugin folder often syncs through git itself, so `main.js` can arrive on a device silently, while the runner stays whatever it was. The two enforce a version handshake (`RUNNER_MIN_VERSION` in the plugin vs `RUNNER_VERSION` reported in every result): when the runner is too old, the plugin says so explicitly and every result modal repeats the hint until you update.
 
+**Update the runner when the plugin asks for it, and not before.** The plugin says so plainly: the settings badge turns red and every result window repeats the hint until the runner is new enough. That is not advice but a requirement — the actions the new plugin sends do not exist in the old runner.
+
+The reverse is easier to get wrong: **do not update the runner ahead of the plugin.** A runner newer than the plugin buys nothing, because it is the plugin that decides what to ask for. Take both from the same release and the question does not arise.
+
+What each runner version changed is listed in [protocol.md](protocol.md).
+
 ## Updating the plugin
 
 Replace `main.js`, `manifest.json`, `styles.css` in the plugin folder (or let vault sync deliver them), then reload the plugin (Settings → Community plugins → toggle, or restart Obsidian). Device-local settings (enable flag, token, protected paths) survive updates; they are not stored in the plugin folder.

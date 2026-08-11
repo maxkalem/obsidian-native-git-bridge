@@ -67,6 +67,25 @@ function outputSection(el: HTMLElement, label: string, text: string | undefined)
  * clickable <a> (Obsidian routes it to the system browser). Plain setText
  * would leave URLs as dead, uncopyable text on mobile.
  */
+/**
+ * The change marker in front of a path in a modal's file list.
+ *
+ * `null` is a conflict and draws the warning glyph, the same one the status
+ * panel puts on a conflicted row: the two surfaces answer the same question and
+ * a reader should not have to learn two alphabets. Everything else is git's own
+ * letter, in a chip wide enough that it cannot be read as the first character
+ * of the path behind it.
+ */
+export function renderFileBadge(parent: HTMLElement, badge: string | null): HTMLElement {
+  if (badge === null) {
+    const warn = parent.createSpan({ cls: "ngb-badge ngb-badge-conflict" });
+    setIcon(warn, "alert-triangle");
+    warn.setAttribute("aria-label", "Merge conflict");
+    return warn;
+  }
+  return parent.createSpan({ cls: "ngb-badge", text: badge });
+}
+
 export function linkifyInto(parent: HTMLElement, text: string): void {
   const re = /https?:\/\/[^\s)"']+/g;
   let last = 0;
@@ -98,6 +117,12 @@ export class ResultModal extends Modal {
       isError?: boolean;
       /** One-tap fix buttons rendered ABOVE Copy/Close. */
       actions?: ResultModalAction[];
+      /**
+       * Called when the window closes, however it closes. A caller awaiting a
+       * decision resolves its "declined" branch here; the ✕ is the decline, per
+       * the dialog convention, so it must not leave a promise hanging.
+       */
+      onDismiss?: () => void;
     } = {}
   ) {
     super(app);
@@ -139,6 +164,9 @@ export class ResultModal extends Modal {
 
   onClose(): void {
     this.contentEl.empty();
+    // However the window closed: a caller awaiting a decision resolves its
+    // declined branch here, because the ✕ is the decline (dialog convention).
+    this.opts.onDismiss?.();
   }
 }
 
@@ -222,8 +250,12 @@ export class ChangedFilesModal extends Modal {
       cls: "ngb-settings-note",
       text: `Branch ${this.status.branch ?? "(detached)"} · ↑${this.status.ahead} ↓${this.status.behind} · as of ${this.fetchedAt}`,
     });
-    const groups: [string, { path: string; badge: string }[]][] = [
-      ["Conflicted", this.status.conflicted.map((e) => ({ path: e.path, badge: "!" }))],
+    // `badge: null` means "conflicted", which is drawn as the warning glyph the
+    // status panel puts on a conflicted row rather than as a letter. A letter
+    // sat unstyled against the path and read as its first character: `!` before
+    // `.obsidian/…` looked like part of the filename.
+    const groups: [string, { path: string; badge: string | null }[]][] = [
+      ["Conflicted", this.status.conflicted.map((e) => ({ path: e.path, badge: null }))],
       ["Staged", this.status.staged.map((e) => ({ path: e.path, badge: e.index }))],
       ["Unstaged", this.status.unstaged.map((e) => ({ path: e.path, badge: e.worktree }))],
       ["Untracked", this.status.untracked.map((p) => ({ path: p, badge: "?" }))],
@@ -237,8 +269,8 @@ export class ChangedFilesModal extends Modal {
       const ul = sec.createEl("ul", { cls: "ngb-file-list" });
       for (const it of items) {
         const li = ul.createEl("li");
-        li.createSpan({ cls: "ngb-badge", text: it.badge });
-        li.createSpan({ text: it.path });
+        renderFileBadge(li, it.badge);
+        li.createSpan({ cls: "ngb-badge-path", text: it.path });
       }
     }
     if (!any) c.createEl("p", { cls: "ngb-ok", text: "Working tree clean." });

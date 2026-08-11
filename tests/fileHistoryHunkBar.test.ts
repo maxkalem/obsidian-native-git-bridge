@@ -57,6 +57,7 @@ function actions(over: Partial<FileHistoryActions> = {}): FileHistoryActions {
     restoreWholeFile: () => undefined,
     viewAtCommit: () => undefined,
     progressText: () => "",
+    progressDetail: () => "",
     wrapLines: () => false,
     showInvisibles: () => false,
     inlineUnit: () => "word",

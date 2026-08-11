@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { __findAllByClass, __resetObsidianMock, __textOf } from "./mocks/obsidian";
+import {
+  __findAllByClass,
+  __findByClass,
+  __fire,
+  __resetObsidianMock,
+  __textOf,
+} from "./mocks/obsidian";
 import { StatusView, type StatusViewActions, type StatusViewData } from "../src/ui/StatusView";
 
 /**
@@ -32,7 +38,7 @@ function actions(over: Partial<StatusViewActions> = {}): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
-    syncState: noop,
+    syncState: noop, openOutput: noop,
     ...over,
   } as unknown as StatusViewActions;
 }
@@ -52,6 +58,52 @@ const RUNNING: StatusViewData = {
 
 describe("a panel opened during an operation", () => {
   beforeEach(() => __resetObsidianMock());
+
+  it("opens the output panel when the state line is tapped", async () => {
+    // That line is what the user watches during a long operation, and watching
+    // was all they could do with it: `sync… 240s` states a number and nothing
+    // about what git is doing. It is the obvious thing to tap.
+    let opened = 0;
+    const view = new StatusView({} as Any, actions({ openOutput: () => (opened += 1) })) as Any;
+    view.setData(RUNNING);
+    const line = __findByClass(view.contentEl, "ngb-sv-progress-text");
+    expect(line).not.toBeNull();
+    expect(line.hasClass("ngb-sv-progress-tap")).toBe(true);
+    expect(__fire(line, "click")).toBe(true);
+    expect(opened).toBe(1);
+  });
+
+  it("draws the runner's words on a reserved second line, and keeps the line when they stop", () => {
+    // The state line must stay `action… Ns` — the runner's step goes UNDER it,
+    // smaller and muted, and the line exists even while empty so the repository
+    // state below never jumps when the first progress line arrives.
+    const view = new StatusView({} as Any, actions()) as Any;
+    view.setData(RUNNING);
+    const detail = __findByClass(view.contentEl, "ngb-sv-progress-detail");
+    expect(detail).not.toBeNull();
+    expect(detail.textContent).toBe("");
+    view.updateProgressText("sync… 5s", "sync: reapplying the sparse checkout");
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-text").textContent).toBe("sync… 5s");
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-detail").textContent).toBe(
+      "sync: reapplying the sparse checkout"
+    );
+    // Idle empties the line but must not remove it: reserved means reserved.
+    view.updateProgressText(null, null);
+    const after = __findByClass(view.contentEl, "ngb-sv-progress-detail");
+    expect(after).not.toBeNull();
+    expect(after.textContent).toBe("");
+  });
+
+  it("opens the output panel from the detail line too", () => {
+    // The two lines are one control: whatever the finger lands on answers.
+    let opened = 0;
+    const view = new StatusView({} as Any, actions({ openOutput: () => (opened += 1) })) as Any;
+    view.setData(RUNNING);
+    const detail = __findByClass(view.contentEl, "ngb-sv-progress-detail");
+    expect(detail.hasClass("ngb-sv-progress-tap")).toBe(true);
+    expect(__fire(detail, "click")).toBe(true);
+    expect(opened).toBe(1);
+  });
 
   it("asks the plugin for the current state as it opens", async () => {
     let asked = 0;

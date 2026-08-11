@@ -3,7 +3,13 @@ import { addCopyButton } from "./copyable";
 import type { OperationLog } from "../ops/OperationLog";
 
 export class OperationLogModal extends Modal {
-  constructor(app: App, private log: OperationLog) {
+  /**
+   * `share` is optional so the modal can still be opened by anything that has
+   * only a log to show. When it is there, the button is: copying the visible
+   * list leaves out the Termux side and the stderr behind each `detail`, which
+   * are the two halves that actually explain a failure.
+   */
+  constructor(app: App, private log: OperationLog, private share?: () => void) {
     super(app);
   }
 
@@ -13,6 +19,14 @@ export class OperationLogModal extends Modal {
     const c = this.contentEl;
     const topBar = c.createDiv({ cls: "ngb-buttons ngb-buttons-top" });
     addCopyButton(topBar, () => this.logAsText(), "Copy log", "Log copied.");
+    if (this.share !== undefined) {
+      const shareBtn = topBar.createEl("button", { text: "Share as file", cls: "mod-cta" });
+      shareBtn.setAttribute("aria-label", "Everything: this log, each entry's output, and the Termux runner log");
+      shareBtn.addEventListener("click", () => {
+        this.close();
+        this.share?.();
+      });
+    }
     const clearTop = topBar.createEl("button", { text: "Clear log" });
     clearTop.addEventListener("click", () => {
       this.log.clear();

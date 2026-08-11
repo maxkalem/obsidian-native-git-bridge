@@ -1,5 +1,5 @@
 import { App, Modal } from "obsidian";
-import { placeModalAction } from "./modals";
+import { placeModalAction, renderFileBadge } from "./modals";
 
 /** Commit message input with explicit, labeled buttons. Resolves null on cancel. */
 export class CommitMessageModal extends Modal {
@@ -90,8 +90,10 @@ export class ConflictModal extends Modal {
     const ul = c.createEl("ul", { cls: "ngb-file-list" });
     for (const f of this.conflicts) {
       const li = ul.createEl("li");
-      li.createSpan({ cls: "ngb-badge", text: "U" });
-      const link = li.createEl("a", { text: f });
+      // Every path in this window is conflicted, so it gets the same warning
+      // glyph the panel and the changed-files window use for that state.
+      renderFileBadge(li, null);
+      const link = li.createEl("a", { cls: "ngb-badge-path", text: f });
       link.addEventListener("click", (e) => {
         e.preventDefault();
         this.close();

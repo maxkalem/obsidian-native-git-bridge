@@ -12,9 +12,11 @@ import type { FileLogEntry } from "../src/git/historyParsers";
  *
  * `registerInterval` bounds the damage to the panel's lifetime and
  * `renderWaiting` clears the previous timer before starting its own, so this
- * was never a growing leak. It is still a timer running for nothing, and the
- * two other panes that do the same thing (`DiffView`, `HistoryView`) both stop
- * theirs on the same line as the await.
+ * was never a growing leak. It is still a timer running for nothing. The two
+ * other panes that do the same thing (`DiffView`, `HistoryView`) stop theirs on
+ * the same line as the await, and all three qualify the stop with the ticker id
+ * so an answer cannot take down an indicator a later wait is using
+ * (`tests/diffViewWaitTicker.test.ts` covers the diff pane's half of that).
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -62,6 +64,7 @@ function actions(over: Partial<FileHistoryActions> = {}): FileHistoryActions {
     restoreWholeFile: () => undefined,
     viewAtCommit: () => undefined,
     progressText: () => "",
+    progressDetail: () => "",
     wrapLines: () => false,
     showInvisibles: () => false,
     inlineUnit: () => "word",

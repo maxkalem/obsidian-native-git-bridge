@@ -49,7 +49,7 @@ function statusActions(): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
-    syncState: noop,
+    syncState: noop, openOutput: noop, showChangeWords: () => true,
   } as unknown as StatusViewActions;
 }
 
@@ -74,9 +74,12 @@ function historyActions(over: Partial<HistoryViewActions> = {}): HistoryViewActi
     openDiffAtCommit: () => undefined,
     openFile: () => undefined,
     progressText: () => "",
+    progressDetail: () => "",
     treeView: () => false,
     toggleTree: () => undefined,
     openStatusPanel: () => undefined,
+    openOutput: () => undefined,
+    rowsPerGroup: () => 30,
     ...over,
   };
 }

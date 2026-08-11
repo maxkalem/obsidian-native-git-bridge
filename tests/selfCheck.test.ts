@@ -36,6 +36,71 @@ describe("runSelfCheck", () => {
     expect(r.queuedRequests).toEqual([]);
   });
 
+  /**
+   * A timeout with a healthy folder and an empty queue is not a fault, and the
+   * window has to say so in its first line. It used to open with "Runtime
+   * folder looks healthy" and then offer 'Copy command & open Termux' — a
+   * verdict that nothing is wrong, under a button that says reinstall the
+   * runner. The user reads buttons as instructions.
+   */
+  it("names the timeout as the cause when nothing is stuck", async () => {
+    const r = await runSelfCheck(
+      fsWith({ [`${paths.root}/runner.log`]: "2026-08-09 RUN done\n" }),
+      paths,
+      true
+    );
+    expect(r.ok).toBe(true);
+    expect(r.headline).toBe("Timed out — nothing is broken");
+    expect(r.verdict).toContain("Operation timeout");
+  });
+
+  /**
+   * A queued request under a short timeout is the ordinary case, not evidence
+   * of a broken trigger. The verdict used to open with "the runner was not
+   * triggered (companion permission / allow-external-apps)", which sent the
+   * user to check permissions that were fine.
+   */
+  it("blames the timeout before the trigger when a request is still queued", async () => {
+    const r = await runSelfCheck(
+      fsWith({
+        [`${paths.root}/runner.log`]: "x",
+        [`${paths.root}/requests/r-1.json`]: "{}",
+      }),
+      paths,
+      true
+    );
+    expect(r.headline).toBe("Still in the queue");
+    const timeoutAt = r.verdict.indexOf("Operation timeout");
+    const triggerAt = r.verdict.indexOf("trigger is not");
+    expect(timeoutAt).toBeGreaterThan(-1);
+    expect(triggerAt).toBeGreaterThan(timeoutAt);
+  });
+
+  it("gives every verdict a headline of its own", async () => {
+    // The title is the cause, so two different causes may never share a title.
+    const cases = await Promise.all([
+      runSelfCheck(fsWith({}), paths, false),
+      runSelfCheck(fsWith({ [`${paths.root}/requests/r-1.json`]: "{}" }), paths, false),
+      runSelfCheck(fsWith({ [`${paths.root}/runner.log`]: "x" }), paths, false),
+      runSelfCheck(fsWith({ [`${paths.root}/runner.log`]: "x" }), paths, true),
+      runSelfCheck(
+        fsWith({ [`${paths.root}/runner.log`]: "x", [`${paths.root}/requests/r-1.json`]: "{}" }),
+        paths,
+        true
+      ),
+    ]);
+    const heads = cases.map((c) => c.headline);
+    expect(new Set(heads).size).toBe(heads.length);
+    for (const h of heads) {
+      expect(h.length).toBeGreaterThan(0);
+      // A modal header on a phone truncates past roughly thirty characters, and
+      // a truncated title states less than a generic one would: the first
+      // attempt showed "The plugin stopped waiting; the run.." on the device.
+      expect(h.length).toBeLessThanOrEqual(30);
+      expect(h.endsWith(".")).toBe(false);
+    }
+  });
+
   it("detects that no profile points at this vault (no runner.log here at all)", async () => {
     const r = await runSelfCheck(
       fsWith({ [`${paths.requestsDir}/r-20260804T100000Z-a.json`]: "{}" }),
@@ -98,7 +163,7 @@ describe("runSelfCheck", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.queuedRequests).toEqual(["r-20260804T100000Z-a.json"]);
-    expect(r.verdict).toContain("still queued");
+    expect(r.headline).toBe("Still in the queue");
   });
 
   it("handles a missing runtime folder", async () => {

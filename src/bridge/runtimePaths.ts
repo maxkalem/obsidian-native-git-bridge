@@ -2,6 +2,7 @@ import {
   CANCEL_DIR,
   DONE_DIR,
   PLUGIN_ID,
+  PROGRESS_DIR,
   REQUESTS_DIR,
   RESULTS_DIR,
   RUNTIME_DIR_NAME,
@@ -27,8 +28,15 @@ export class RuntimePaths {
   get doneDir(): string {
     return `${this.root}/${DONE_DIR}`;
   }
+  get progressDir(): string {
+    return `${this.root}/${PROGRESS_DIR}`;
+  }
   requestFile(id: string): string {
     return `${this.requestsDir}/${id}.json`;
+  }
+  /** The runner appends git's stderr here while the request runs. */
+  progressFile(id: string): string {
+    return `${this.progressDir}/${id}.txt`;
   }
   resultFile(id: string): string {
     return `${this.resultsDir}/${id}.json`;
@@ -37,6 +45,13 @@ export class RuntimePaths {
     return `${this.cancelDir}/${id}`;
   }
   all(): string[] {
-    return [this.root, this.requestsDir, this.resultsDir, this.cancelDir, this.doneDir];
+    return [
+      this.root,
+      this.requestsDir,
+      this.resultsDir,
+      this.cancelDir,
+      this.doneDir,
+      this.progressDir,
+    ];
   }
 }

@@ -7,8 +7,7 @@ import {
   ROWS_PER_GROUP_CHOICES,
 } from "./DeviceLocalSettingsStore";
 import { ConfirmModal } from "../ui/modals";
-import { OperationLogModal } from "../ui/OperationLogModal";
-import { RUNNER_MIN_VERSION } from "../constants";
+import { MIN_NETWORK_TIMEOUT_SECONDS, RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { formatSize } from "../git/previousRepos";
 import type { InlineDiffUnit } from "../git/inlineDiff";
@@ -341,9 +340,53 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Wrap long lines in diffs")
+      .setName("Name the file above the Git menu")
       .setDesc(
-        "Wrap lines in the diff pane instead of scrolling horizontally. " +
+        "Show the folder and the file name at the top of the Git context menu, above the entries. " +
+          "On by default: a panel row truncates the name and the file explorer shows no path at all, " +
+          "so without it the menu can offer 'Discard changes' over a file it never identifies. " +
+          "A deep path costs two or three rows. Cosmetic and shared across devices (stored in data.json)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.showMenuHeader).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ showMenuHeader: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Spell the change out in the status panel")
+      .setDesc(
+        "Show 'modified', 'conflicted' or 'deleted' beside a file name. On by default. " +
+          "Mobile only — on desktop the tooltip carries it — and the change letter at the " +
+          "end of the row states it either way, so turning this off gives long names more room. " +
+          "Cosmetic and shared across devices (stored in data.json)."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.showChangeWords).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ showChangeWords: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Open the output panel for long operations")
+      .setDesc(
+        "Show what Termux is saying, by itself, once an operation has run for 30 seconds. " +
+          "Off by default: a panel that appears on its own takes a slot in the sidebar while " +
+          "you are reading something else. Either way, tapping the state line in the Git panel " +
+          "(the one that counts the seconds) opens it. Cosmetic and shared across devices."
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.sharedPrefs.openOutputForLongOps).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({ openOutputForLongOps: v });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Wrap long lines")
+      .setDesc(
+        "Wrap lines in the diff and conflict panes instead of scrolling horizontally. " +
+          "In the conflict pane the line numbers and the Keep buttons stay pinned to " +
+          "the left edge while the text scrolls, so no control can end up out of reach. " +
           "Cosmetic and shared across devices (stored in data.json)."
       )
       .addToggle((t) =>
@@ -454,11 +497,23 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Automatic actions").setHeading();
 
     new Setting(containerEl)
-      .setName("Pull when Obsidian opens")
-      .addToggle((t) =>
-        t.setValue(s.autoPullOnOpen).onChange((v) => { void (async () => {
-          await this.plugin.updateDeviceSettings({ autoPullOnOpen: v });
-        })(); })
+      .setName("When Obsidian opens")
+      .setDesc(
+        "Pull brings work in and changes nothing you have not seen. Sync also commits and pushes, " +
+          "so on every launch it publishes whatever is lying around — including the workspace file " +
+          "Obsidian rewrites just by being opened. Nothing is the default."
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("nothing", "Nothing")
+          .addOption("pull", "Pull")
+          .addOption("sync", "Sync (commit and push too)")
+          .setValue(s.onOpenAction)
+          .onChange((v) => { void (async () => {
+            await this.plugin.updateDeviceSettings({
+              onOpenAction: v as "nothing" | "pull" | "sync",
+            });
+          })(); })
       );
 
     new Setting(containerEl)
@@ -515,11 +570,18 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "the 'Open operation log' command."
       )
       .addButton((b) =>
-        b.setButtonText("Open").onClick(() => new OperationLogModal(this.app, this.plugin.log).open())
+        b.setButtonText("Open").onClick(() => this.plugin.openOperationLog())
       );
 
     new Setting(containerEl)
       .setName("Operation timeout (seconds)")
+      .setDesc(
+        `How long to wait for the runner before giving up. Default ${DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds}. ` +
+          `Fetch, pull, push and sync never get less than ${MIN_NETWORK_TIMEOUT_SECONDS}s whatever is set here, ` +
+          "and cloning has its own much larger budget: those wait for a network, not for git. " +
+          "Giving up does not stop the runner — it finishes what it started, and a result that lands " +
+          "later is picked up — so a short value buys nothing but alarming windows."
+      )
       .addText((t) =>
         t.setValue(String(s.opTimeoutSeconds)).onChange((v) => { void (async () => {
           const n = Math.min(3600, Math.max(10, Math.floor(Number(v) || DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds)));

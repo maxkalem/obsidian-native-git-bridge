@@ -1,7 +1,7 @@
 import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
 import { describeFileChange, type FileLogEntry } from "../git/historyParsers";
-import { parseHunks, restoreHunk, type DiffHunk } from "../git/hunks";
-import { buildWholeFilePatch, needsNoNewlineMarker } from "../git/hunkPatch";
+import { parseHunks, type DiffHunk } from "../git/hunks";
+import { describeRestore, restoreBlockInFile } from "../git/restoreBlock";
 import { markInvisibles, sizeGutter } from "./DiffView";
 import { renderHunkRange, renderUnifiedDiff } from "./diffDom";
 import { DIFF_COLOR_VARS } from "./colors";
@@ -35,6 +35,8 @@ export interface FileHistoryActions {
   viewAtCommit(entry: FileLogEntry): void;
   /** Progress line of the operation currently in flight ("" when idle). */
   progressText(): string;
+  /** What the runner said it is doing, for the reserved detail line. */
+  progressDetail(): string;
   wrapLines(): boolean;
   showInvisibles(): boolean;
   /** Shared preference: compare changed lines by word or by character. */
@@ -59,6 +61,7 @@ export class FileHistoryView extends ItemView {
   private loading = false;
   /** Interval behind the in-list wait indicator; one per load. */
   private waitTicker: number | null = null;
+  private progressDetailEl: HTMLElement | null = null;
   private expanded = new Set<string>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
@@ -144,6 +147,10 @@ export class FileHistoryView extends ItemView {
     const head = headEl.createDiv({ cls: "ngb-filehist-path ngb-mono" });
     head.setText(this.path ?? "");
     head.setAttribute("aria-label", this.path ?? "");
+    // Reserved even when empty (CSS keeps the height), mirroring the status
+    // panel: the commits below must not jump when the runner starts talking.
+    this.progressDetailEl = headEl.createDiv({ cls: "ngb-sv-progress-detail" });
+    this.updatePluginProgress();
     this.listEl = body.createDiv({ cls: "ngb-hist-list" });
     const btns = body.createDiv({ cls: "ngb-buttons" });
     this.moreBtn = btns.createEl("button", { text: "Load more" });
@@ -217,6 +224,17 @@ export class FileHistoryView extends ItemView {
     if (id !== undefined && id !== this.waitTicker) return;
     window.clearInterval(this.waitTicker);
     this.waitTicker = null;
+  }
+
+  /**
+   * The plugin's per-second tick: what the runner said it is doing, on the
+   * reserved line, and only while the plugin's own operation runs — this
+   * panel's page loads have no stream of their own.
+   */
+  updatePluginProgress(): void {
+    if (!this.progressDetailEl) return;
+    const running = this.actions.progressText() !== "";
+    this.progressDetailEl.setText(running ? this.actions.progressDetail() : "");
   }
 
   private renderCommit(e: FileLogEntry): void {
@@ -357,43 +375,15 @@ export class FileHistoryView extends ItemView {
   private async restoreBlock(hunk: DiffHunk, e: FileLogEntry): Promise<void> {
     const path = this.path;
     if (path === null) return;
-    const current = await this.actions.readFile(path);
-    if (current === null) {
-      new Notice("This file cannot be edited here (binary or unreadable).");
-      return;
-    }
-    const out = restoreHunk(current, hunk);
-    if (!out.ok) {
-      new Notice(
-        "That block no longer matches the current file, so it was not touched. Restore the whole file version instead."
-      );
-      return;
-    }
-    if (!out.changed) {
-      new Notice("This block already matches that commit.");
-      return;
-    }
-    // The patch has to be built from the texts as they are RIGHT NOW, before the
-    // file is written: afterwards `current` no longer describes what is on disk,
-    // and git would have nothing to match the removals against.
-    const patch =
-      needsNoNewlineMarker(current) || needsNoNewlineMarker(out.text)
-        ? null
-        : buildWholeFilePatch(path, current, out.text);
-    await this.actions.writeFile(path, out.text);
-    const short = e.hash.slice(0, 8);
-    if (patch === null) {
-      // A file with no trailing newline needs git's "\ No newline at end of
-      // file" marker, and getting that wrong corrupts the last line. The restore
-      // itself already happened, so say what is left to do rather than undo it.
-      new Notice(`Restored one block from ${short}. Stage it from the git panel.`);
-      return;
-    }
-    if (await this.actions.stagePatch(patch)) {
-      new Notice(`Restored one block from ${short} and staged it.`);
-    } else {
-      new Notice(`Restored one block from ${short}, but staging it failed.`);
-    }
+    // The steps live in one place, shared with the diff pane opened from the
+    // commit history: this is the same act asked from a different list.
+    const outcome = await restoreBlockInFile(path, hunk, {
+      readFile: (p) => this.actions.readFile(p),
+      writeFile: (p, c) => this.actions.writeFile(p, c),
+      stagePatch: (patch) => this.actions.stagePatch(patch),
+    });
+    new Notice(describeRestore(outcome, e.hash.slice(0, 8)));
+    if (outcome.kind === "restored") this.rerender();
   }
 }
 

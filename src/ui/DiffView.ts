@@ -6,6 +6,7 @@ import { describeDiffBudget, type DiffBudgetNotice } from "../git/diffBudget";
 import { hunkActionsFor, supportsLineSelection, type HunkActionPlan } from "../git/hunkActions";
 import { buildHunkPatch, selectableLines, selectionHasChanges } from "../git/hunkPatch";
 import { parseUnifiedDiff, type DiffHunk } from "../git/unifiedDiff";
+import { parseHunks, type DiffHunk as RestorableHunk } from "../git/hunks";
 
 export const NGB_DIFF_VIEW = "native-git-bridge-diff";
 
@@ -69,6 +70,26 @@ export interface DiffViewActions {
   colors(): Record<string, string> | null;
   /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
   progressText(): string;
+  /**
+   * Show the file itself rather than a comparison of it. `commitish` is
+   * `"WORKTREE"` for the file on disk, or a commit for the version at that
+   * commit.
+   *
+   * The pane needs it because "no differences" is a perfectly ordinary answer —
+   * a file staged and then reverted, or a commit that only renamed something —
+   * and until now that answer was a dead end: the pane said there was nothing
+   * to compare and offered no way to look at what it had been comparing.
+   */
+  openFileAt(path: string, commitish: string): void;
+  /**
+   * Put one block back the way it was at the commit this diff is showing.
+   *
+   * Only meaningful for a diff anchored at a commit, which is the diff the
+   * repository history opens. The file-history panel offers the same act on the
+   * same blocks; both go through `restoreBlockInFile`, so there is one
+   * implementation and one set of outcomes.
+   */
+  restoreBlock(path: string, hunk: RestorableHunk, commitish: string): Promise<void>;
   /**
    * Send one patch to the runner. Resolves true when it applied, so the pane
    * knows to reload; the error has already been surfaced when it did not.
@@ -145,13 +166,10 @@ export function gutterWidthCh(root: ParentNode): number {
   // Two numbers side by side + one column for the prefix + cell padding + the
   // separation between the three, without which three-digit numbers touch and
   // read as one six-digit number.
-  let width = 2 * digits + 5;
-  // Picking mode puts a checkbox first in the same cell. Measured rather than
-  // assumed, for the same reason the digits are: the wrapped layout gives this
-  // column a fixed width, and a guess that is too small pushes its contents
-  // past the cell border.
-  if (root.querySelector(".ngb-line-pick") !== null) width += 2;
-  return width;
+  // No allowance for the picking checkbox: it sits inside the number column
+  // that has no number, so it adds nothing to the width. Adding two here was
+  // what made the gutter jump when picking was switched on.
+  return 2 * digits + 5;
 }
 
 /** Apply the measured gutter width to the pane (used by the wrapped layout). */
@@ -237,6 +255,11 @@ export class DiffView extends ItemView {
   private picking = false;
   /** Picked lines, as "<hunkIndex>:<lineIndex>" — the coordinate buildHunkPatch takes. */
   private picked = new Set<string>();
+  /**
+   * The same hunks parsed the other way, for restoring a block from a commit.
+   * Rebuilt with every render, from the diff text the pane is showing.
+   */
+  private restorableHunks: RestorableHunk[] = [];
 
   private async loadAndRender(): Promise<void> {
     const st = this.state;
@@ -250,16 +273,23 @@ export class DiffView extends ItemView {
     const box = c.createDiv({ cls: "ngb-diff-pane-body" });
     // Same wait indicator as the file-history panel: a spinning glyph and the
     // operation's own elapsed-time line, not a static sentence.
-    this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
+    const ticker = this.renderWaiting(box.createDiv({ cls: "ngb-filehist-waiting" }));
     const res = await this.actions.loadDiff(st.path, st.from, st.to, this.overrideKb ?? undefined);
-    this.stopWaitTicker();
+    // Only this load's own ticker: the pane is reused, so a diff opened while
+    // an older one is in flight owns the indicator by the time the older
+    // answer lands, and an unqualified stop froze the newer progress line.
+    this.stopWaitTicker(ticker);
     if (seq !== this.loadSeq) return; // superseded by a newer setState
     this.lastResult = res;
     this.renderBody(box, res);
   }
 
-  /** "The runner is working" indicator, identical to the file-history panel's. */
-  private renderWaiting(el: HTMLElement): void {
+  /**
+   * "The runner is working" indicator, identical to the file-history panel's.
+   * Returns the ticker id so the wait that started it can stop it and nothing
+   * else can.
+   */
+  private renderWaiting(el: HTMLElement): number | null {
     const spin = el.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
     setIcon(spin, "refresh-cw");
     const text = el.createSpan({ cls: "ngb-settings-note" });
@@ -272,13 +302,19 @@ export class DiffView extends ItemView {
     // loaded diff, and this pane is reused for every diff the user opens.
     this.stopWaitTicker();
     this.waitTicker = this.registerInterval(window.setInterval(tick, 500));
+    return this.waitTicker;
   }
 
-  private stopWaitTicker(): void {
-    if (this.waitTicker !== null) {
-      window.clearInterval(this.waitTicker);
-      this.waitTicker = null;
-    }
+  /**
+   * With an id, stops only while that wait still owns the ticker. Same rule as
+   * the two history panels: a request that finishes must not take down the
+   * indicator a later one is using.
+   */
+  private stopWaitTicker(id?: number | null): void {
+    if (this.waitTicker === null) return;
+    if (id !== undefined && id !== null && id !== this.waitTicker) return;
+    window.clearInterval(this.waitTicker);
+    this.waitTicker = null;
   }
 
   private renderBody(box: HTMLElement, res: DiffLoadResult | null): void {
@@ -290,8 +326,21 @@ export class DiffView extends ItemView {
     }
     if (res.diff.trim() === "") {
       box.createEl("p", { cls: "ngb-ok", text: "No differences." });
+      // Which side to show: the working tree if this comparison ends there,
+      // otherwise the newer of the two commits — the version the reader came
+      // here to look at, not the one it was measured against.
+      const st = this.state;
+      if (st) {
+        const target = st.to === "WORKTREE" ? "WORKTREE" : st.to;
+        const btns = box.createDiv({ cls: "ngb-buttons ngb-buttons-top" });
+        const b = btns.createEl("button", {
+          text: target === "WORKTREE" ? "Open the file" : "Show the file at this commit",
+        });
+        b.addEventListener("click", () => this.actions.openFileAt(st.path, target));
+      }
       return;
     }
+    this.restorableHunks = parseHunks(res.diff);
     const plans = hunkActionsFor(this.state?.from ?? "", this.state?.to ?? "");
     renderUnifiedDiff(box, res.diff, {
       unit: this.actions.inlineUnit(),
@@ -348,6 +397,24 @@ export class DiffView extends ItemView {
       });
       btn.disabled = empty;
       btn.addEventListener("click", () => { void this.runHunkAction(plan, hunk, hunkIndex); });
+    }
+
+    // A diff anchored at a commit has no index or worktree to move a hunk
+    // between, so `plans` is empty and the bar carried nothing but a range. The
+    // act that DOES make sense there is the one the file-history panel already
+    // offers on the same blocks: put this block back the way it was.
+    const st = this.state;
+    // `restoreHunk` needs the hunk's raw before/after text, which the rendered
+    // form does not carry — the same reason the file-history panel parses the
+    // diff a second time with `parseHunks`. Indexed by position, which is what
+    // both parsers agree on.
+    const restorable = this.restorableHunks[hunkIndex];
+    if (plans.length === 0 && st && restorable && st.to !== "WORKTREE" && st.to !== "INDEX") {
+      const b = bar.createEl("button", { cls: "ngb-hunk-btn" });
+      setIcon(b.createSpan({ cls: "ngb-hunk-btn-icon" }), "rotate-ccw");
+      b.createSpan({ text: "Restore this block" });
+      b.setAttribute("aria-label", `Restore this block from ${st.to.slice(0, 8)}`);
+      b.addEventListener("click", () => { void this.actions.restoreBlock(st.path, restorable, st.to); });
     }
 
     // Directly after the actions: it names what they would act on.

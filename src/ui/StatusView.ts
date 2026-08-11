@@ -2,6 +2,7 @@ import { ItemView, Menu, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../types";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
+import { describeMove, revealOnTap } from "./revealOnTap";
 import {
   NGB_ICON_FETCH,
   NGB_ICON_PULL,
@@ -50,6 +51,12 @@ export interface StatusViewData {
   activeOperation?: string;
   /** Progress line shown at the bottom while an operation runs. */
   progress?: string;
+  /**
+   * What the runner said it is doing (the last progress-stream line). Drawn on
+   * its own reserved line under the state line, so the state text never grows
+   * sideways and the layout never jumps when the runner starts talking.
+   */
+  progressDetail?: string;
   /** Action currently running; its toolbar button is animated. */
   runningAction?: string;
   /**
@@ -127,6 +134,15 @@ export interface StatusViewActions {
    * plugin's push cannot reach a panel that did not exist when it fired.
    */
   syncState: () => void;
+  /** Open the live output panel — what Termux is saying while it says it. */
+  openOutput: () => void;
+  /**
+   * Shared preference: spell the change out beside the file name (`modified`,
+   * `conflicted`, `deleted`) on mobile, where there is no tooltip to carry it.
+   * On by default. Turning it off gives the name the whole row; the change
+   * letter in the right-hand column still states it.
+   */
+  showChangeWords: () => boolean;
   /**
    * Open the Git menu for a path (long press / right click). `group` is the
    * panel group the row belongs to, so the entries reflect the state the
@@ -259,6 +275,7 @@ const CHANGE_LABEL: Record<string, string> = {
 export class StatusView extends ItemView {
   private data: StatusViewData | null = null;
   private progressEl: HTMLElement | null = null;
+  private progressDetailEl: HTMLElement | null = null;
   private cancelBtn: HTMLElement | null = null;
   private collapsed: Record<Group, boolean> = {
     conflicted: false,
@@ -324,17 +341,24 @@ export class StatusView extends ItemView {
    * toolbar buttons every tick and restart their CSS animations from the first
    * frame, which made the activity animation look erratic.
    */
-  updateProgressText(text: string | null): void {
-    if (this.data) this.data.progress = text ?? undefined;
+  updateProgressText(text: string | null, detail?: string | null): void {
+    if (this.data) {
+      this.data.progress = text ?? undefined;
+      this.data.progressDetail = detail ?? undefined;
+    }
     if (this.progressEl && this.cancelBtn) {
-      this.applyStripState(text, this.data?.activeOperation ?? null);
+      this.applyStripState(text, this.data?.activeOperation ?? null, detail ?? null);
       return;
     }
     this.render();
   }
 
   /** Toggle the reserved cancel slot and the label without rebuilding the row. */
-  private applyStripState(progress: string | null, activeOperation: string | null): void {
+  private applyStripState(
+    progress: string | null,
+    activeOperation: string | null,
+    detail: string | null
+  ): void {
     const running = progress !== null && progress !== "";
     if (this.cancelBtn) {
       this.cancelBtn.toggleClass("ngb-slot-inactive", !running);
@@ -345,6 +369,11 @@ export class StatusView extends ItemView {
       this.progressEl.setText(
         running ? progress : activeOperation ? `${activeOperation} pending…` : "Idle"
       );
+    }
+    // The reserved line keeps its height when empty, so the head region cannot
+    // grow and push the repository state down the moment the runner speaks.
+    if (this.progressDetailEl) {
+      this.progressDetailEl.setText(running && detail !== null ? detail : "");
     }
   }
 
@@ -452,7 +481,15 @@ export class StatusView extends ItemView {
     cancel.addEventListener("click", () => this.actions.cancel());
     this.cancelBtn = cancel;
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
-    this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null);
+    // The state line opens the output panel.
+    //
+    // This line is what the user watches during a long operation, and until now
+    // watching it was all they could do: `sync… 240s` says a number and nothing
+    // about what git is doing. It is the obvious thing to tap, so it is now the
+    // thing that answers.
+    this.progressEl.addClass("ngb-sv-progress-tap");
+    this.progressEl.setAttribute("aria-label", "Show what Termux is doing");
+    this.progressEl.addEventListener("click", () => this.actions.openOutput());
     const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
     // Tree/list layout toggle (took the operation-log slot; the log moved to
     // settings). The icon shows the CURRENT layout; a tap switches to the other.
@@ -466,6 +503,17 @@ export class StatusView extends ItemView {
     histBtn.setAttribute("aria-label", "Repository history");
     setIcon(histBtn, "history");
     histBtn.addEventListener("click", this.actions.openHistory);
+
+    // --- runner detail line ---
+    // What the runner said it is doing, on its own line so the state line above
+    // never grows sideways. Created ALWAYS and sized by CSS even when empty:
+    // reserving the room is what keeps the repository state below from jumping
+    // the moment the first progress line arrives.
+    const detailEl = headEl.createDiv({ cls: "ngb-sv-progress-detail ngb-sv-progress-tap" });
+    detailEl.setAttribute("aria-label", "Show what Termux is doing");
+    detailEl.addEventListener("click", () => this.actions.openOutput());
+    this.progressDetailEl = detailEl;
+    this.applyStripState(d?.progress ?? null, d?.activeOperation ?? null, d?.progressDetail ?? null);
 
     // --- header line ---
     const head = headEl.createDiv({ cls: "ngb-sv-header" });
@@ -603,8 +651,18 @@ export class StatusView extends ItemView {
     const header = wrap.createDiv({ cls: "ngb-sv-group-header" });
     const chevron = header.createSpan({ cls: "ngb-sv-chevron" });
     setIcon(chevron, this.collapsed[group] ? "chevron-right" : "chevron-down");
+    // A dangerous group reads the way its rows do: the same warning glyph in
+    // the same colour. It used to carry `ngb-status-conflict`, a class the
+    // stylesheet has no rule for, so the header of a group of conflicts was
+    // indistinguishable from any other header while every row under it was
+    // marked. The group is the outermost row of its state; it says so.
+    if (danger) {
+      const warn = header.createSpan({ cls: "ngb-conf-row-icon" });
+      setIcon(warn, "alert-triangle");
+      warn.setAttribute("aria-label", "Merge conflicts");
+    }
     header.createSpan({
-      cls: danger ? "ngb-sv-group-title ngb-status-conflict" : "ngb-sv-group-title",
+      cls: danger ? "ngb-sv-group-title ngb-sv-group-danger" : "ngb-sv-group-title",
       text: title,
     });
     // Group-wide actions, in the same slots (and with the same glyphs) the
@@ -974,6 +1032,9 @@ export class StatusView extends ItemView {
       if (it.origPath !== undefined && it.origPath !== it.path) {
         const from = main.createSpan({ cls: "ngb-sv-file-from", text: `← ${displayName(it.origPath)}` });
         from.setAttribute("aria-label", `moved from ${it.origPath}`);
+        // Same gesture and same three lines as the repository history's rename
+        // hint: one question, one answer, wherever it is asked.
+        revealOnTap(from, describeMove(it.origPath, it.path), { align: "left" });
       }
       // Tap behaviour per group: conflicts open resolution (pane for text
       // files, context menu for the rest); tracked changes open their diff in
@@ -995,8 +1056,11 @@ export class StatusView extends ItemView {
       // WHICH GROUP the row came from, so its entries match the state the
       // panel is showing rather than being re-inferred.
       this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
-      // Tooltips are unavailable on touch, so the change is spelled out there.
-      if (Platform.isMobile) {
+      // Tooltips are unavailable on touch, so the change is spelled out there —
+      // unless the reader has turned the words off, which is what someone with
+      // long file names wants: `conflicted` and `modified` take room from the
+      // name, and the change letter at the end of the row says the same thing.
+      if (Platform.isMobile && this.actions.showChangeWords()) {
         main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
       }
 

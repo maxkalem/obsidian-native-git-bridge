@@ -38,7 +38,7 @@ import {
   validateRepoRelativePath,
 } from "./settings/pathValidation";
 import { OperationLock, isMarkerStale } from "./ops/OperationLock";
-import { OperationLog } from "./ops/OperationLog";
+import { OperationLog, redact } from "./ops/OperationLog";
 import { StatusBarController } from "./ui/StatusBarController";
 import {
   ChangedFilesModal,
@@ -63,7 +63,11 @@ import {
   type RepoLogFile,
 } from "./git/historyParsers";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
-import { buildMenuEntries, type MenuAction, type MenuScope } from "./ui/gitMenu";
+import { buildMenuEntries, menuHeader, type MenuAction, type MenuScope } from "./ui/gitMenu";
+import { looksLikeObjectCorruption, summarizeGitError } from "./git/gitErrors";
+import { describeRestore, restoreBlockInFile } from "./git/restoreBlock";
+import { ignoreEntryMatches, parseIgnoreEntries } from "./git/ignoreFile";
+import type { DiffHunk } from "./git/hunks";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
 import { DiffView, NGB_DIFF_VIEW, type DiffLoadResult, type DiffViewState } from "./ui/DiffView";
 import { overrideWarning } from "./git/diffBudget";
@@ -85,7 +89,8 @@ import {
   COMPANION_GET_TERMUX_URI,
   COMPANION_OPEN_TERMUX_URI,
   COMPANION_RELEASES_URL,
-  ACTION_TIMEOUT_SECONDS,
+  timeoutSecondsFor,
+  LONG_OPERATION_SECONDS,
   COMPANION_SETUP_URI,
   CLAIM_FILE,
   PAIRING_FILE,
@@ -99,6 +104,16 @@ import {
 } from "./constants";
 import { TFile } from "obsidian";
 import { OperationLogModal } from "./ui/OperationLogModal";
+import { buildLogBundle, logBundleName, LOG_NOTE_GLOB } from "./ops/logBundle";
+import { lastProgressLine, progressForBundle } from "./ops/progressStream";
+import { decideRepair, type RepairContext, type RepairStage } from "./ops/repairJob";
+import { checkPathLimits, proposeRename } from "./git/pathLimits";
+import {
+  NGB_OUTPUT_VIEW,
+  RunnerOutputView,
+  type RunnerOutputPast,
+  type RunnerOutputSnapshot,
+} from "./ui/RunnerOutputView";
 import {
   conflictColorVars,
   DEFAULT_COLORS,
@@ -125,6 +140,36 @@ interface SharedUiPrefs {
    */
   keepLineSelection: boolean;
   /**
+   * Spell the change out beside a file name in the status panel (`modified`,
+   * `conflicted`, `deleted`).
+   *
+   * On by default, and only ever drawn on mobile, where there is no tooltip to
+   * carry it. Cosmetic and about reading rather than about how much work this
+   * device does, so it is shared through data.json like the other display
+   * toggles.
+   */
+  showChangeWords: boolean;
+  /**
+   * Name the file above the Git context menu's entries.
+   *
+   * On by default: a panel row truncates its name to one line and the file
+   * explorer shows no path at all, so without it the menu offers "Discard
+   * changes" over a file it never identifies. Off gives the menu back the two
+   * or three rows a deep path costs, which on a short screen is the difference
+   * between seeing the entries and scrolling for them.
+   */
+  showMenuHeader: boolean;
+  /**
+   * Open the output panel by itself once an operation has run for a while.
+   *
+   * Off by default, and that is the cautious answer rather than the obvious one:
+   * a panel that appears on its own takes a slot in the sidebar while the user
+   * is reading something else. The state line is tappable either way, so nothing
+   * is unreachable without this — it only saves the tap for someone who has
+   * decided they always want to watch.
+   */
+  openOutputForLongOps: boolean;
+  /**
    * What a changed line is compared by: whole words, or single characters.
    *
    * Cosmetic and about reading rather than about how much work this device
@@ -150,6 +195,9 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   wrapDiffLines: false,
   showInvisibles: false,
   keepLineSelection: false,
+  showChangeWords: true,
+  showMenuHeader: true,
+  openOutputForLongOps: false,
   inlineDiffUnit: "word",
   showConflictMarkers: false,
   treeView: false,
@@ -158,7 +206,61 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   colorsDark: { ...DEFAULT_COLORS.dark },
 };
 
+/**
+ * Everything worth keeping about a failed request, for the log entry's detail.
+ *
+ * It used to be `code: message` and nothing else, so git's own words — the part
+ * that says *why* — existed only in the result window, which closes. A log
+ * bundle collected an hour later then carried twenty `GIT_FAILED: git pull
+ * failed.` lines and no reason for any of them; the runner's own log records
+ * outcomes, not output, so it could not fill the gap either.
+ *
+ * `OperationLog.add` redacts and truncates what it is given, so the size and
+ * the credentials are already somebody else's problem. Pure, and exported for
+ * the test.
+ */
+export function failureDetail(result: BridgeResult): string | undefined {
+  const err = result.error;
+  if (!err) return undefined;
+  const parts = [`${err.code}: ${err.message}`];
+  // Labelled, because the two streams answer different questions and git puts
+  // the reason in either one depending on the command.
+  if (err.stdout !== undefined && err.stdout.trim() !== "") parts.push(`stdout:\n${err.stdout.trimEnd()}`);
+  if (err.stderr !== undefined && err.stderr.trim() !== "") parts.push(`stderr:\n${err.stderr.trimEnd()}`);
+  return parts.join("\n");
+}
+
+/**
+ * What to say when `abort-merge` comes back failed.
+ *
+ * Pure, and exported for the test, because the interesting part is the decision
+ * rather than the window: only git's own refusal earns the sparse explanation.
+ * A SAFETY_BLOCKED or a REPO_MISSING has its own established rendering, and
+ * telling someone to reapply sparse rules when the repository is simply gone is
+ * worse than saying nothing.
+ */
+export function abortMergeFailure(result: BridgeResult): { offerReapply: boolean; lines: string[] } {
+  const err = result.error;
+  if (err?.code !== "GIT_FAILED") return { offerReapply: false, lines: [] };
+  return {
+    offerReapply: true,
+    lines: [
+      err.message,
+      "The usual cause is a sparse checkout that has drifted from the index: aborting has to put the working tree back, and it cannot restore a file it is not allowed to materialise. Git's own output is below.",
+      "Reapplying the sparse rules puts the two back in step, and the abort then normally succeeds on the next try. Nothing is deleted by it and no history is touched.",
+    ],
+  };
+}
+
 const MARKER_KEY = "active-op";
+/**
+ * Device-local record that a multi-step repair was running: which step, since
+ * when. Exists so a restart can OFFER to continue (§4 rule 7 — nothing
+ * destructive resumes by itself), and continuing simply reruns the job from
+ * the scan: the scan is idempotent, objects already fetched stay fetched, and
+ * re-deriving the state is cheaper than trusting a snapshot of it.
+ */
+const REPAIR_JOB_KEY = "repair-job";
 const LAST_SYNC_KEY = "last-sync";
 
 export default class NativeGitBridgePlugin extends Plugin {
@@ -171,7 +273,59 @@ export default class NativeGitBridgePlugin extends Plugin {
   statusBar: StatusBarController | null = null;
 
   private activeCancel: CancelToken | null = null;
+  /**
+   * Every request currently in flight, oldest first (insertion order).
+   *
+   * Two read-only requests may overlap on purpose: only a mutation takes the
+   * lock, and the runner drains its queue one at a time regardless. The
+   * display, though, has one slot for the action, the path, the progress line
+   * and the cancel token — so a teardown needs to know what else is running
+   * before it empties them.
+   */
+  private inFlight = new Map<
+    string,
+    {
+      id: string;
+      action: string;
+      path: string | null;
+      cancel: CancelToken;
+      startedAt: number;
+      /** The budget this request was given, so a wait can be read against it. */
+      timeoutSeconds: number;
+    }
+  >();
+  /**
+   * How the last finished operation ended, for the output panel.
+   *
+   * Kept because that panel is usually opened AFTER something went wrong, and a
+   * panel that says only "Idle" over the output of a failed sync leaves the
+   * reader to guess whether the sync failed or never ran.
+   */
+  private lastVerdict: string | null = null;
+  /** Which request the display slots below currently belong to. */
+  private runningId: string | null = null;
+  /**
+   * The panel is showing a status nobody has read since the repository last
+   * moved: an operation failed, timed out or was cancelled without bringing
+   * fresh status back. Cleared the moment any status is absorbed.
+   */
+  private statusStale = false;
   private progressText: string | null = null;
+  /** Human-readable step name while the multi-step repair runs, else null. */
+  private repairJobStep: string | null = null;
+  /**
+   * What the runner said it is doing (newest progress-stream line), kept apart
+   * from `progressText` so the state line stays short and stable while this
+   * one changes with every step. The panels draw it on a reserved second line.
+   */
+  private progressDetail: string | null = null;
+  /**
+   * The newest line the runner has streamed for the request in flight, and the
+   * id it belongs to. Kept as a field because the ticker that renders it is
+   * synchronous and reading a file is not: the read is started from one tick
+   * and shown by the next.
+   */
+  private liveProgress: { id: string; line: string } | null = null;
   private runningAction: string | null = null;
   /** Target path of the running action, when it is per-path (stage/unstage/discard file). */
   private runningPath: string | null = null;
@@ -230,7 +384,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           commit: () => void this.cmdCommit(),
           stageAll: () => void this.cmdStageAll(),
           unstageAll: () => void this.cmdUnstageAll(),
-          openLog: () => new OperationLogModal(this.app, this.log).open(),
+          openLog: () => this.openOperationLog(),
           toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
           folderAction: (group, folderPath, kind) => this.folderAction(group, folderPath, kind),
           openHistory: () => void this.openHistoryPanel(),
@@ -246,6 +400,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           unstage: (p) => void this.cmdUnstageFile(p),
           discard: (p, group) => this.discardPath(p, group),
           syncState: () => this.pushStatusToView(),
+          openOutput: () => void this.openOutputPanel(),
+          showChangeWords: () => this.sharedPrefs.showChangeWords,
           fileMenu: (p, group, pos) => {
             const menu = new Menu();
             this.buildGitMenu(menu, p, group);
@@ -268,9 +424,12 @@ export default class NativeGitBridgePlugin extends Plugin {
           openDiffAtCommit: (file, entry) => void this.openCommitDiff(file, entry),
           openFile: (p) => this.openVaultFile(p),
           progressText: () => this.progressText ?? "",
+          progressDetail: () => this.progressDetail ?? "",
+          openOutput: () => void this.openOutputPanel(),
           treeView: () => this.sharedPrefs.treeView,
           toggleTree: () => void this.setSharedPref({ treeView: !this.sharedPrefs.treeView }),
           openStatusPanel: () => void this.openStatusPanel(),
+          rowsPerGroup: () => this.deviceSettings.rowsPerGroup,
         })
     );
 
@@ -315,6 +474,11 @@ export default class NativeGitBridgePlugin extends Plugin {
           keepLineSelection: () => this.sharedPrefs.keepLineSelection,
           colors: () => this.diffColorVars(),
           progressText: () => this.progressText ?? "",
+          restoreBlock: (path, hunk, commitish) => this.restoreBlockFromCommit(path, hunk, commitish),
+          openFileAt: (path, commitish) => {
+            if (commitish === "WORKTREE") this.openVaultFile(path);
+            else void this.showFileAtCommit(path, commitish);
+          },
         })
     );
 
@@ -331,12 +495,24 @@ export default class NativeGitBridgePlugin extends Plugin {
           },
           stagePatch: (patch) => this.applyHunkPatch(patch, "index", false),
           restoreWholeFile: (p, e) => this.confirmRestore(p, e),
-          viewAtCommit: (e) => void this.showFileAtCommit(e),
+          viewAtCommit: (e) => void this.showFileAtCommit(e.pathAtCommit, e.hash, e.date),
           progressText: () => this.progressText ?? "",
+          progressDetail: () => this.progressDetail ?? "",
           wrapLines: () => this.sharedPrefs.wrapDiffLines,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
           inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
           colors: () => this.diffColorVars(),
+        })
+    );
+
+    this.registerView(
+      NGB_OUTPUT_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new RunnerOutputView(leaf, {
+          snapshot: (want) => this.outputSnapshot(want),
+          cancel: () => void this.cmdCancel(),
+          openStatusPanel: () => void this.openStatusPanel(),
+          openHistoryPanel: () => void this.openHistoryPanel(),
         })
     );
 
@@ -351,6 +527,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           stageFile: (p) => this.cmdStageFile(p),
           markersVisible: () => this.sharedPrefs.showConflictMarkers,
           showInvisibles: () => this.sharedPrefs.showInvisibles,
+          wrapLines: () => this.sharedPrefs.wrapDiffLines,
           inlineUnit: () => this.sharedPrefs.inlineDiffUnit,
           colors: () => this.conflictColorVars(),
         })
@@ -438,6 +615,21 @@ export default class NativeGitBridgePlugin extends Plugin {
       sparseExcluded: single && this.isSparseExcluded(path),
       excluded: single && this.isExcluded(path),
     });
+    // What the menu is about, above what it can do. A panel row truncates its
+    // name to fit one line and the file explorer shows no path at all, so this
+    // was the only surface offering "Discard changes" without naming the file.
+    const head = this.sharedPrefs.showMenuHeader ? menuHeader(scope) : null;
+    if (head !== null) {
+      menu.addItem((i) => {
+        const frag = createFragment((f) => {
+          const box = f.createDiv({ cls: "ngb-menu-head" });
+          if (head.dir !== "") box.createDiv({ cls: "ngb-menu-head-dir", text: head.dir });
+          box.createDiv({ cls: "ngb-menu-head-name", text: head.name });
+        });
+        i.setTitle(frag).setIsLabel(true);
+      });
+      menu.addSeparator();
+    }
     for (const e of entries) {
       menu.addItem((i) => {
         i.setTitle(e.title).setIcon(e.icon);
@@ -715,6 +907,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.warnIfObsidianGitEnabledOnAndroid();
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
+    this.offerInterruptedRepair();
     await this.loadGitignore(); // warm the cache so the file menu decides synchronously
     // Fresh install: nothing works yet and nothing explains why. Show the
     // guide once (device-local flag), and only on Android, where the bridge
@@ -729,10 +922,12 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     // Disk that nobody asked for, in a folder nobody opens: worth one line a day.
     void this.remindAboutPreviousRepos();
-    if (this.deviceSettings.enabledOnThisDevice && this.deviceSettings.autoPullOnOpen) {
+    const onOpen = this.deviceSettings.onOpenAction;
+    if (this.deviceSettings.enabledOnThisDevice && onOpen !== "nothing") {
       if (this.autoActionAllowed()) {
-        this.log.add("info", "auto", "Auto pull on open.");
-        void this.cmdPull(true);
+        this.log.add("info", "auto", `Auto ${onOpen} on open.`);
+        if (onOpen === "sync") void this.cmdSync(undefined, true);
+        else void this.cmdPull(true);
       }
     }
   }
@@ -1580,6 +1775,43 @@ export default class NativeGitBridgePlugin extends Plugin {
     await this.client.cleanupOld();
   }
 
+  /**
+   * A repair the last session never finished. Offered, not resumed: nothing
+   * that touches the object store restarts by itself (§4 rule 7). Continuing
+   * reruns the job from the scan — the scan is idempotent, and whatever an
+   * earlier step already fetched stays fetched.
+   */
+  private offerInterruptedRepair(): void {
+    const raw = this.store.getValue(REPAIR_JOB_KEY);
+    if (!raw) return;
+    this.store.removeValue(REPAIR_JOB_KEY);
+    let step = "";
+    try {
+      step = String((JSON.parse(raw) as { step?: unknown }).step ?? "");
+    } catch {
+      /* an unreadable record still deserves the offer */
+    }
+    new ResultModal(
+      this.app,
+      "A repair was interrupted",
+      [
+        step !== ""
+          ? `Obsidian closed while a repository repair was running (${step}).`
+          : "Obsidian closed while a repository repair was running.",
+        "Nothing was lost: the repair runs as short steps and picks its work back up from a fresh scan.",
+      ],
+      {
+        actions: [
+          {
+            label: "Continue the repair",
+            cta: true,
+            onClick: () => void this.cmdRepairObjects(true),
+          },
+        ],
+      }
+    ).open();
+  }
+
   private persistMarker(marker: OperationMarker | null): void {
     if (marker) this.store.setValue(MARKER_KEY, JSON.stringify(marker));
     else this.store.removeValue(MARKER_KEY);
@@ -1648,9 +1880,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "verify-sparse-safety", name: "Verify sparse checkout safety", cb: () => void this.cmdVerifySparseSafety() },
       { id: "reapply-sparse", name: "Reapply sparse checkout", cb: () => void this.cmdReapplySparse() },
       { id: "diagnostics", name: "Run diagnostics", cb: () => void this.cmdDiagnostics() },
-      { id: "open-operation-log", name: "Open operation log", cb: () => new OperationLogModal(this.app, this.log).open() },
+      { id: "open-operation-log", name: "Open operation log", cb: () => this.openOperationLog() },
       { id: "open-status-panel", name: "Open status panel", cb: () => void this.openStatusPanel() },
       { id: "open-history-panel", name: "Open history panel", cb: () => void this.openHistoryPanel() },
+      { id: "open-output-panel", name: "Show what Termux is doing (output panel)", cb: () => void this.openOutputPanel() },
       { id: "open-file-history-panel", name: "Open history panel for the current file", cb: () => {
         const p = this.activeFilePath();
         if (p !== null) void this.openFileHistoryPanel(p);
@@ -1684,9 +1917,20 @@ export default class NativeGitBridgePlugin extends Plugin {
   /** Guard + queue + trigger + await one bridge operation. */
   private async runOperation(
     action: BridgeAction,
-    args: Record<string, unknown> = {}
+    args: Record<string, unknown> = {},
+    /**
+     * True only for a step the repair job itself sends. Everything else is
+     * refused while the job runs: the queue is created by one user action and
+     * blocks all other requests until it finishes — the lock's own semantics,
+     * held across the gaps between steps.
+     */
+    fromRepairJob = false
   ): Promise<BridgeResult | null> {
     const s = this.deviceSettings;
+    if (this.repairJobStep !== null && !fromRepairJob) {
+      new Notice(`A repair is running (${this.repairJobStep}). Wait for it to finish.`);
+      return null;
+    }
     if (!Platform.isAndroidApp) {
       // The whole transport (companion app -> Termux RUN_COMMAND) exists only
       // on Android; anywhere else a request could only ever time out.
@@ -1747,7 +1991,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       action,
       args,
       s.authToken,
-      ACTION_TIMEOUT_SECONDS[action] ?? s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS,
+      timeoutSecondsFor(action, s.opTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS),
       new Date(),
       randomSuffix(),
       s.profileId
@@ -1764,18 +2008,33 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
 
     const cancel = new CancelToken();
-    this.activeCancel = cancel;
     this.statusBar?.set("syncing");
     this.log.add("info", action, `Queued request ${req.id}.`);
     // Progress is rendered at the BOTTOM of the status panel (a top notice would
     // cover the editor on mobile). The panel is opened if it is not visible yet.
     void this.openStatusPanel(false);
     const startedAt = Date.now();
-    this.runningAction = action;
     // Per-path actions carry their target so the status panel can animate the
     // acted row only, instead of every control sharing the action name.
-    this.runningPath = typeof args["path"] === "string" ? args["path"] : null;
+    const path = typeof args["path"] === "string" ? args["path"] : null;
+    // Every request in flight is remembered, not just the latest: the display
+    // slots below are single, and a teardown has to know whether anything else
+    // is still running before it empties them.
+    this.inFlight.set(req.id, {
+      id: req.id,
+      action,
+      path,
+      cancel,
+      startedAt,
+      timeoutSeconds: req.timeoutSeconds,
+    });
+    this.runningId = req.id;
+    this.activeCancel = cancel;
+    this.runningAction = action;
+    this.runningPath = path;
     this.progressText = `${action}… 0s`;
+    this.progressDetail = null;
+    this.liveProgress = null;
     // ONE push, not two. There used to be another immediately after
     // `statusBar.set("syncing")`, four lines up, which re-rendered the whole
     // panel for a state the push below re-renders anyway. On a device with a
@@ -1784,10 +2043,31 @@ export default class NativeGitBridgePlugin extends Plugin {
     // and expanding the same folder took under one.
     this.pushStatusToView();
     const ticker = window.setInterval(() => {
+      // Only while this request owns the display. Two overlapping reads used to
+      // give the panel two tickers writing different actions into one line.
+      if (this.runningId !== req.id) return;
       const secs = Math.round((Date.now() - startedAt) / 1000);
+      // What the runner is doing, when it has said. Everything the plugin knew
+      // before was how long it had been waiting, which for a fetch of a large
+      // vault is the one fact the user already had.
+      const live = this.liveProgress?.id === req.id ? this.liveProgress.line : "";
+      // Two slots, not one composed string: the state stays `action… Ns` on
+      // every surface, and what the runner said goes to the reserved detail
+      // line so the state line cannot grow sideways mid-operation.
       this.progressText = `${action}… ${secs}s`;
+      this.progressDetail = live !== "" ? live : null;
+      // Long enough that the user is now wondering rather than waiting. Once
+      // per request, and only when asked for: an unrequested panel takes a
+      // sidebar slot away from whatever is being read.
+      if (secs === LONG_OPERATION_SECONDS && this.sharedPrefs.openOutputForLongOps) {
+        void this.openOutputPanel();
+      }
       // Text-only update: a full re-render would restart the toolbar animations.
-      this.updateProgressInView(this.progressText);
+      this.updateProgressInView(this.progressText, this.progressDetail);
+      // Started here, shown by the next tick. Deliberately not awaited: the
+      // ticker must keep its second, and a slow read on shared storage must
+      // never be able to hold it up.
+      void this.refreshLiveProgress(req.id);
     }, 1000);
 
     try {
@@ -1801,6 +2081,10 @@ export default class NativeGitBridgePlugin extends Plugin {
         // and archives cancelled requests; one already mid-flight in Termux is
         // unaffected and its orphan result is reconciled/swept later).
         await this.client.requestCancel(req.id);
+        // Nothing came back, and a mutation may well have happened anyway — the
+        // runner finishes what it started. The panel must stop presenting the
+        // state it had before.
+        if (mutating) this.statusStale = true;
         this.log.add(
           "warn",
           action,
@@ -1815,19 +2099,29 @@ export default class NativeGitBridgePlugin extends Plugin {
         // opening its checklist would point at the wrong suspect. Otherwise
         // open the checklist — once per session, not on every retry.
         if (this.lastCompanionAckMs > ackBaseline) {
+          // Do NOT call this a Termux fault. The companion took the trigger and
+          // the runner is one-shot: it finishes what it started whether or not
+          // anybody is still waiting, and a result that lands later is picked up
+          // on the next launch. What is actually known is that the budget ran
+          // out, and on a slow device with a short budget that is the whole
+          // story — the earlier wording sent the user hunting a break that was
+          // not there.
           this.log.add(
             "warn",
             action,
-            "Companion acknowledged the trigger but no result arrived: the problem is on the Termux/runner side (see the bridge check)."
+            `Companion acknowledged the trigger and the runner did not answer within ${req.timeoutSeconds}s. It may still be working; a result that lands later is picked up.`
           );
         } else if (!this.companionSetupAutoOpened) {
           this.companionSetupAutoOpened = true;
           void this.openCompanionSetup(); // fire-and-forget: the probe must not delay the caller
         }
+        this.lastVerdict = `${action} timed out after ${req.timeoutSeconds}s (it may still be running in Termux)`;
         return null;
       }
       if (waited.kind === "cancelled") {
         await this.client.requestCancel(req.id);
+        if (mutating) this.statusStale = true;
+        this.lastVerdict = `${action} cancelled`;
         this.log.add("warn", action, `Request ${req.id} cancelled by user.`);
         new Notice(`Native Git: ${action} cancelled.`);
         return null;
@@ -1840,8 +2134,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         result.ok ? "info" : "error",
         action,
         `Request ${req.id} finished ok=${result.ok} exit=${result.exitCode}.`,
-        result.error ? `${result.error.code}: ${result.error.message}` : undefined
+        failureDetail(result)
       );
+      this.lastVerdict = result.ok
+        ? `${action} finished`
+        : `${action} failed: ${result.error?.message ?? `exit ${result.exitCode}`}`;
       return result;
     } catch (e) {
       this.log.add("error", action, `Bridge error: ${String(e)}`);
@@ -1849,13 +2146,73 @@ export default class NativeGitBridgePlugin extends Plugin {
       return null;
     } finally {
       window.clearInterval(ticker);
+      this.inFlight.delete(req.id);
+      if (mutating) this.lock.release(req.id);
+      // The display slots are single, and two READ-ONLY requests are allowed to
+      // overlap by design: only a mutation takes the lock, and the runner
+      // drains its queue one request at a time anyway. What was not allowed for
+      // was the teardown — it cleared the slots unconditionally, so the first
+      // answer to arrive wiped the progress line AND the cancel token of a
+      // request that was still running, leaving the panel idle over live work
+      // and the Cancel button pointing at nothing.
+      //
+      // Same ownership rule the three wait tickers were given in 0.6.3, one
+      // level up: clear only what is still yours, and hand the slots to
+      // whatever is still in flight rather than to nobody.
+      if (this.runningId === req.id) this.adoptNewestInFlight();
+      this.refreshStatusBarIdle();
+      this.pushStatusToView();
+    }
+  }
+
+  /**
+   * Point the single display slots at the newest request still running, or
+   * empty them when nothing is.
+   *
+   * "Newest" because that is the one the user just asked for and is watching;
+   * an older request that is still going keeps running either way.
+   */
+  private adoptNewestInFlight(): void {
+    const next = [...this.inFlight.values()].pop();
+    if (next === undefined) {
       this.progressText = null;
+      this.progressDetail = null;
+      this.liveProgress = null;
       this.runningAction = null;
       this.runningPath = null;
       this.activeCancel = null;
-      if (mutating) this.lock.release(req.id);
-      this.refreshStatusBarIdle();
-      this.pushStatusToView();
+      this.runningId = null;
+      return;
+    }
+    // The line belongs to a request, not to the panel: adopting another one must
+    // not leave the previous operation's step under the new one's name.
+    if (this.liveProgress?.id !== next.id) this.liveProgress = null;
+    this.runningId = next.id;
+    this.runningAction = next.action;
+    this.runningPath = next.path;
+    this.activeCancel = next.cancel;
+    this.progressText = `${next.action}… ${Math.round((Date.now() - next.startedAt) / 1000)}s`;
+    this.progressDetail = this.liveProgress?.id === next.id ? this.liveProgress.line : null;
+  }
+
+  /**
+   * Take the newest line out of the runner's progress stream for one request.
+   *
+   * Silent about everything: no such file (an older runner, or a request that
+   * never started), an unreadable one, a stream with nothing in it yet. This
+   * decorates a status line — an operation that works without it must not be
+   * made to look broken because a decoration failed.
+   */
+  private async refreshLiveProgress(id: string): Promise<void> {
+    try {
+      const raw = await this.client.readProgress(id);
+      if (raw === null) return;
+      const line = lastProgressLine(raw);
+      // Only if it is still the request being watched: the read is async, and by
+      // now the panel may have moved on to another one.
+      if (line !== null && this.runningId === id) this.liveProgress = { id, line };
+    } catch {
+      /* decoration only */
     }
   }
 
@@ -2229,13 +2586,18 @@ export default class NativeGitBridgePlugin extends Plugin {
     const done: string[] = [];
     const problems: string[] = [];
 
-    if (plan.unstage.length > 0) {
+    // Conflicted protected paths go through the same action, in the same
+    // request when both kinds are present: the runner picks the call that fits
+    // each entry. This is the exit from the loop the user was in — sync
+    // blocked, repair unable to touch the one path blocking it, sync blocked.
+    const allPaths = [...plan.unstage, ...plan.resolveToHead];
+    if (allPaths.length > 0) {
       // protectedPaths is NOT optional here: the runner checks each path
       // against it and refuses the request outright when the list is empty,
       // because "which paths are protected" is the whole permission model for
       // this action. Omitting it made the repair fail every single time.
       const result = await this.runOperation("unstage-protected", {
-        paths: plan.unstage,
+        paths: allPaths,
         protectedPaths: this.effectiveProtectedPaths(),
       });
       if (!result) return;
@@ -2250,6 +2612,12 @@ export default class NativeGitBridgePlugin extends Plugin {
       // reassurance as the "Moved 0 files to the trash" this replaced.
       if (n > 0) {
         done.push(`${n} index entr${n === 1 ? "y" : "ies"} removed (nothing was deleted from disk).`);
+      }
+      const r = Number(result.data?.resolvedProtectedCount ?? 0);
+      if (r > 0) {
+        done.push(
+          `${r} conflicted path${r === 1 ? "" : "s"} restored to the committed version, so the merge can be finished.`
+        );
       }
     }
 
@@ -2313,6 +2681,14 @@ export default class NativeGitBridgePlugin extends Plugin {
             `Remove from the index only (${plan.unstage.length}) — staged additions with no file on disk:`,
             ...plan.unstage.slice(0, 8),
             plan.unstage.length > 8 ? `…and ${plan.unstage.length - 8} more` : ""
+          );
+        }
+        if (plan.resolveToHead.length > 0) {
+          body.push(
+            `Restore to the committed version (${plan.resolveToHead.length}) — conflicted inside a protected folder:`,
+            ...plan.resolveToHead.slice(0, 8),
+            plan.resolveToHead.length > 8 ? `…and ${plan.resolveToHead.length - 8} more` : "",
+            "These are files this device is not allowed to edit, so the committed version is the one to keep. Restoring it clears the conflict and lets the merge be finished; nothing on disk is touched."
           );
         }
         body.push(
@@ -2430,11 +2806,11 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   private absorbExcludeList(raw: string | undefined): void {
     if (raw === undefined) return;
-    this.excludeLines = raw.split("\n").map((l) => l.trim()).filter((l) => l !== "");
+    this.excludeLines = parseIgnoreEntries(raw);
   }
 
   isExcluded(path: string): boolean {
-    return [`/${path}`, path, `/${path}/`, `${path}/`].some((v) => this.excludeLines.includes(v));
+    return ignoreEntryMatches(this.excludeLines, path);
   }
 
   // .gitignore is a plain tracked file in the vault: edited directly, no Termux.
@@ -2448,12 +2824,11 @@ export default class NativeGitBridgePlugin extends Plugin {
     } catch {
       this.gitignoreLines = [];
     }
-    return this.gitignoreLines.filter((l) => l.trim() !== "");
+    return parseIgnoreEntries(this.gitignoreLines.join("\n"));
   }
 
   isGitignored(path: string): boolean {
-    const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
-    return this.gitignoreLines.some((l) => variants.includes(l.trim()));
+    return ignoreEntryMatches(parseIgnoreEntries(this.gitignoreLines.join("\n")), path);
   }
 
   async gitignoreAdd(entry: string): Promise<void> {
@@ -2490,6 +2865,336 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   currentExcludeLines(): string[] {
     return [...this.excludeLines];
+  }
+
+  /**
+   * Collect everything that describes a failure into one file and hand it to
+   * Android's own share sheet.
+   *
+   * Three sources, because the answer is rarely in only one of them: the ring
+   * buffer, the `detail` on each entry (git's stderr), and the runner's own log
+   * in `runtime/`, which records what the Termux side did including the parts
+   * that never reach a result file.
+   *
+   * The file is written into `runtime/`, which is excluded from git by the
+   * installer, so a bundle can never become a change in the repository it is
+   * describing. Nothing here is deleted afterwards: it is small, it is
+   * excluded, and a report the user cannot find again is worse.
+   *
+   * `navigator.share` is the only route out of the WebView that needs no new
+   * Android permission and no companion release. It is not guaranteed to exist
+   * there, so the fallback names the exact path and offers to copy the whole
+   * thing to the clipboard, which is what the log button already did.
+   */
+  /**
+   * Everything the output panel draws, read in one pass.
+   *
+   * One method rather than a set of getters the panel could call: three of these
+   * fields come off shared storage, the panel refreshes once a second, and
+   * gathering them separately would let the elapsed counter disagree with the
+   * stream printed beside it.
+   *
+   * The two collapsed sections are only read when they are open. `runner.log` is
+   * a file read on shared storage every second otherwise, for a section nobody
+   * is looking at.
+   */
+  async outputSnapshot(want: {
+    runnerLog: boolean;
+    past: boolean;
+    opLog: boolean;
+  }): Promise<RunnerOutputSnapshot> {
+    const paths = new RuntimePaths(this.app.vault.configDir);
+    const current = [...this.inFlight.values()].pop() ?? null;
+    let stream = "";
+    if (current !== null) {
+      const raw = await this.client.readProgress(current.id);
+      if (raw !== null) stream = progressForBundle(raw, 32 * 1024);
+    } else {
+      // Nothing running: keep showing the newest stream there is, because the
+      // panel is usually opened just after something finished badly.
+      const recent = await this.collectProgressStreams(paths, 1);
+      stream = recent[0]?.text ?? "";
+    }
+    let queued = 0;
+    try {
+      queued = await this.client.pendingRequestCount();
+    } catch {
+      queued = 0;
+    }
+    let runnerLog = "";
+    if (want.runnerLog) {
+      try {
+        const p = `${paths.root}/runner.log`;
+        if (await this.app.vault.adapter.exists(p)) {
+          const text = await this.app.vault.adapter.read(p);
+          const tail = text.slice(-8 * 1024);
+          const nl = tail.indexOf("\n");
+          runnerLog = redact(nl >= 0 && text.length > 8 * 1024 ? tail.slice(nl + 1) : tail).trimEnd();
+        }
+      } catch {
+        runnerLog = "";
+      }
+    }
+    let opLog = "";
+    if (want.opLog) {
+      // Already redacted and truncated on the way in; formatting is all that is
+      // left. Newest last, like every other console in this panel.
+      opLog = this.log
+        .list()
+        .map(
+          (e) =>
+            `${e.ts} [${e.level}] ${e.action}: ${e.message}` +
+            (e.detail !== undefined ? `\n    ${e.detail.split("\n").join("\n    ")}` : "")
+        )
+        .join("\n");
+    }
+    let past: RunnerOutputPast[] = [];
+    if (want.past) {
+      const all = await this.collectProgressStreams(paths, 6);
+      past = all
+        .filter((s) => s.id !== current?.id)
+        .slice(0, 5)
+        // The action is the stream's own first line — the runner opens every one
+        // with "<action> started" — so nothing has to be remembered for it.
+        .map((s) => ({ id: s.id, action: streamAction(s.text) ?? "operation", text: s.text }));
+    }
+    return {
+      action: current?.action ?? null,
+      stateText: this.progressText,
+      requestId: current?.id ?? null,
+      elapsedSeconds: current === null ? 0 : Math.round((Date.now() - current.startedAt) / 1000),
+      timeoutSeconds: current?.timeoutSeconds ?? 0,
+      stream,
+      queued,
+      companionAcked: current !== null && this.lastCompanionAckMs >= current.startedAt,
+      lastVerdict: this.lastVerdict,
+      runnerLog,
+      past,
+      opLog,
+    };
+  }
+
+  /** Open (or reveal) the live output panel. */
+  async openOutputPanel(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(NGB_OUTPUT_VIEW);
+    if (existing.length > 0) {
+      const leaf = existing[0]!;
+      await this.app.workspace.revealLeaf(leaf);
+      // Obsidian defers sidebar views: a restored leaf answers to the type
+      // while holding no real view yet, and `instanceof` is how that shows up.
+      // Ask for the real one before deciding anything about it.
+      await (leaf as { loadIfDeferred?: () => Promise<void> }).loadIfDeferred?.();
+      const view = leaf.view;
+      if (view instanceof RunnerOutputView) {
+        // Whoever opens the panel is asking about NOW: land on the live tab,
+        // not on whichever log was selected an hour ago.
+        view.showLive();
+        await view.tick();
+        return;
+      }
+      // A leaf of the right type that still is not this view is a leftover — a
+      // workspace restored from a session where the type was not registered
+      // renders as an empty black pane with the right title. Say so in the log
+      // (the shared bundle carries it) and rebuild the leaf instead of
+      // revealing the husk again.
+      this.log.add(
+        "warn",
+        "output-panel",
+        `The output leaf held ${view ? view.getViewType() : "no view"}; recreating it.`
+      );
+      leaf.detach();
+    }
+    const leaf = this.app.workspace.getRightLeaf(false);
+    if (!leaf) return;
+    await leaf.setViewState({ type: NGB_OUTPUT_VIEW, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    await (leaf as { loadIfDeferred?: () => Promise<void> }).loadIfDeferred?.();
+  }
+
+  /**
+   * The progress streams worth putting in a bundle: the newest few, whole.
+   *
+   * Newest first because a report is almost always about what just happened,
+   * and capped because these files exist to be watched, not archived — five of
+   * them at 8 KB each is a bundle that still opens on a phone and still fits in
+   * a message. Request ids begin with a sortable timestamp, so ordering them is
+   * a string comparison and needs no file stats.
+   */
+  private async collectProgressStreams(
+    paths: RuntimePaths,
+    limit = 5
+  ): Promise<{ id: string; text: string }[]> {
+    const adapter = this.app.vault.adapter;
+    let files: string[];
+    try {
+      if (!(await adapter.exists(paths.progressDir))) return [];
+      files = (await adapter.list(paths.progressDir)).files.filter((f) => f.endsWith(".txt"));
+    } catch {
+      return [];
+    }
+    files.sort().reverse();
+    const out: { id: string; text: string }[] = [];
+    for (const f of files.slice(0, limit)) {
+      try {
+        const raw = await adapter.read(f);
+        const name = f.slice(f.lastIndexOf("/") + 1);
+        out.push({ id: name.replace(/\.txt$/, ""), text: progressForBundle(raw) });
+      } catch {
+        /* one unreadable stream must not lose the others */
+      }
+    }
+    return out;
+  }
+
+  /** The one place the log window is built, so the share button cannot go missing from one of them. */
+  openOperationLog(): void {
+    new OperationLogModal(this.app, this.log, () => void this.cmdShareOperationLog()).open();
+  }
+
+  async cmdShareOperationLog(): Promise<void> {
+    const paths = new RuntimePaths(this.app.vault.configDir);
+    const root = paths.root;
+    const adapter = this.app.vault.adapter;
+    const runnerLogPath = `${root}/runner.log`;
+    let runnerLog: string | null = null;
+    try {
+      if (await adapter.exists(runnerLogPath)) runnerLog = await adapter.read(runnerLogPath);
+    } catch {
+      runnerLog = null;
+    }
+    const progress = await this.collectProgressStreams(paths);
+    const s = this.deviceSettings;
+    const now = new Date().toISOString();
+    const text = buildLogBundle({
+      now,
+      facts: {
+        "Plugin version": this.manifest.version,
+        "Runner version": this.lastRunnerVersion > 0 ? String(this.lastRunnerVersion) : "(unknown)",
+        "Runner minimum": String(RUNNER_MIN_VERSION),
+        Platform: Platform.isAndroidApp ? "Android app" : Platform.isMobile ? "mobile" : "desktop",
+        "Obsidian requires": this.manifest.minAppVersion,
+        "Profile for this vault": s.profileId || "(none yet)",
+        "Protected paths (effective)": this.effectiveProtectedPaths().join(", ") || "(none)",
+        "Termux integration": String(s.termuxIntegrationEnabled),
+      },
+      entries: this.log.list(),
+      runnerLog,
+      progress,
+    });
+    const name = logBundleName(now);
+    const filePath = `${root}/${name}`;
+    try {
+      await adapter.write(filePath, text);
+    } catch (e) {
+      new ResultModal(this.app, "Could not write the log bundle", [
+        `Writing ${filePath} failed: ${String(e)}`,
+      ], { isError: true }).open();
+      return;
+    }
+    const nav = navigator as Navigator & {
+      share?: (d: { files?: File[]; title?: string; text?: string }) => Promise<void>;
+      canShare?: (d: { files?: File[] }) => boolean;
+    };
+    if (typeof nav.share === "function") {
+      try {
+        const file = new File([text], name, { type: "text/plain" });
+        if (nav.canShare === undefined || nav.canShare({ files: [file] })) {
+          await nav.share({ files: [file], title: "Native Git Bridge log" });
+          return;
+        }
+      } catch {
+        // A share the user dismissed and a share the platform refused look the
+        // same from here, so both fall through to the window below rather than
+        // being reported as a failure.
+      }
+    }
+    new ResultModal(
+      this.app,
+      "Log bundle written",
+      [
+        `Saved to ${filePath} inside the vault.`,
+        "That folder is excluded from git, so the file will not show up as a change.",
+        "Android's share sheet is not reachable from inside Obsidian, and the companion cannot reach the file either: it holds one permission, to run Termux, and reading shared storage is not it. So either copy the whole bundle below, or put a copy where Obsidian's own Share can see it.",
+      ],
+      {
+        stdout: text,
+        actions: [
+          {
+            label: "Save as a note to share",
+            cta: true,
+            onClick: () => void this.saveLogBundleAsNote(text, name),
+          },
+        ],
+      }
+    ).open();
+  }
+
+  /**
+   * Second copy of the bundle, as a note in the vault root.
+   *
+   * Obsidian's own note menu has Share on mobile, and that is a share sheet the
+   * plugin does not have to build, ask a permission for, or teach the companion
+   * about. The cost is honest and stated: a note in the vault is an untracked
+   * file in the repository, unlike the copy in `runtime/`.
+   *
+   * It is a separate button rather than the default for exactly that reason.
+   */
+  private async saveLogBundleAsNote(text: string, bundleName: string): Promise<void> {
+    const notePath = `${bundleName.replace(/\.txt$/, "")}.md`;
+    // It cannot live in `runtime/`, which is the folder that is already
+    // excluded from git: Obsidian does not index anything under its config
+    // directory, so such a file has no note menu and therefore no Share. The
+    // copy Obsidian can share has to be an ordinary file in the vault.
+    //
+    // Which would make it an untracked change — so the pattern goes into
+    // `.git/info/exclude` first. That file is per clone and never committed, so
+    // this stays a decision about THIS device, and one entry covers every
+    // bundle ever written. The runner's exclude-add is idempotent.
+    const excluded = await this.runOperation("exclude-add", { path: LOG_NOTE_GLOB });
+    try {
+      await this.app.vault.adapter.write(notePath, ["```", text, "```", ""].join("\n"));
+    } catch (e) {
+      new Notice(`Could not write ${notePath}: ${String(e)}`);
+      return;
+    }
+    if (excluded?.ok) this.excludeLines = (excluded.data?.excludeList ?? "").split("\n").filter(Boolean);
+    this.openVaultFile(notePath);
+    new Notice(
+      excluded?.ok
+        ? `Saved as ${notePath}. ${LOG_NOTE_GLOB} is excluded from git on this device, so it is not a change.`
+        : `Saved as ${notePath} — git was not told to ignore it, so it shows as untracked.`
+    );
+    this.offerFileMenu(notePath);
+  }
+
+  /**
+   * Open the note's own file menu, so Share is one tap away instead of a hunt
+   * through the pane header.
+   *
+   * EXPERIMENT, and it may not survive. Obsidian exposes no share API at all —
+   * the word does not occur in its typings — and the only automatic route would
+   * be `app.commands.executeCommandById`, which is not public, whose id is
+   * undocumented and mobile-only, and which would break silently for everyone
+   * the day it changed. This plugin already refused that class of bet once, for
+   * Version History Diff's internals (`docs/limitations.md`).
+   *
+   * What is used here is entirely public: `Workspace.trigger` and
+   * `Menu.showAtPosition`, with `file-menu`, the same documented event this
+   * plugin already handles. Whether Obsidian's own mobile Share is added
+   * THROUGH that event or hard-coded past it is the open question, and there is
+   * no public way to read a Menu's items back, so the plugin cannot tell either.
+   * If Share does not appear, this comes out.
+   */
+  private offerFileMenu(path: string): void {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    const menu = new Menu();
+    this.app.workspace.trigger("file-menu", menu, file, "more-options");
+    // Top-centre: a menu anchored to a corner on a phone opens off the edge,
+    // and there is no element here to anchor to — the button that opened it
+    // belongs to a window that is closing.
+    const win = this.app.workspace.containerEl.win;
+    menu.showAtPosition({ x: Math.round(win.innerWidth / 2), y: 96 });
   }
 
   async cmdReapplySparse(): Promise<void> {
@@ -2605,6 +3310,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   /** Parse the status fields every mutating action returns and refresh UI. */
   private absorbStatusData(d: Record<string, string>): void {
     if (typeof d.remoteUrl === "string") this.lastRemoteUrl = d.remoteUrl;
+    if (typeof d.rescueBranches === "string") this.offerRescueCleanup(d.rescueBranches);
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);
     // v5+ runners enumerate the files git status collapses into "dir/" lines;
@@ -2631,6 +3337,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       // the missing field as `true` would put a banner on every panel.
       rebaseInProgress: d.rebaseInProgress === "true",
     };
+    this.statusStale = false;
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
   }
@@ -2674,6 +3381,13 @@ export default class NativeGitBridgePlugin extends Plugin {
   private renderMutationError(title: string, result: BridgeResult): void {
     const err = result.error;
     const d = result.data ?? {};
+    // A failure with no status attached leaves the panel describing a
+    // repository from before the operation. Say so rather than keep asserting
+    // it; the next refresh clears it.
+    if (!d.branchInfo) {
+      this.statusStale = true;
+      this.pushStatusToView();
+    }
     // A FAILED operation still changed what the user should see (a rejected
     // pull leaves dirty files, a conflict leaves markers): v6 runners attach
     // fresh status fields to error results, absorb them before rendering.
@@ -2698,10 +3412,35 @@ export default class NativeGitBridgePlugin extends Plugin {
       return;
     }
     this.statusBar?.set("error");
-    new ResultModal(this.app, title, [err?.message ?? "Unknown error."], {
+    // git's own reason in the BODY, not only behind the fold. "git pull failed
+    // during sync." names the step and not the cause, and on a repository this
+    // size the cause is followed by two hundred lines of progress, so the one
+    // sentence that mattered ("Please commit your changes or stash them before
+    // you merge") could only be found by expanding stderr and scrolling back.
+    const reason = summarizeGitError(err?.stderr, err?.stdout);
+    // A damaged object database announces itself through whatever operation
+    // happened to walk into it, so the message never mentions the real cause.
+    // Name it, and offer the repair instead of leaving the user to find out
+    // that `git fsck` exists.
+    const corrupt = looksLikeObjectCorruption(err?.stderr, err?.stdout);
+    const lines = [err?.message ?? "Unknown error.", ...reason];
+    if (corrupt) {
+      lines.push(
+        "",
+        "This is not about the operation you ran: the repository's object database is damaged. " +
+          "An empty object file is what git leaves when it was stopped mid-write — Android does " +
+          "that to Termux in the background, and a cancelled operation can do it too.",
+        "The repair removes only files that are EMPTY, which cannot contain anything, and then " +
+          "fetches to bring the real objects back from the remote. Nothing that holds data is touched."
+      );
+    }
+    new ResultModal(this.app, title, lines, {
       stdout: err?.stdout,
       stderr: err?.stderr,
       isError: true,
+      actions: corrupt
+        ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }]
+        : undefined,
     }).open();
   }
 
@@ -2732,7 +3471,90 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
   }
 
+  /**
+   * The last moment a too-long filename can still be fixed is before it is
+   * committed: it commits and pushes cleanly from here, and then every OTHER
+   * clone fails to check it out — "Filename too long" on Windows' 260-character
+   * paths, the 255-byte segment limit everywhere else. Resolves true when the
+   * operation may proceed. The rename goes through Obsidian's own rename so
+   * links keep working; folders it will not rename automatically, it names.
+   */
+  private guardPathLimits(): Promise<boolean> {
+    // Obsidian's own file index, not the last git status: the status is as old
+    // as its last refresh, and the note the user created five seconds before
+    // pressing Sync — the exact case this guard exists for — is not in it. The
+    // index is in memory, current, and covers tracked long names too, which
+    // are just as broken for every other clone.
+    const candidates = this.app.vault.getFiles().map((f) => f.path);
+    const issues = checkPathLimits(candidates);
+    if (issues.length === 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      // The buttons close the window, and closing fires onDismiss too; this
+      // keeps the decline path from outracing a decision already made.
+      let handled = false;
+      const shown = issues.slice(0, 8);
+      const lines = [
+        `${issues.length === 1 ? "One path is" : `${issues.length} paths are`} too long for other machines: the commit would succeed here and every other clone would fail to check it out ("Filename too long").`,
+        ...shown.map(
+          (i) =>
+            `• ${i.path}` +
+            (i.needsFolderRename ? " — a FOLDER name is the problem; rename it in Obsidian first" : "")
+        ),
+        ...(issues.length > shown.length ? [`…and ${issues.length - shown.length} more.`] : []),
+      ];
+      const renamable = issues.filter((i) => !i.needsFolderRename);
+      new ResultModal(this.app, "Filenames other machines cannot check out", lines, {
+        isError: true,
+        actions: [
+          ...(renamable.length > 0
+            ? [
+                {
+                  label: `Shorten ${renamable.length === 1 ? "the name" : `${renamable.length} names`} automatically`,
+                  cta: true,
+                  onClick: () => {
+                    handled = true;
+                    void (async () => {
+                      const taken = new Set(candidates);
+                      let renamed = 0;
+                      for (const i of renamable) {
+                        const to = proposeRename(i.path, taken);
+                        const f = this.app.vault.getAbstractFileByPath(i.path);
+                        if (to === null || f === null) continue;
+                        try {
+                          // fileManager, not adapter: this is the rename that
+                          // updates every link pointing at the note.
+                          await this.app.fileManager.renameFile(f, to);
+                          taken.add(to);
+                          renamed += 1;
+                          this.log.add("info", "path-limits", `Renamed for other machines: ${i.path} → ${to}`);
+                        } catch (e) {
+                          this.log.add("error", "path-limits", `Could not rename ${i.path}: ${String(e)}`);
+                        }
+                      }
+                      this.notify(`Native Git: shortened ${renamed} filename${renamed === 1 ? "" : "s"}.`);
+                      resolve(renamed === issues.length);
+                    })();
+                  },
+                },
+              ]
+            : []),
+          {
+            label: "Commit anyway",
+            onClick: () => {
+              handled = true;
+              resolve(true);
+            },
+          },
+        ],
+        onDismiss: () => {
+          if (!handled) resolve(false);
+        },
+      }).open();
+    });
+  }
+
   async cmdCommit(): Promise<void> {
+    if (!(await this.guardPathLimits())) return;
     // Committing a resolved merge: prefill git's own prepared message
     // ("Merge branch … # Conflicts: …") so the history reads like any merge.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
@@ -2778,6 +3600,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdSync(message?: string, silent = false): Promise<void> {
+    if (!(await this.guardPathLimits())) return;
     // A sync that completes a manual merge resolution commits with git's own
     // prepared merge message automatically — no modal, as requested.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
@@ -2786,7 +3609,19 @@ export default class NativeGitBridgePlugin extends Plugin {
       message: message ?? mergeMsg ?? "",
     });
     if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: sync failed", result);
+    if (!result.ok) {
+      // "Sync failed" must not be read as "nothing happened". Since runner v13
+      // sync may commit BEFORE the merge — only when the merge would otherwise
+      // be refused — and that commit stands whatever the merge then does.
+      if ((result.data?.steps ?? "").includes("committed-before-merge")) {
+        this.log.add(
+          "info",
+          "sync",
+          "Local changes were committed before the merge; that commit is kept whatever happened next."
+        );
+      }
+      return this.renderMutationError("Native Git: sync failed", result);
+    }
     this.absorbStatusData(result.data ?? {});
     this.store.setValue(LAST_SYNC_KEY, new Date().toLocaleString());
     const lines = [
@@ -2796,6 +3631,390 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.log.add("info", "sync", "Sync completed successfully.");
     if (silent) this.notify("Native Git: sync completed.");
     else this.reportSuccess("Native Git: sync completed", lines, result.data?.pullOutput);
+  }
+
+  /**
+   * Clear away object files that are empty, then refetch.
+   *
+   * Confirmed rather than silent, because it touches `.git` — but the thing it
+   * removes is by construction empty, so there is nothing to set aside and
+   * nothing to lose. Anything corrupt that is NOT empty is reported and left
+   * alone: it may still hold recoverable data, and that is a decision for a
+   * person at a terminal.
+   */
+  /**
+   * One implementation of "put this block back", for both surfaces that offer
+   * it: the file-history panel's hunks and a diff opened from the commit
+   * history. The steps are shared in `restoreBlockInFile`; what differs here is
+   * only which vault this is and how the outcome is announced.
+   */
+  async restoreBlockFromCommit(path: string, hunk: DiffHunk, commitish: string): Promise<void> {
+    const outcome = await restoreBlockInFile(path, hunk, {
+      readFile: (p) => this.readVaultTextFile(p),
+      writeFile: async (p, content) => {
+        await this.app.vault.adapter.write(p, content);
+      },
+      stagePatch: (patch) => this.applyHunkPatch(patch, "index", false),
+    });
+    new Notice(describeRestore(outcome, commitish.replace(/\^+$/, "").slice(0, 8)));
+    if (outcome.kind === "restored") void this.cmdStatus(true);
+  }
+
+  async cmdRepairObjects(skipConfirm = false): Promise<void> {
+    const start = () => void this.runRepairJob();
+    if (skipConfirm) {
+      start();
+      return;
+    }
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Repair the repository?",
+        body: [
+          "Runs as short steps, so a repair Android interrupts loses one step and not the whole run. First it removes object files that are empty — git leaves those when it is stopped mid-write, and an empty file cannot contain anything — then it asks the remote for exactly the missing objects, which is usually kilobytes.",
+          "Downloading the whole history is a separate step and it always asks first. Tap the state line while it runs to watch what it is doing.",
+          "Nothing that holds data is deleted. Objects that are damaged but not empty are reported instead, because they may still be recoverable.",
+          "Your files, your commits and your remote are untouched by the repair itself; if a step needs anything more it asks before doing it.",
+        ],
+        confirmLabel: "Repair",
+      },
+      async (confirmed) => {
+        if (confirmed) start();
+      }
+    ).open();
+  }
+
+  /** One repair step: request, log, absorb. Returns null when the job must stop. */
+  private async repairStep(
+    action: BridgeAction,
+    args: Record<string, unknown>,
+    stepLabel: string
+  ): Promise<BridgeResult | null> {
+    this.repairJobStep = stepLabel;
+    this.store.setValue(REPAIR_JOB_KEY, JSON.stringify({ step: stepLabel, startedAt: Date.now() }));
+    const result = await this.runOperation(action, args, true);
+    if (result === null) return null;
+    const d = result.data ?? {};
+    // Into the log, not only onto the screen: a shared bundle once recorded four
+    // repairs as four bare "ok=true" lines, and the number that explained them
+    // was never written down.
+    this.log.add(
+      result.ok ? "info" : "error",
+      action,
+      `${stepLabel} finished ok=${result.ok}.`,
+      [
+        d.removedCount !== undefined ? `removed: ${d.removedCount}` : "",
+        (d.recoveredBy ?? "") !== "" ? `recovered by: ${d.recoveredBy}` : "",
+        (d.fsckMissing ?? "").trim() !== ""
+          ? `still missing:\n${(d.fsckMissing ?? "").trim()}`
+          : "still missing: nothing",
+      ]
+        .filter((l) => l !== "")
+        .join("\n")
+    );
+    this.absorbStatusData(d);
+    return result;
+  }
+
+  /**
+   * The repair as a queue of short requests, sequenced here and decided by
+   * `decideRepair` (pure, tested against the log bundle that motivated it).
+   * While the job runs every other request is refused, across the gaps between
+   * steps too; a restart mid-job is offered a continue, never resumed silently.
+   */
+  private async runRepairJob(): Promise<void> {
+    if (this.repairJobStep !== null) {
+      new Notice("A repair is already running.");
+      return;
+    }
+    try {
+      // Step 1: remove empties, learn what is missing and whose it is.
+      const scan = await this.repairStep("repair-scan", {}, "repair 1/3: scan");
+      if (scan === null || !scan.ok) {
+        if (scan !== null) this.renderMutationError("Native Git: repair could not scan", scan);
+        return;
+      }
+      const sd = scan.data ?? {};
+      const removed = Number(sd.removedCount ?? "0");
+      const ctx: RepairContext = {
+        ahead: Number(sd.aheadCount ?? "0"),
+        cacheTreeBroken: sd.cacheTreeBroken === "true",
+        hasUpstream: sd.hasUpstream === "true",
+      };
+      const removedLine =
+        removed === 0
+          ? "No empty object files were found; nothing needed removing."
+          : `Removed ${removed} empty object file${removed === 1 ? "" : "s"}.`;
+
+      let stage: RepairStage = "scan";
+      let findings = {
+        fsckMissing: (sd.fsckMissing ?? "").trim(),
+        fsckRemaining: (sd.fsckRemaining ?? "").trim(),
+      };
+      let recoveredBy = "";
+
+      for (;;) {
+        const decision = decideRepair(stage, findings, ctx);
+        if (decision.kind === "fetch-missing") {
+          const fetch = await this.repairStep(
+            "repair-fetch-missing",
+            { oids: decision.oids },
+            "repair 2/3: fetch missing objects"
+          );
+          if (fetch === null || !fetch.ok) {
+            if (fetch !== null) this.renderMutationError("Native Git: repair could not fetch", fetch);
+            return;
+          }
+          const fd = fetch.data ?? {};
+          findings = {
+            fsckMissing: (fd.fsckMissing ?? "").trim(),
+            fsckRemaining: (fd.fsckRemaining ?? "").trim(),
+          };
+          recoveredBy = "targeted";
+          stage = "fetch-missing";
+          continue;
+        }
+        if (decision.kind === "ask-refetch") {
+          const proceed = await this.confirmRefetch(findings.fsckMissing);
+          if (!proceed) {
+            new ResultModal(
+              this.app,
+              "Repository still incomplete",
+              [
+                removedLine,
+                "The targeted fetch did not bring everything back. The remaining step downloads the whole history again; run the repair again when you are ready for that.",
+                findings.fsckMissing,
+              ],
+              { isError: true, stderr: findings.fsckRemaining }
+            ).open();
+            return;
+          }
+          const re = await this.repairStep("repair-refetch", {}, "repair 3/3: refetch history");
+          if (re === null || !re.ok) {
+            if (re !== null) this.renderMutationError("Native Git: repair could not refetch", re);
+            return;
+          }
+          const rd = re.data ?? {};
+          findings = {
+            fsckMissing: (rd.fsckMissing ?? "").trim(),
+            fsckRemaining: (rd.fsckRemaining ?? "").trim(),
+          };
+          recoveredBy = (rd.recoveredBy ?? "").trim() || recoveredBy;
+          stage = "refetch";
+          continue;
+        }
+
+        // Terminal decisions.
+        const howLine =
+          recoveredBy === "targeted"
+            ? "Asked the remote for the missing objects themselves, so nothing else was downloaded."
+            : recoveredBy === "recovery copy"
+              ? "This git has no --refetch, so the history was downloaded into a temporary copy and the missing objects taken from it."
+              : recoveredBy === "refetch"
+                ? "Refetched the whole history from the remote, so anything it still has is back."
+                : "";
+        const lines = [removedLine, ...(howLine !== "" ? [howLine] : [])];
+        if (decision.kind === "clean") {
+          lines.push("", "The object store is complete: git can read everything it references.");
+          new ResultModal(this.app, "Repository repaired", lines, { stdout: sd.removedObjects }).open();
+          return;
+        }
+        if (decision.kind === "damaged") {
+          lines.push(
+            "",
+            "Nothing is missing any more. What git still reports is damaged content in objects that are NOT empty, and those are left alone on purpose: they may hold recoverable data, and recovering them means working in Termux — `git cat-file`, or restoring that object from another clone.",
+            findings.fsckRemaining
+          );
+          new ResultModal(this.app, "Damaged objects left alone", lines, {
+            stderr: findings.fsckRemaining,
+            isError: true,
+          }).open();
+          return;
+        }
+        if (decision.kind === "offer-reset") {
+          // The bundle's own case: the missing objects were never on the remote —
+          // they belong to unpushed commits or to the index — so no download can
+          // help, and a re-clone would discard the local commits. Never advise
+          // cloning while local-only work exists.
+          lines.push(
+            "",
+            `The remote does not have these objects, and this branch carries local-only state (${
+              ctx.ahead > 0 ? `${ctx.ahead} unpushed commit${ctx.ahead === 1 ? "" : "s"}` : "a damaged index"
+            }), so the damage is inside what was never pushed. Downloading cannot fix it and cloning again would throw the local commits away.`,
+            "Rebuilding the branch on the remote state keeps every file on disk exactly as it is: the content of the local commits becomes ordinary uncommitted changes, the next sync commits it once, and a backup branch keeps the old history reachable.",
+            findings.fsckMissing
+          );
+          new ResultModal(this.app, "Repository still incomplete", lines, {
+            stderr: findings.fsckRemaining,
+            isError: true,
+            actions: [
+              {
+                label: "Rebuild on the remote state",
+                cta: true,
+                onClick: () => void this.cmdRepairResetUpstream(ctx.ahead),
+              },
+            ],
+          }).open();
+          return;
+        }
+        // missing-remote
+        lines.push(
+          "",
+          "The remote does not have these objects either, so nothing can bring them back: the history that referenced them is gone on both sides. Cloning the vault again is the way out — your notes on disk are not affected by it.",
+          findings.fsckMissing
+        );
+        new ResultModal(this.app, "Repository still incomplete", lines, {
+          stderr: findings.fsckRemaining,
+          isError: true,
+        }).open();
+        return;
+      }
+    } finally {
+      this.repairJobStep = null;
+      this.store.removeValue(REPAIR_JOB_KEY);
+    }
+  }
+
+  /**
+   * Delete the `ngb-rescue-*` branch a rebuild left behind, after an explicit
+   * confirmation. The old success window said to do this in Termux, which
+   * breaks the rule that the user never touches Termux beyond installing the
+   * runner and entering credentials; the runner action it calls accepts
+   * nothing but the rescue-branch name shape, so it cannot delete anything
+   * else.
+   */
+  /**
+   * A rescue branch that outlived its window. The delete offer used to exist
+   * only in the rebuild's success window, which is shown exactly once —
+   * whoever closed it had no way back. Status now reports the branches, and
+   * this reminds once a day (device-local, like the previous-git reminder)
+   * until they are gone.
+   */
+  private offerRescueCleanup(raw: string): void {
+    const refs = raw.split("\n").filter((r) => /^ngb-rescue-/.test(r.trim()));
+    if (refs.length === 0) return;
+    const today = new Date().toDateString();
+    if (this.store.getValue("rescue-reminded") === today) return;
+    this.store.setValue("rescue-reminded", today);
+    new ResultModal(
+      this.app,
+      "A repair backup branch is still here",
+      [
+        `${refs.length === 1 ? `The branch '${refs[0]}' keeps` : `${refs.length} ngb-rescue branches keep`} the history a rebuild abandoned. Once you have checked nothing is lost, delete ${refs.length === 1 ? "it" : "them"} — until then the repair check keeps naming the old objects.`,
+      ],
+      {
+        actions: refs.slice(0, 3).map((r) => ({
+          label: `Delete ${r}`,
+          onClick: () => void this.cmdDropRescueBackup(r),
+        })),
+      }
+    ).open();
+  }
+
+  async cmdDropRescueBackup(ref: string): Promise<void> {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Delete the backup branch?",
+        body: [
+          `'${ref}' points at the history that was abandoned by the rebuild. Deleting it makes those commits unreachable — check first that everything you need is in your files or already synced.`,
+          "Your files and the rebuilt branch are not touched by this.",
+        ],
+        confirmLabel: "Delete",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("repair-drop-backup", { ref });
+        if (!result) return;
+        this.absorbStatusData(result.data ?? {});
+        if (!result.ok) {
+          this.renderMutationError("Native Git: could not delete the backup branch", result);
+          return;
+        }
+        this.log.add("info", "repair-drop-backup", `Deleted backup branch ${ref}.`);
+        this.notify(`Backup branch ${ref} deleted.`);
+      }
+    ).open();
+  }
+
+  /** The full-history download always asks first: gigabytes on a phone. */
+  private confirmRefetch(missing: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      new ConfirmModal(
+        this.app,
+        {
+          title: "Download the whole history?",
+          body: [
+            "The targeted fetch did not bring these objects back, so the remaining route downloads the repository's entire history again. On a large vault that is the full size of the repository, over this device's current connection.",
+            "Nothing local is overwritten by it: the download only ADDS objects.",
+            missing,
+          ],
+          confirmLabel: "Download",
+        },
+        async (confirmed) => resolve(confirmed)
+      ).open();
+    });
+  }
+
+  /**
+   * The exit for damage inside local-only history: rebuild the branch on the
+   * remote state. Files on disk are untouched; staged state and the local
+   * commit HISTORY collapse into ordinary uncommitted changes, which is why
+   * this confirms first and names the backup branch after.
+   */
+  async cmdRepairResetUpstream(ahead: number): Promise<void> {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Rebuild on the remote state?",
+        body: [
+          `This moves the branch to what the remote has and rebuilds the index from it. Every file on disk stays exactly as it is — nothing is deleted or reverted — and everything the ${
+            ahead > 0 ? `${ahead} local commit${ahead === 1 ? "" : "s"}` : "local history"
+          } contained shows up as uncommitted changes, for the next sync to commit once.`,
+          "The old history stays reachable under a backup branch, so nothing becomes unrecoverable. The local commit messages are what is lost: the separate commits become one.",
+          "Anything currently staged is unstaged by the rebuild.",
+        ],
+        confirmLabel: "Rebuild",
+        danger: true,
+      },
+      async (confirmed) => {
+        if (!confirmed) return;
+        const result = await this.runOperation("repair-reset-upstream");
+        if (!result) return;
+        this.absorbStatusData(result.data ?? {});
+        if (!result.ok) {
+          this.renderMutationError("Native Git: could not rebuild on the remote state", result);
+          return;
+        }
+        const d = result.data ?? {};
+        const backup = (d.backupRef ?? "").trim();
+        this.log.add(
+          "info",
+          "repair-reset-upstream",
+          `Branch rebuilt on the remote state; backup branch ${backup || "?"}.`
+        );
+        new ResultModal(
+          this.app,
+          "Branch rebuilt on the remote state",
+          [
+            "Your files are untouched; what the local commits contained is now uncommitted changes. Run Sync to commit and push it as one commit.",
+            `The old history is kept under the branch '${backup}'. Once you have checked nothing is lost, delete it with the button below — the repair check keeps naming its objects until it is gone.`,
+          ],
+          {
+            actions:
+              backup !== ""
+                ? [
+                    {
+                      label: "Delete the backup branch",
+                      onClick: () => void this.cmdDropRescueBackup(backup),
+                    },
+                  ]
+                : undefined,
+          }
+        ).open();
+      }
+    ).open();
   }
 
   async cmdAbortMerge(): Promise<void> {
@@ -2814,11 +4033,41 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!confirmed) return;
         const result = await this.runOperation("abort-merge");
         if (!result) return;
-        if (!result.ok) return this.renderMutationError("Native Git: abort merge failed", result);
+        if (!result.ok) return this.reportAbortMergeFailure(result);
         this.absorbStatusData(result.data ?? {});
         this.notify("Merge aborted; repository restored.");
       }
     ).open();
+  }
+
+  /**
+   * `git merge --abort` is `git reset --merge`: it has to put the working tree
+   * back, and it cannot do that while the sparse state is out of step with the
+   * index — entries under an excluded path with no file on disk. It then fails
+   * with a bare "git merge --abort failed", which names neither the cause nor
+   * the way out, and the repository is left mid-merge with every pull refusing.
+   *
+   * Observed on the device: two aborts failed, `sparse-checkout reapply`
+   * succeeded, and the next abort went through on the first try.
+   *
+   * The reapply is OFFERED, never run for the user. It rewrites which files are
+   * materialised in the working tree, and this plugin does not repair
+   * destructively on its own.
+   */
+  private reportAbortMergeFailure(result: BridgeResult): void {
+    const plan = abortMergeFailure(result);
+    if (!plan.offerReapply) {
+      return this.renderMutationError("Native Git: abort merge failed", result);
+    }
+    this.statusBar?.set("error");
+    new ResultModal(this.app, "Native Git: abort merge failed", plan.lines, {
+      stdout: result.error?.stdout,
+      stderr: result.error?.stderr,
+      isError: true,
+      actions: [
+        { label: "Reapply sparse rules", cta: true, onClick: () => void this.cmdReapplySparse() },
+      ],
+    }).open();
   }
 
   /**
@@ -2886,19 +4135,22 @@ export default class NativeGitBridgePlugin extends Plugin {
     void this.openFileHistoryPanel(path);
   }
 
-  private async showFileAtCommit(e: FileLogEntry): Promise<void> {
-    const result = await this.runOperation("show-file-at-commit", {
-      path: e.pathAtCommit,
-      commit: e.hash,
-    });
+  /**
+   * `date` is optional because the diff pane reaches this with a commit-ish and
+   * nothing else: it offers the file itself when there is no diff to show, and
+   * at that point it has a `HEAD`, a hash or a `hash^`, not a log entry.
+   */
+  private async showFileAtCommit(path: string, hash: string, date?: string): Promise<void> {
+    const result = await this.runOperation("show-file-at-commit", { path, commit: hash });
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: show file failed", result);
     const bytes = decodeBase64ToBytes(result.data?.contentBase64 ?? "");
     const text = bytesToTextIfNotBinary(bytes);
-    const meta = `${e.pathAtCommit} @ ${e.hash.slice(0, 8)} · ${e.date.slice(0, 16).replace("T", " ")} · ${bytes.length} bytes`;
+    const when = date === undefined ? "" : ` · ${date.slice(0, 16).replace("T", " ")}`;
+    const meta = `${path} @ ${hash.slice(0, 8)}${when} · ${bytes.length} bytes`;
     if (text === null) {
       new ResultModal(this.app, "Binary file", [
-        `${e.pathAtCommit} at ${e.hash.slice(0, 8)} is binary (${bytes.length} bytes); preview is not available.`,
+        `${path} at ${hash.slice(0, 8)} is binary (${bytes.length} bytes); preview is not available.`,
         "Restore is still possible from the history list.",
       ]).open();
       return;
@@ -3216,10 +4468,21 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /** Tick the elapsed-time label without rebuilding the panel. */
-  private updateProgressInView(text: string | null): void {
+  private updateProgressInView(text: string | null, detail: string | null = null): void {
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_STATUS_VIEW)) {
       const view = leaf.view;
-      if (view instanceof StatusView) view.updateProgressText(text);
+      if (view instanceof StatusView) view.updateProgressText(text, detail);
+    }
+    // The history panels show the same state line (they read it back through
+    // `progressText()`/`progressDetail()`), so the same tick has to reach them
+    // or their copy freezes at whatever second it was rendered on.
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof HistoryView) view.updatePluginProgress();
+    }
+    for (const leaf of this.app.workspace.getLeavesOfType(NGB_FILE_HISTORY_VIEW)) {
+      const view = leaf.view;
+      if (view instanceof FileHistoryView) view.updatePluginProgress();
     }
   }
 
@@ -3242,6 +4505,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       rebaseInProgress: this.lastStatus?.rebaseInProgress,
       activeOperation: this.lock.active ? this.lock.active.action : undefined,
       progress: this.progressText ?? undefined,
+      progressDetail: this.progressDetail ?? undefined,
       runningAction: this.runningAction ?? undefined,
       runningPath: this.runningPath ?? undefined,
       treeView: this.sharedPrefs.treeView,
@@ -3253,7 +4517,18 @@ export default class NativeGitBridgePlugin extends Plugin {
     for (const leaf of leaves) {
       const view = leaf.view;
       if (view instanceof StatusView) {
-        if (this.lastStatus) view.setData(summaryToViewData(this.lastStatus.status, extra, state));
+        // `statusStale` is the same honesty as the branch below, for the other
+        // way of not knowing: an operation FAILED, or timed out, or was
+        // cancelled, and brought no fresh status back. The repository moved
+        // under the panel and nobody has looked since. Rendering the last
+        // summary then states a repository that may no longer exist — after a
+        // failed sync it announced a clean tree over files that had just
+        // stopped it.
+        if (this.lastStatus)
+          view.setData({
+            ...summaryToViewData(this.lastStatus.status, extra, state),
+            statusLoaded: !this.statusStale,
+          });
         else
           view.setData({
             // No status has been read, so the empty lists below are "not
@@ -3473,8 +4748,11 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (outdated) {
       lines.push("", "The Termux runner is OUTDATED. Fix: the button below copies the install command and opens Termux - paste and run it there.");
     }
-    lines.push(
-      "",
+    // The facts behind the verdict — folder, profile, queue, pairing — are
+    // evidence, not instructions. They belong under the fold: when something is
+    // wrong they are the next thing to read, and when nothing is wrong they are
+    // six lines of noise between the answer and the way out of the window.
+    const facts = [
       `Runtime folder (as the plugin sees it): ${paths.root}`,
       `Profile for this vault: ${report.profileId || "none yet"}${
         report.markerProfileId && report.markerProfileId !== report.profileId
@@ -3483,16 +4761,23 @@ export default class NativeGitBridgePlugin extends Plugin {
       }`,
       `Runner has written into THIS vault's runtime folder: ${report.runnerLogExists ? "yes" : "NO"}`,
       `Queued requests: ${report.queuedRequests.length}${report.queuedRequests.length ? " (" + report.queuedRequests.join(", ") + ")" : ""}`,
-      `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`
-    );
+      `Pairing file waiting: ${report.pairingFilePresent ? "yes" : "no"}`,
+    ];
+    if (!report.ok) lines.push("", ...facts);
     for (const a of this.versionAdvice()) lines.push("", a.text);
     this.log.add(report.ok ? "info" : "warn", "self-check", report.verdict);
 
     // One-tap fixes instead of prose. Which buttons appear depends on what the
     // plugin actually knows: the companion reports whether Termux is installed
     // in every ack; no ack ever means the companion itself is the suspect.
+    //
+    // NONE of them when the bridge is fine. A button reads as a thing to do,
+    // and "Copy command & open Termux" under a verdict that says nothing is
+    // wrong sends the user to reinstall a runner that is working. The only
+    // exception is a runner the log shows to be outdated, which is a real
+    // fault wearing a healthy folder.
     const actions: ResultModalAction[] = [];
-    if (Platform.isAndroidApp) {
+    if (Platform.isAndroidApp && (!report.ok || outdated || this.versionAdvice().length > 0)) {
       actions.push({
         label: "Copy command & open Termux",
         cta: true,
@@ -3544,8 +4829,13 @@ export default class NativeGitBridgePlugin extends Plugin {
         });
       }
     }
-    new ResultModal(this.app, "Bridge check", lines, {
-      stdout: report.runnerLogTail || undefined,
+    // The cause is the title. It used to open with "Bridge check" and bury the
+    // one sentence that matters six lines down, under prose the reader had to
+    // finish before learning whether anything was wrong at all.
+    new ResultModal(this.app, report.headline, lines, {
+      stdout: report.ok
+        ? [...facts, "", report.runnerLogTail].join("\n").trimEnd() || undefined
+        : report.runnerLogTail || undefined,
       isError: !report.ok,
       actions,
     }).open();
@@ -3637,7 +4927,9 @@ export default class NativeGitBridgePlugin extends Plugin {
       return;
     }
     // `git add -u .`: tracked modifications only, which is what this group
-    // holds. See §12 for why staging it exactly still needs a runner argument.
+    // holds. Staging exactly this group needs stage-file to accept a list of
+    // paths in one request, which is a runner change; until then the group's
+    // + is repo-wide over tracked changes.
     void this.cmdStageFile(".", "update");
   }
 
@@ -4033,6 +5325,22 @@ export function compareVersions(a: string, b: string): number {
     if (na !== nb) return na < nb ? -1 : 1;
   }
   return 0;
+}
+
+/**
+ * The action a progress stream belongs to, taken from the stream itself.
+ *
+ * Every one opens with `<action> started`, written by the runner, so the output
+ * panel can label an earlier operation without the plugin having to remember
+ * anything about requests that finished hours ago — or in another session.
+ */
+export function streamAction(text: string): string | null {
+  const first = text.split("\n", 1)[0]?.trim() ?? "";
+  const word = first.split(/\s+/, 1)[0];
+  // A line that does not look like a request id or an action name is not one:
+  // a stream trimmed from the front (the bundle does that) can start mid-word.
+  if (word === undefined || word === "" || !/^[a-z][a-z-]*$/.test(word)) return null;
+  return word;
 }
 
 function getLocalStorageBackend(): KeyValueBackend | null {

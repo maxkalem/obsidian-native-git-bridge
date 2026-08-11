@@ -89,7 +89,9 @@ describe("gutterWidthCh", () => {
 
   // The checkbox shares the cell with the numbers, and the wrapped layout takes
   // this measurement as the column's fixed width.
-  it("leaves room for the line checkbox while picking", () => {
-    expect(gutterWidthCh(fake(["1", "7"], true))).toBeGreaterThan(gutterWidthCh(fake(["1", "7"])));
+  it("does not widen for the picking checkbox, which sits in a gap", () => {
+    // The box occupies the number cell that has no number, so it costs the
+    // gutter nothing. Widening here was what made the column jump.
+    expect(gutterWidthCh(fake(["1", "7"], true))).toBe(gutterWidthCh(fake(["1", "7"])));
   });
 });

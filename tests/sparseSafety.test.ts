@@ -104,7 +104,7 @@ describe("planSparseRepair", () => {
 
   it("trashes an untracked file inside a protected directory", () => {
     const p = planSparseRepair(evaluateSparseSafety("?? Private/Mem/new.md\n", "", prot));
-    expect(p).toEqual({ trash: ["Private/Mem/new.md"], unstage: [], blocked: [] });
+    expect(p).toEqual({ trash: ["Private/Mem/new.md"], unstage: [], blocked: [], resolveToHead: [] });
   });
 
   // The reported bug, end to end: nothing to delete, everything to unstage.
@@ -163,16 +163,27 @@ describe("planSparseRepair", () => {
     ["DU", "DU Private/Mem/c.md\n"],
     ["UD", "UD Private/Mem/c.md\n"],
     ["DD", "DD Private/Mem/c.md\n"],
-  ])("blocks the unmerged state %s", (_code, raw) => {
+  ])("sends the unmerged state %s to the restore, not to a dead end", (_code, raw) => {
+    // These used to land in `blocked`, and that was a loop with no exit: the
+    // sparse gate blocks the sync, the merge cannot be committed while a path
+    // is unmerged, this repair would not touch it, and resolving it is refused
+    // because it is inside a protected path. Restoring the committed version
+    // clears the conflict and touches nothing on disk.
     const p = planSparseRepair(evaluateSparseSafety(raw, "", prot));
     expect(p.trash).toEqual([]);
     expect(p.unstage).toEqual([]);
-    expect(p.blocked).toHaveLength(1);
+    expect(p.blocked).toEqual([]);
+    expect(p.resolveToHead).toEqual(["Private/Mem/c.md"]);
   });
 
-  it("says a conflict is a conflict, not 'tracked in the last commit'", () => {
+  it("treats both-added as the conflict it is, not as a staged addition", () => {
+    // `AA` carries an "A" in the index column, so the plain "is it an addition"
+    // test reads it as an ordinary staged add — and trashing a file that is
+    // mid-conflict destroys the merge state.
     const p = planSparseRepair(evaluateSparseSafety("AA Private/Mem/c.md\n", "", prot));
-    expect(p.blocked[0]!.reason).toContain("conflicted");
+    expect(p.trash).toEqual([]);
+    expect(p.unstage).toEqual([]);
+    expect(p.resolveToHead).toEqual(["Private/Mem/c.md"]);
   });
 
   it("plans nothing for a safe report", () => {
@@ -180,6 +191,7 @@ describe("planSparseRepair", () => {
       trash: [],
       unstage: [],
       blocked: [],
+      resolveToHead: [],
     });
   });
 });

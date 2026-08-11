@@ -73,6 +73,81 @@ The repair button is labelled for what it will do, which depends on where the bl
 - **Remove from index** — the paths are staged additions with no file on disk. See below.
 - **Delete and unstage** — a mix of the two.
 
+### The sparse repair says it worked, and the same paths come back
+
+Fixed in runner v13. Before it, a protected path whose name contained a space or a character outside ASCII — an em dash in a note title is enough — could not be cleared at all: git prints such a path quoted and octal-escaped, the repair compared that against the real name, decided the entry was already gone, and reported success having removed nothing. Sync then blocked on the same list, forever.
+
+If you see this, the runner is older than the plugin. Update it (Settings shows the version, the companion has an "Update runner" button) and repair again.
+
+### Sending a log to someone
+
+The operation log window has **Share as file**. It writes one file carrying every source of evidence — the plugin's log, the output behind each entry (which is where git's own reason usually is), `runtime/runner.log` from the Termux side, and the progress streams of the last few operations — and hands it to Android's share sheet.
+
+The streams are the ones worth knowing about, because they are the only account of an operation that produced no result at all. A fetch killed by the timeout leaves no entry detail and no runner verdict, but its stream stops at the percentage it reached, which is the difference between a bridge that was working and one that was stuck.
+
+Credentials are redacted from both halves on the way in, including the Termux log, which is the one that can pick up a remote URL with a token in it from git's own output.
+
+The file is written into the plugin's `runtime/` folder, which the installer excludes from git, so it can never appear as a change in the repository it describes.
+
+Android's share sheet is not reachable from inside Obsidian, and the companion app cannot reach the file either: it holds exactly one permission, to run the Termux runner, and reading shared storage is not it — giving it that access to send a log would cost more than the log is worth. So the window offers two routes instead. **Copy details** puts the whole bundle on the clipboard. **Save as a note to share** writes a second copy into the vault root and opens it, where Obsidian's own note menu has Share.
+
+That second copy is an ordinary file in the vault, so it appears as an untracked change until you delete it. That is why it is a separate button rather than what the plugin does by default.
+
+### An operation seems to hang
+
+**Tap the state line** — the one counting the seconds in the Git panel. It opens the output panel, which shows what Termux is saying while it says it.
+
+The panel has four things in it, in the order they answer the question:
+
+- **The stream.** git's own output, as it arrives: `Receiving objects: 62% (1204/1943)` is a slow connection doing its job; the same line unchanged for a minute is a connection that has stopped answering.
+- **Whether the request reached Termux at all.** Silence means one of two opposite things — too early, or nothing ever started — and this is what tells them apart: the request id, whether the companion confirmed it launched Termux, and how many requests are queued. Past twenty seconds with an empty stream, it says so.
+- **The Termux runner log**, collapsed. What the runner did outside this operation: waiting for its lock, draining another vault's queue, refusing something.
+- **Earlier operations**, collapsed. The streams of the last few, kept for 24 hours — enough to compare a sync that worked with one that did not.
+
+The state line reads the same as everywhere else (`repair-refetch… 300s`), and the request's budget is in the facts beside it, because "300s" alone cannot tell you whether to keep waiting.
+
+Settings has **Open the output panel for long operations**, off by default: with it on, anything running for more than 30 seconds opens the panel by itself.
+
+The runner writes the stream to `runtime/progress/<id>.txt`, so it is also there afterwards, in the shared log bundle. An operation that timed out has nothing else to show for itself.
+
+A runner older than the plugin writes none of this. The panel then shows the request state and the runner log, and the stream section says the runner has written nothing — which is the truth rather than a fault.
+
+### "object file … is empty", or anything mentioning an unreadable object
+
+The operation named in the error is not the problem. A message like
+
+```
+error: object file .git/objects/2d/9ebf…af7 is empty
+fatal: unable to read tree (2d9ebf…)
+```
+
+means the repository's object database is damaged: git created an object file and was stopped before it could write to it. On Android that is routine — the system stops Termux when it goes to the background — and cancelling an operation while git is mid-write can do it too. Everything that has to walk the tree fails afterwards, each time complaining about whatever you happened to be doing.
+
+The failure window offers **Repair the repository**. It runs as short steps — Android stopping Termux mid-run loses one step, not the whole repair, and a repair interrupted by closing Obsidian offers to continue on the next launch. First it removes only object files that are *empty*, which by definition contain nothing, then it asks the remote for exactly the missing objects, by name. On a measured case that was 52 KB against a 3.7 MB history; the output panel lists them as it goes (`asking origin for object 1 of 2`). Objects that are damaged but not empty are reported instead of removed: those may still be recoverable, and that is a decision to make deliberately in Termux.
+
+**Downloading the whole history is a separate step and it always asks first**, because an ordinary fetch asks the remote only for what the local refs say is missing — and the refs still claim to have the object that is gone, so a normal fetch transfers nothing at all. On a large vault over a phone connection expect minutes, and the full size of the repository in traffic.
+
+**The verdict is honest, which means it can say the repair did not work.** Four endings:
+
+- *Repository repaired* — git can read everything it references again.
+- *Repository still incomplete*, before the full download — the targeted fetch did not bring everything back; run the repair again when you are ready for the full download, or with a better connection.
+- *Repository still incomplete*, with **Rebuild on the remote state** — the missing objects were never on the remote: they belong to commits this device made and never pushed, or to the index itself. No download can bring them back, and cloning again would throw those local commits away. The button moves the branch to what the remote has while leaving every file on disk exactly as it is: the content of the local commits becomes ordinary uncommitted changes, the next sync commits it once, and the old history stays reachable under a backup branch named in the window. The separate commit messages are what is lost. Once you have checked nothing is missing, the same window deletes the backup branch; until it is deleted, the repair check keeps naming the old history's objects.
+- *Repository still incomplete* with neither button — the full refetch ran, the objects are **still** missing, and nothing points at local-only damage: the remote genuinely does not have them. The history that referenced them is gone on both sides, and cloning the vault again is the way out. Your notes on disk are not affected by that.
+
+If you once saw this repair report success several times while `unable to read tree` kept coming back, that was a bug and it is fixed: the fetch used to be skipped whenever there was no empty file left to remove, which is exactly the state after the first repair.
+
+### "Abort merge failed" and the pull keeps refusing
+
+`git merge --abort` is `git reset --merge`: it has to put the working tree back the way it was. It cannot do that while the sparse checkout has drifted from the index — index entries under an excluded directory with no file on disk — so it fails, the repository stays mid-merge, and every pull after it answers "a merge is already in progress".
+
+The way out is **Reapply sparse rules**, offered as a button on the failure window itself (Settings has the same command). It puts the sparse state and the index back in step; the abort then normally succeeds on the next try. Nothing is deleted by it and no commit is touched.
+
+If the abort still fails after that, git's own output is in the window and in the operation log, and the state has to be resolved in Termux.
+
+### The sparse safety window
+
+Beside it, whenever the violations fall under directories that are sparse-excluded, there is a second button: **Unprotect path**. It removes those directories from the sparse exclusions, so they are checked out and committed like any other directory. That is the way out when the answer is "I actually want this folder tracked here" rather than "these files should not be here", and it is the only route that resolves the block by changing the configuration instead of the files. Nothing is deleted by it and git history is untouched.
+
 The check re-runs straight afterwards, so the result is visible without asking for it again. Anything the repair could not deal with is listed with a reason rather than skipped.
 
 ### "It says the file is added, but the file is not there"

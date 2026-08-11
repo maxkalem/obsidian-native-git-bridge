@@ -5,6 +5,7 @@ import {
   __protocolHandlers,
   __resetObsidianMock,
   __setPlatformAndroid,
+  __textOf,
 } from "./mocks/obsidian";
 import NativeGitBridgePlugin, { compareVersions } from "../src/main";
 import { RUNNER_MIN_VERSION } from "../src/constants";
@@ -75,12 +76,48 @@ function memAdapter() {
 
 type MemAdapter = ReturnType<typeof memAdapter>;
 
+/**
+ * A stand-in for Obsidian's Menu that records the titles it is given.
+ *
+ * Only string titles land in `titles`: the first item of the Git menu is a
+ * non-interactive label naming the file, and its title is a DocumentFragment.
+ * An assertion about which ACTIONS a menu offers must not have to know that.
+ */
+function fakeMenu(titles: string[], heads: Any[] = []): Any {
+  const menu: Any = {
+    addItem: (fn: (i: Any) => void) => {
+      const item: Any = {
+        setTitle: (t: Any) => {
+          if (typeof t === "string") titles.push(t);
+          else heads.push(t);
+          return item;
+        },
+        setIcon: () => item,
+        setIsLabel: () => item,
+        setDisabled: () => item,
+        onClick: () => item,
+      };
+      fn(item);
+      return menu;
+    },
+    addSeparator: () => menu,
+  };
+  return menu;
+}
+
 function makeApp(adapter: MemAdapter): Any {
   let layoutReady: (() => void) | null = null;
   const fileMenuHandlers: Array<(menu: Any, file: Any) => void> = [];
   /** Every pane the plugin opened: { type, state }. */
   const openedViews: Array<{ type: string; state?: Any }> = [];
   let activeFile: Any = null;
+  const collectMenu = (path: string): { titles: string[]; head: string } => {
+    const titles: string[] = [];
+    const heads: Any[] = [];
+    const menu = fakeMenu(titles, heads);
+    for (const h of fileMenuHandlers) h(menu, { path });
+    return { titles, head: heads.length === 0 ? "" : __textOf(heads[0]) };
+  };
   return {
     openedViews,
     setActiveFile: (path: string) => {
@@ -110,26 +147,15 @@ function makeApp(adapter: MemAdapter): Any {
         if (name === "file-menu") fileMenuHandlers.push(cb);
         return {};
       },
-      /** Test hook: simulate a right click / long tap; returns the item titles. */
-      fireFileMenu: (path: string): string[] => {
-        const titles: string[] = [];
-        const menu = {
-          addItem: (fn: (i: Any) => void) => {
-            const item: Any = {
-              setTitle: (t: string) => {
-                titles.push(t);
-                return item;
-              },
-              setIcon: () => item,
-              onClick: () => item,
-            };
-            fn(item);
-            return menu;
-          },
-        };
-        for (const h of fileMenuHandlers) h(menu, { path });
-        return titles;
-      },
+      /**
+       * Test hook: simulate a right click / long tap.
+       *
+       * The menu's first item is a non-interactive label naming the file, and
+       * its title is a DocumentFragment rather than a string. Titles are split
+       * by type so the action assertions keep asking only about actions.
+       */
+      collectMenu,
+      fireFileMenu: (path: string): string[] => collectMenu(path).titles,
     },
   };
 }
@@ -979,6 +1005,7 @@ describe("sparse safety: clearing an index entry that has no file on disk", () =
     };
     await (h.plugin as Any).runSparseRepair({
       trash: [],
+      resolveToHead: [],
       unstage: ["Private/Mem/handoff.md"],
       blocked: [],
     });
@@ -1003,6 +1030,7 @@ describe("sparse safety: clearing an index entry that has no file on disk", () =
     __notices.length = 0;
     await (h.plugin as Any).runSparseRepair({
       trash: [],
+      resolveToHead: [],
       unstage: ["Private/Mem/handoff.md"],
       blocked: [],
     });
@@ -1209,6 +1237,43 @@ describe("file context menu", () => {
     expect(h.app.workspace.fireFileMenu("Notes/a.md")).toHaveLength(0);
   });
 
+  /**
+   * The menu names its target before it offers to act on it. A panel row
+   * truncates the name to one line and the file explorer shows no path at all,
+   * so this was the only surface offering "Discard changes" and "Delete" over a
+   * file it never identified.
+   */
+  it("names the file above the entries, path and name apart", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    const head = h.app.workspace.collectMenu("Notes/Deep/a.md").head;
+    expect(head).toContain("Notes/Deep");
+    expect(head).toContain("a.md");
+  });
+
+  it("shows only the name for a file at the repository root", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    // Nothing to state: an empty directory line would be a blank row above the
+    // name, which reads as a rendering fault rather than as "no directory".
+    expect(h.app.workspace.collectMenu("a.md").head.trim()).toBe("a.md");
+  });
+
+  it("drops the header when the preference is off, and keeps every entry", async () => {
+    // A deep path costs two or three rows of a short screen, so it is a
+    // preference — but turning the label off must not disturb the actions,
+    // which is the whole point of it being a label.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    const withHeader = h.app.workspace.collectMenu("Notes/Deep/a.md");
+    await h.plugin.setSharedPref({ showMenuHeader: false });
+    const without = h.app.workspace.collectMenu("Notes/Deep/a.md");
+
+    expect(withHeader.head).not.toBe("");
+    expect(without.head).toBe("");
+    expect(without.titles).toEqual(withHeader.titles);
+  });
+
   it("the status panel row menu offers exactly the same entries as the explorer", async () => {
     const h = await loadPlugin();
     await enableBridge(h);
@@ -1216,20 +1281,7 @@ describe("file context menu", () => {
     // the two lists cannot drift apart.
     const explorer = h.app.workspace.fireFileMenu("Notes/a.md");
     const titles: string[] = [];
-    const menu: Any = {
-      addItem: (fn: (i: Any) => void) => {
-        const item: Any = {
-          setTitle: (t: string) => {
-            titles.push(t);
-            return item;
-          },
-          setIcon: () => item,
-          onClick: () => item,
-        };
-        fn(item);
-        return menu;
-      },
-    };
+    const menu = fakeMenu(titles);
     h.plugin.buildGitMenu(menu, "Notes/a.md");
     expect(titles).toEqual(explorer);
     expect(titles.length).toBeGreaterThan(0);
@@ -1240,20 +1292,7 @@ describe("file context menu", () => {
     await enableBridge(h);
     await h.plugin.updateDeviceSettings({ menuGitignore: false, menuSparse: false, menuExclude: false });
     const titles: string[] = [];
-    const menu: Any = {
-      addItem: (fn: (i: Any) => void) => {
-        const item: Any = {
-          setTitle: (t: string) => {
-            titles.push(t);
-            return item;
-          },
-          setIcon: () => item,
-          onClick: () => item,
-        };
-        fn(item);
-        return menu;
-      },
-    };
+    const menu = fakeMenu(titles);
     h.plugin.buildGitMenu(menu, "Notes/a.md");
     // The three config families disappear; the state and "open" entries stay.
     expect(titles.some((t) => t.includes(".gitignore"))).toBe(false);
@@ -1317,20 +1356,7 @@ describe("companion update advice", () => {
 describe("panel context menus reflect the row's own group", () => {
   const collect = () => {
     const titles: string[] = [];
-    const menu: Any = {
-      addItem: (fn: (i: Any) => void) => {
-        const item: Any = {
-          setTitle: (t: string) => {
-            titles.push(t);
-            return item;
-          },
-          setIcon: () => item,
-          onClick: () => item,
-        };
-        fn(item);
-        return menu;
-      },
-    };
+    const menu = fakeMenu(titles);
     return { titles, menu };
   };
 

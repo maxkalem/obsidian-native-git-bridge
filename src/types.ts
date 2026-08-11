@@ -16,6 +16,14 @@ export type BridgeAction =
   | "diff-file"
   | "restore-file"
   | "abort-merge"
+  // The repair, as four short steps the plugin sequences (see ops/repairJob).
+  // One long action lost the whole repair when Android killed Termux; a step
+  // loses one step, and the decisions between steps are unit-tested TypeScript.
+  | "repair-scan"
+  | "repair-fetch-missing"
+  | "repair-refetch"
+  | "repair-reset-upstream"
+  | "repair-drop-backup"
   | "stage-file"
   | "unstage-file"
   | "discard-file"
@@ -81,6 +89,11 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["continue-rebase", 11],
   ["unstage-protected", 11],
   ["apply-patch", 12],
+  ["repair-scan", 13],
+  ["repair-fetch-missing", 13],
+  ["repair-refetch", 13],
+  ["repair-reset-upstream", 13],
+  ["repair-drop-backup", 13],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -92,6 +105,11 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "sync",
   "restore-file",
   "abort-merge",
+  "repair-scan",
+  "repair-fetch-missing",
+  "repair-refetch",
+  "repair-reset-upstream",
+  "repair-drop-backup",
   "stage-file",
   "unstage-file",
   "discard-file",
@@ -127,7 +145,16 @@ export interface BridgeRequest {
   profileId?: string;
 }
 
-/** Codes this plugin knows how to explain; the runner may add new ones. */
+/**
+ * Codes this plugin knows how to explain; the runner may add new ones.
+ *
+ * Every member here is one the runner actually sends, plus `TIMEOUT`, which the
+ * plugin raises itself when the result file never arrives. A result file that
+ * exists but does not parse is deliberately NOT a code: the runner writes it
+ * non-atomically, so `parseResult` returning null means "still being written,
+ * ask again", and a file that never becomes valid ends as `TIMEOUT` like one
+ * that never appeared.
+ */
 export type KnownBridgeErrorCode =
   | "AUTH"
   | "BAD_REQUEST"
@@ -135,7 +162,6 @@ export type KnownBridgeErrorCode =
   | "CANCELLED"
   | "SAFETY_BLOCKED"
   | "TIMEOUT"
-  | "PROTOCOL"
   | "CONFLICT"
   | "EXPIRED"
   | "RUNNER_INTERNAL"

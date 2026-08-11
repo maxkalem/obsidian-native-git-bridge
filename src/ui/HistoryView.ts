@@ -2,6 +2,7 @@ import { ItemView, Platform, setIcon, WorkspaceLeaf } from "obsidian";
 import type { RepoLogEntry, RepoLogFile } from "../git/historyParsers";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
+import { describeMove, revealOnTap } from "./revealOnTap";
 
 export const NGB_HISTORY_VIEW = "native-git-bridge-history";
 /** One icon for the panel AND the strip button that opens it. */
@@ -16,12 +17,24 @@ export interface HistoryViewActions {
   openFile(path: string): void;
   /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
   progressText(): string;
+  /** What the runner said it is doing, for the reserved detail line. */
+  progressDetail(): string;
   /** Shared preference: render each commit's files as a folder tree. */
   treeView(): boolean;
   /** Flip the shared tree/list preference. */
   toggleTree(): void;
   /** Open (or focus) the status panel; the mirror of its "history" button. */
   openStatusPanel(): void;
+  /** Open the live output panel — the state line answers here, as everywhere. */
+  openOutput(): void;
+  /**
+   * Device-local row budget, the same number the status panel uses.
+   *
+   * A commit that touched 2400 files drew 2400 rows here, which is the cost the
+   * status panel got a budget for — and it is worse in this panel, because
+   * several commits can be expanded at once.
+   */
+  rowsPerGroup(): number;
 }
 
 /**
@@ -39,6 +52,11 @@ export class HistoryView extends ItemView {
   private expanded = new Set<string>();
   /** Collapsed folder nodes in tree layout, keyed "<hash>:<folderPath>". */
   private collapsedDirs = new Set<string>();
+  /**
+   * Rows the user asked to see past the budget, per commit hash. Not persisted:
+   * it is an allowance for this session, like the status panel's.
+   */
+  private extraRows = new Map<string, number>();
   private listEl: HTMLElement | null = null;
   private moreBtn: HTMLButtonElement | null = null;
   /** The scrolling middle of the panel; the head and the bottom bar do not move. */
@@ -47,6 +65,7 @@ export class HistoryView extends ItemView {
   private savedScroll = 0;
   /** State line in the strip, mirroring the status panel's. */
   private progressEl: HTMLElement | null = null;
+  private progressDetailEl: HTMLElement | null = null;
   /**
    * The refresh button, kept so its animation can follow `loading`.
    *
@@ -162,7 +181,11 @@ export class HistoryView extends ItemView {
     const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
     const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
-    this.applyLoadingState();
+    // The state line opens the output panel here exactly as it does in the
+    // status panel: one state, one answer, whichever panel the finger is on.
+    this.progressEl.addClass("ngb-sv-progress-tap");
+    this.progressEl.setAttribute("aria-label", "Show what Termux is doing");
+    this.progressEl.addEventListener("click", () => this.actions.openOutput());
     const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
     // Same tree/list toggle as the status panel: icon = CURRENT layout.
     const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
@@ -176,6 +199,12 @@ export class HistoryView extends ItemView {
     statusBtn.setAttribute("aria-label", "Git panel");
     setIcon(statusBtn, "git-branch");
     statusBtn.addEventListener("click", () => this.actions.openStatusPanel());
+    // Reserved even when empty (CSS keeps the height), mirroring the status
+    // panel: the list below must not jump when the runner starts talking.
+    this.progressDetailEl = headEl.createDiv({ cls: "ngb-sv-progress-detail ngb-sv-progress-tap" });
+    this.progressDetailEl.setAttribute("aria-label", "Show what Termux is doing");
+    this.progressDetailEl.addEventListener("click", () => this.actions.openOutput());
+    this.applyLoadingState();
 
     this.listEl = body.createDiv({ cls: "ngb-hist-list" });
     // "Load more" belongs after the commits, inside the scrolled region: it is
@@ -207,6 +236,20 @@ export class HistoryView extends ItemView {
     const running = this.loading || p !== "";
     this.progressEl.toggleClass("ngb-sv-progress-idle", !running);
     this.progressEl.setText(this.loading ? "Loading history…" : p !== "" ? p : "Idle");
+    // Only while the plugin's own operation runs: this panel's page loads have
+    // no stream of their own, and a stale line under "Idle" reads as running.
+    if (this.progressDetailEl) {
+      this.progressDetailEl.setText(p !== "" ? this.actions.progressDetail() : "");
+    }
+  }
+
+  /**
+   * The plugin's per-second tick. The state line reads `progressText()` only
+   * when something re-renders it, so without this call the copy shown here
+   * froze at whatever second the panel last drew itself.
+   */
+  updatePluginProgress(): void {
+    this.applyLoadingState();
   }
 
   /**
@@ -347,13 +390,27 @@ export class HistoryView extends ItemView {
     const renderBody = () => {
       body.empty();
       if (!this.expanded.has(e.hash)) return;
+      // One page per commit, with the same budget the status panel uses and the
+      // same control at the end of it. Drawing is what costs: a commit that
+      // touched thousands of files froze this panel exactly as an untracked
+      // folder of thousands froze that one, and here several commits can be
+      // open at once.
+      const budget = this.fileBudget(e.hash);
+      let drawn = 0;
+      const room = () => drawn < budget;
+      const draw = (f: RepoLogFile, depth: number) => {
+        if (!room()) return;
+        drawn += 1;
+        this.renderFile(body, f, e, depth);
+      };
       if (this.actions.treeView()) {
         const tree = buildPathTree(e.files, (f) => f.path);
-        for (const f of tree.rootItems) this.renderFile(body, f, e, 0);
-        for (const n of tree.folders) this.renderFolderNode(body, n, e, 0, renderBody);
-        return;
+        for (const f of tree.rootItems) draw(f, 0);
+        for (const n of tree.folders) drawn = this.renderFolderNode(body, n, e, 0, renderBody, drawn, budget);
+      } else {
+        for (const f of e.files) draw(f, 0);
       }
-      for (const f of e.files) this.renderFile(body, f, e, 0);
+      if (e.files.length > drawn) this.renderMore(body, e, drawn, renderBody);
     };
     header.addEventListener("click", () => {
       if (this.expanded.has(e.hash)) this.expanded.delete(e.hash);
@@ -365,13 +422,47 @@ export class HistoryView extends ItemView {
   }
 
   /** Collapsible folder row inside a commit's file tree. */
+  /** Rows this commit may draw: the budget, plus anything the user asked for. */
+  private fileBudget(hash: string): number {
+    const page = Math.max(1, Math.floor(this.actions.rowsPerGroup()));
+    return page + (this.extraRows.get(hash) ?? 0);
+  }
+
+  /**
+   * "N of M shown", at the end of the commit's list.
+   *
+   * Placed where the list stops rather than in the header: the header already
+   * carries the real total, and a control that explains a truncation belongs
+   * where the truncation is visible.
+   */
+  private renderMore(
+    body: HTMLElement,
+    e: RepoLogEntry,
+    shown: number,
+    rerenderBody: () => void
+  ): void {
+    const row = body.createDiv({ cls: "ngb-sv-file ngb-sv-more-children" });
+    const main = row.createDiv({ cls: "ngb-sv-file-main" });
+    main.createSpan({
+      cls: "ngb-settings-note",
+      text: `${shown} of ${e.files.length} shown — tap for more`,
+    });
+    row.addEventListener("click", () => {
+      const page = Math.max(1, Math.floor(this.actions.rowsPerGroup()));
+      this.extraRows.set(e.hash, (this.extraRows.get(e.hash) ?? 0) + page);
+      rerenderBody();
+    });
+  }
+
   private renderFolderNode(
     body: HTMLElement,
     node: PathTreeNode<RepoLogFile>,
     e: RepoLogEntry,
     depth: number,
-    rerenderBody: () => void
-  ): void {
+    rerenderBody: () => void,
+    drawn: number,
+    budget: number
+  ): number {
     const row = body.createDiv({ cls: `ngb-sv-file ngb-ind-${Math.min(depth, 6)}` });
     const key = `${e.hash}:${node.path}`;
     const collapsed = this.collapsedDirs.has(key);
@@ -392,9 +483,17 @@ export class HistoryView extends ItemView {
     spacer.setAttribute("aria-hidden", "true");
     spacer.tabIndex = -1;
     renderCountBadge(row, node.count, (n) => `${n} files in ${node.path}/`);
-    if (collapsed) return;
-    for (const f of node.items) this.renderFile(body, f, e, depth + 1);
-    for (const ch of node.children) this.renderFolderNode(body, ch, e, depth + 1, rerenderBody);
+    if (collapsed) return drawn;
+    for (const f of node.items) {
+      if (drawn >= budget) return drawn;
+      drawn += 1;
+      this.renderFile(body, f, e, depth + 1);
+    }
+    for (const ch of node.children) {
+      if (drawn >= budget) return drawn;
+      drawn = this.renderFolderNode(body, ch, e, depth + 1, rerenderBody, drawn, budget);
+    }
+    return drawn;
   }
 
   private renderFile(body: HTMLElement, f: RepoLogFile, e: RepoLogEntry, depth: number): void {
@@ -405,7 +504,17 @@ export class HistoryView extends ItemView {
     const name = main.createSpan({ cls: "ngb-sv-file-name", text: displayName(f.path) });
     name.setAttribute("aria-label", `${f.path} @ ${e.hash.slice(0, 8)}`);
     if (f.origPath) {
-      main.createSpan({ cls: "ngb-settings-note ngb-hist-rename", text: `← ${f.origPath}` });
+      // The NAME it came from, not the path: a rename inside a deep tree
+      // otherwise printed six lines of directories into a row that has to stay
+      // one line tall, and `text-overflow: ellipsis` cannot save a box that is
+      // allowed to wrap. The whole path is one tap away, the same gesture a
+      // clamped count uses, and it is in the aria-label either way.
+      const from = main.createSpan({
+        cls: "ngb-settings-note ngb-hist-rename",
+        text: `← ${displayName(f.origPath)}`,
+      });
+      from.setAttribute("aria-label", `moved from ${f.origPath}`);
+      revealOnTap(from, describeMove(f.origPath, f.path), { align: "left" });
     }
     // Tap on the row = the diff this commit introduced for the file, in a pane.
     main.addEventListener("click", () => this.actions.openDiffAtCommit(f, e));

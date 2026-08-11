@@ -87,6 +87,26 @@ export class BridgeClient {
     }
   }
 
+  /**
+   * What the runner has said so far about a request that is still running.
+   *
+   * Missing file means an older runner (it wrote no stream) or a request that
+   * was rejected before it began — both answer null, and neither is an error:
+   * this is decoration on top of an operation that works without it.
+   */
+  async readProgress(id: string): Promise<string | null> {
+    const file = this.paths.progressFile(id);
+    try {
+      if (!(await this.fs.exists(file))) return null;
+      const raw = await this.fs.read(file);
+      return raw.length > 0 ? raw : null;
+    } catch {
+      // Read while the runner appends: a torn read is worth nothing and worth
+      // no complaint either. The next poll is 400 ms away.
+      return null;
+    }
+  }
+
   /** Signal cancellation: the runner skips not-yet-started requests. */
   async requestCancel(id: string): Promise<void> {
     await this.ensureRuntimeDirs();
@@ -126,6 +146,10 @@ export class BridgeClient {
       this.paths.resultsDir,
       this.paths.cancelDir,
       this.paths.doneDir,
+      // Progress streams deliberately outlive their request, so that a log
+      // bundle shared afterwards can carry them. Nothing else would ever
+      // remove them; the runner sweeps its side on the same 24 h rule.
+      this.paths.progressDir,
     ]) {
       let files: string[];
       try {

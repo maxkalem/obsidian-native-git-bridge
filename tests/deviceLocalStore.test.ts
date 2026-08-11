@@ -22,7 +22,9 @@ describe("DeviceLocalSettingsStore", () => {
     const s = new DeviceLocalSettingsStore(fakeBackend(), "vault1").read();
     expect(s).toEqual(DEFAULT_DEVICE_SETTINGS);
     expect(s.enabledOnThisDevice).toBe(false);
-    expect(s.autoPullOnOpen).toBe(false);
+    // Nothing happens on launch unless the user asks for it. "sync" in
+    // particular would publish, on every open, whatever is lying around.
+    expect(s.onOpenAction).toBe("nothing");
     // No baked-in personal defaults: protection derives from the repo's own
     // sparse exclusions (plus whatever the user pins manually).
     expect(s.protectedPaths).toEqual([]);

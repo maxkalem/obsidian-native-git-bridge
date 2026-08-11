@@ -14,6 +14,18 @@ export interface SelfCheckReport {
   markerProfileId: string;
   /** Waiting to be paired: a claim file is present and unanswered. */
   claimPending: boolean;
+  /**
+   * The cause in one line, for the window's TITLE.
+   *
+   * Split from `verdict` because a wall of prose that opens with "the runtime
+   * folder is healthy" buries the one sentence the reader needs. The title says
+   * what happened; the body says what to do about it, if anything.
+   *
+   * Thirty characters. A modal header on a phone truncates past roughly that,
+   * and a truncated title states even less than a generic one: the first
+   * attempt read "The plugin stopped waiting; the run.." on the device.
+   */
+  headline: string;
   /** Human verdict describing the most likely cause when something is wrong. */
   verdict: string;
   ok: boolean;
@@ -63,8 +75,10 @@ export async function runSelfCheck(
   }
 
   let verdict: string;
+  let headline: string;
   let ok = false;
   if (!runtimeDirExists) {
+    headline = "No runtime folder yet";
     verdict =
       "The runtime folder does not exist yet. Run a command once (it is created automatically), " +
       "or complete the Termux setup.";
@@ -72,6 +86,7 @@ export async function runSelfCheck(
     // The runner writes into the runtime folder of every profile it knows. No
     // log here means no profile points at THIS vault — which is the normal
     // state of a second vault that was never paired, not a broken install.
+    headline = claimPending ? "Waiting to be paired" : "Termux has never written here";
     verdict = claimPending
       ? "This vault is waiting to be paired: the pairing request is still lying here, so Termux has not " +
         "run yet. Open Termux (or tap 'Pair this vault' again) — the runner picks the request up on its next run."
@@ -80,18 +95,36 @@ export async function runSelfCheck(
         "(each vault gets its own profile and token; other vaults keep working), or use 'Pair this vault' " +
         "if Termux is already set up.";
   } else if (markerProfileId && profileId && markerProfileId !== profileId) {
+    headline = "Profile mismatch";
     verdict =
       `This vault is paired with profile ${profileId}, but the runner last wrote profile ${markerProfileId} here. ` +
       "Re-run the install command for this vault to get the two back in step.";
   } else if (hasQueuedTimeout && queuedRequests.length > 0) {
+    // Likely cause FIRST. With a short timeout a queued request is the
+    // ordinary case, not evidence of a broken trigger, and leading with
+    // "the runner was not triggered" sent the user to check permissions that
+    // were fine.
+    headline = "Still in the queue";
     verdict =
-      "The runner has written here before, but your request is still queued. Either the runner was not " +
-      "triggered (companion permission / allow-external-apps), or it stopped before processing the queue — " +
-      "see the log tail below.";
+      "The runner has not picked your request up yet. Usually it is just slow to start — raise " +
+      "'Operation timeout' in settings and try again. If the queue never clears, the trigger is not " +
+      "reaching Termux: check the companion's permission and Termux's allow-external-apps.";
   } else if (queuedRequests.length > 0) {
+    headline = `${queuedRequests.length} request(s) waiting`;
     verdict = `${queuedRequests.length} request(s) waiting to be processed.`;
+  } else if (hasQueuedTimeout) {
+    // Healthy folder AND nothing queued, reached from a timeout: the runner
+    // took the request and is still on it. Saying "looks healthy" here is true
+    // and useless — it invites a hunt for a break that is not there. The budget
+    // is the thing that ran out, and it is the thing the user can change.
+    headline = "Timed out — nothing is broken";
+    verdict =
+      "The runner has your request and is still working on it. It will finish, and the result is picked " +
+      "up when it lands. Raise 'Operation timeout' in settings if this keeps happening.";
+    ok = true;
   } else {
-    verdict = "Runtime folder looks healthy: the runner writes here and no requests are stuck.";
+    headline = "Nothing is stuck";
+    verdict = "The runner writes into this vault's runtime folder and no requests are waiting.";
     ok = true;
   }
   return {
@@ -102,6 +135,7 @@ export async function runSelfCheck(
     pairingFilePresent,
     profileId,
     markerProfileId,
+    headline,
     claimPending,
     verdict,
     ok,

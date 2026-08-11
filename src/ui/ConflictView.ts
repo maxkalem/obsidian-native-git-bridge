@@ -1,4 +1,4 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, setIcon, WorkspaceLeaf } from "obsidian";
 import { CONFLICT_COLOR_VARS } from "./colors";
 import { markInvisibles } from "./DiffView";
 import { renderInlineRuns } from "./diffDom";
@@ -22,6 +22,17 @@ export interface ConflictViewActions {
   markersVisible(): boolean;
   /** Shared preference: render whitespace glyphs (· → ␍), as in the diff pane. */
   showInvisibles(): boolean;
+  /**
+   * Shared preference: wrap long lines instead of scrolling horizontally, the
+   * same toggle the diff pane reads.
+   *
+   * This pane ignored it and always wrapped, because the Keep buttons sit on
+   * rows inside the file text and a horizontal scroller would carry them off
+   * the right of the screen. That is now solved the way the diff pane solves
+   * its line-number gutter: the row chrome is `position: sticky` inside the
+   * scroller, so it stays put while the file text moves under it.
+   */
+  wrapLines(): boolean;
   /** Shared preference: compare the two sides by word or by character. */
   inlineUnit(): InlineDiffUnit;
   /**
@@ -108,6 +119,9 @@ export class ConflictView extends ItemView {
     const c = this.contentEl;
     c.empty();
     c.addClass("ngb-conflict-view");
+    // Everything the no-wrap layout needs hangs off this one class, so the
+    // wrapped layout stays byte-for-byte the behaviour that shipped.
+    c.toggleClass("ngb-conf-nowrap", !this.actions.wrapLines());
     this.applyColors();
     const path = this.path;
     if (path === null) {
@@ -129,7 +143,22 @@ export class ConflictView extends ItemView {
       const stage = btns.createEl("button", { text: "Mark resolved (stage this file)", cls: "mod-cta" });
       stage.addEventListener("click", () => {
         void (async () => {
-          await this.actions.stageFile(path);
+          // Staging is a Termux round trip, and on this device that is seconds,
+          // not milliseconds. Without a sign here the pane sat perfectly still
+          // while the status panel showed an operation running — so the button
+          // read as having done nothing, and the obvious response is to press
+          // it again.
+          stage.disabled = true;
+          const waiting = btns.createSpan({ cls: "ngb-conf-waiting" });
+          waiting.createSpan({ cls: "ngb-anim-spin ngb-sv-icon-active" });
+          setIcon(waiting.children[0] as HTMLElement, "refresh-cw");
+          waiting.createSpan({ cls: "ngb-settings-note", text: "Staging…" });
+          try {
+            await this.actions.stageFile(path);
+          } finally {
+            waiting.remove();
+            stage.disabled = false;
+          }
           new Notice("Marked resolved.");
           // The job here is done — leaving a stale resolution pane open
           // only confused people.
@@ -143,6 +172,11 @@ export class ConflictView extends ItemView {
       text: `${this.parsed.conflictCount} conflict${this.parsed.conflictCount === 1 ? "" : "s"} — pick a side per block. Other lines stay untouched.`,
     });
     const list = c.createDiv({ cls: "ngb-conf-list" });
+    // The rows live one level deeper so that container can be `max-content`
+    // wide: without it every row is only as wide as the scrollport, and
+    // scrolling right leaves the row backgrounds — and the coloured side edges
+    // — ending in the middle of the screen.
+    const rows = list.createDiv({ cls: "ngb-conf-rows" });
     const rawMarkers = this.actions.markersVisible();
     let lineNo = 1;
     /**
@@ -155,7 +189,7 @@ export class ConflictView extends ItemView {
      * the only question the reader actually has.
      */
     const row = (num: number | null, text: string, cls: string, runs?: InlineRun[] | null) => {
-      const r = list.createDiv({ cls: `ngb-conf-row ${cls}` });
+      const r = rows.createDiv({ cls: `ngb-conf-row ${cls}` });
       r.createSpan({ cls: "ngb-conf-num", text: num === null ? "" : String(num) });
       const body = r.createSpan({ cls: "ngb-conf-text" });
       if (runs === undefined || runs === null) body.setText(text === "" ? " " : text);
@@ -176,7 +210,7 @@ export class ConflictView extends ItemView {
       btnLabel: string,
       onKeep: () => void
     ) => {
-      const r = list.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${sideCls}` });
+      const r = rows.createDiv({ cls: `ngb-conf-row ngb-conf-marker ${sideCls}` });
       r.createSpan({
         cls: `ngb-conf-num${num === null ? " ngb-conf-num-chrome" : ""}`,
         text: num === null ? "▸" : String(num),

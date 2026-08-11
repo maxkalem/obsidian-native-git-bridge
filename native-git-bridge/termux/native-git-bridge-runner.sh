@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=12
+RUNNER_VERSION=13
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -26,6 +26,10 @@ PROFILES_DIR="$NGB_CONFIG_DIR/profiles"
 # lives with the profiles, not inside one vault's runtime directory.
 LOCK_DIR="$NGB_CONFIG_DIR/.runner.lock"
 NGB_LOG_MAX_BYTES="${NGB_LOG_MAX_BYTES:-262144}"
+# Forced `--progress` writes one carriage-return chunk per percent, so the
+# progress stream of a large fetch grows fast. It is a live view, not a record —
+# the newest half is all anyone reads.
+NGB_PROG_MAX_BYTES="${NGB_PROG_MAX_BYTES:-65536}"
 
 # Never let git block on an interactive credential prompt: with a missing or
 # expired PAT the command must fail fast with a clear stderr, not hang.
@@ -50,7 +54,7 @@ PROFILE_FILE=""
 NGB_REPO_DIR=""
 NGB_TOKEN=""
 NGB_RUNTIME_DIR=""
-REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""
+REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""; PROG_DIR=""
 
 log() {
   # Never log tokens or credentialed URLs.
@@ -60,7 +64,22 @@ log() {
   fi
 }
 
-redact_url() { sed -E 's#(\w+://)[^/@[:space:]]+:[^/@[:space:]]+@#\1***@#g'; }
+# Any userinfo in a URL, not only `user:password`. A personal access token is
+# normally carried as the USERNAME with no password at all
+# (https://ghp_…@github.com/…), and the pattern that required a colon walked
+# straight past it — the plugin's redact() had the same hole and fixed it the
+# same way. `git@` is the one exception kept: the universal SSH user is not a
+# secret, and blanking it makes every ssh remote in a log identical. The bare
+# token prefixes cover a token printed OUTSIDE a URL (an Authorization header
+# echoed by a failing helper); they are the ones the hosts actually issue.
+redact_url() {
+  sed -E \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)git@#\1@NGB_KEEP_GIT@#g' \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://)[^/@[:space:]]+@#\1***@#g' \
+    -e 's#@NGB_KEEP_GIT@#git@#g' \
+    -e 's#\b(gh[pousr]_|github_pat_|glpat-)[A-Za-z0-9_-]{8,}#\1***#g' \
+    -e 's#\b([Bb]earer|[Tt]oken)[[:space:]]+[A-Za-z0-9._-]{8,}#\1 ***#g'
+}
 
 # ---- validation helpers ------------------------------------------------------
 
@@ -392,7 +411,7 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   # Clear first: a failed activation must never leave the PREVIOUS profile's
   # directories in place, or a broken profile would answer its neighbour's queue.
   PROFILE_ID=""; PROFILE_FILE=""; NGB_REPO_DIR=""; NGB_TOKEN=""; NGB_RUNTIME_DIR=""
-  REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""
+  REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""; PROG_DIR=""
   LOG_FILE="$NGB_CONFIG_DIR/runner.log"
   read_profile_file "$1" || { PROFILE_UNHEALTHY_REASON="Unusable profile file."; return 1; }
   PROFILE_FILE="$1"
@@ -405,9 +424,10 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   RES_DIR="$NGB_RUNTIME_DIR/results"
   CAN_DIR="$NGB_RUNTIME_DIR/cancel"
   DONE_DIR="$NGB_RUNTIME_DIR/done"
+  PROG_DIR="$NGB_RUNTIME_DIR/progress"
   if [ -d "$NGB_RUNTIME_DIR" ] || mkdir -p "$NGB_RUNTIME_DIR" 2>/dev/null; then
     LOG_FILE="$NGB_RUNTIME_DIR/runner.log"
-    mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR" 2>/dev/null || true
+    mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR" "$PROG_DIR" 2>/dev/null || true
   else
     LOG_FILE="$NGB_CONFIG_DIR/runner.log"
   fi
@@ -577,15 +597,113 @@ err_json() {
 # ---- git capture -------------------------------------------------------------
 
 GIT_OUT=""; GIT_ERR=""; GIT_EC=0
+# ---- the progress stream -----------------------------------------------------
+#
+# A long operation used to be completely silent. `run_git` sent stdout and
+# stderr to `mktemp` files and read them AFTER git exited, and those names are
+# known only inside this script — so while a 15-minute object repair ran, the
+# plugin had nothing to show but its own count of elapsed seconds. Whether git
+# was three percent in or wedged looked identical.
+#
+# stderr now goes to one append-only file per request, which the plugin tails
+# from the same 400 ms poll that watches for the result. git is the only writer
+# and it appends, so there is no race and no second copy to keep in step: what
+# GIT_ERR needs is the slice this command added, taken by byte offset.
+#
+# It stays a courtesy, in both directions. An older runner writes no file and
+# the plugin simply shows what it always showed; a newer runner writing for an
+# older plugin leaves files nobody reads, and the 24 h sweep takes them. That is
+# why this needs no protocol version.
+NGB_PROG_FILE=""
+
+progress_begin() { # $1 = request id
+  NGB_PROG_FILE=""
+  [ -n "${PROG_DIR:-}" ] || return 0
+  mkdir -p "$PROG_DIR" 2>/dev/null || return 0
+  : > "$PROG_DIR/$1.txt" 2>/dev/null || return 0
+  NGB_PROG_FILE="$PROG_DIR/$1.txt"
+}
+
+# What the runner itself is about to do. git's own output says "Receiving
+# objects"; only this can say which of a sync's five steps that belongs to, and
+# it is also the only progress a step made of plumbing rather than one long
+# command can produce.
+progress_note() {
+  [ -n "$NGB_PROG_FILE" ] || return 0
+  printf '%s\n' "$*" >> "$NGB_PROG_FILE" 2>/dev/null || true
+}
+
+# What a terminal would have shown: for each line, only the text after the last
+# carriage return. Progress arrives as `\r`-separated chunks with no newline
+# until the end, so this turns a thousand percent steps into the one final
+# state, which is what belongs in GIT_ERR and in an error message.
+# Trailing blanks go with them: git pads each chunk with spaces so the next,
+# shorter one fully erases it on a terminal. In a file that padding is nothing
+# but noise at the end of every line.
+collapse_cr() {
+  awk '{ n = split($0, part, "\r"); line = part[n]; sub(/[ \t]+$/, "", line); print line }'
+}
+
+progress_bytes() { wc -c < "$NGB_PROG_FILE" 2>/dev/null || echo 0; }
+
+# Only ever BETWEEN git calls: an offset taken before a command has to stay
+# valid until after it, and trimming the front invalidates it.
+progress_trim() {
+  [ -n "$NGB_PROG_FILE" ] || return 0
+  [ "$(progress_bytes)" -gt "$NGB_PROG_MAX_BYTES" ] || return 0
+  tail -c $((NGB_PROG_MAX_BYTES / 2)) "$NGB_PROG_FILE" > "$NGB_PROG_FILE.tmp" 2>/dev/null &&
+    mv "$NGB_PROG_FILE.tmp" "$NGB_PROG_FILE" 2>/dev/null || true
+}
+
+# The file on disk is raw git stderr, inside the vault, on shared storage —
+# where rule 11 says no credential may ever land. Over https a token travels as
+# the URL's username and git prints the URL it used in its own error messages,
+# so the stream is redacted IN PLACE between commands, in the same slot as the
+# trim and under the same constraint: never during a command, because the next
+# `before` offset is measured fresh afterwards. The window that remains is the
+# duration of one git command, and closing it would need a second writer — the
+# tee-shaped race that was rejected when this file was designed.
+progress_redact() {
+  [ -n "$NGB_PROG_FILE" ] || return 0
+  redact_url < "$NGB_PROG_FILE" > "$NGB_PROG_FILE.tmp" 2>/dev/null &&
+    mv "$NGB_PROG_FILE.tmp" "$NGB_PROG_FILE" 2>/dev/null || true
+}
+
 run_git() {
   # Runs git with argv array; captures stdout/stderr; never through a shell string.
-  local out_f err_f
-  out_f="$(mktemp)"; err_f="$(mktemp)"
-  git "$@" > "$out_f" 2> "$err_f"
-  GIT_EC=$?
+  #
+  # `-c core.quotePath=false` on every call, and it is load-bearing rather than
+  # cosmetic. By default git QUOTES any path with a byte outside ASCII and
+  # escapes it in octal, so a note called `Native Git Bridge — spec.md` comes
+  # back as `"Native Git Bridge \342\200\224 spec.md"` — quotes included.
+  #
+  # The plugin reads those lists and sends the paths BACK as arguments (the
+  # sparse repair does exactly that), where nothing matches the real file. The
+  # repair then took its own idempotent branch — "already gone from the index,
+  # nothing to report" — and answered ok=true having done nothing at all, so the
+  # user pressed sync, repaired, pressed sync, repaired, with a vault full of
+  # em dashes.
+  #
+  # Every path this runner prints is now the real bytes. The `-z` output used in
+  # a few places was already immune; this makes the rest agree with it.
+  local out_f err_f before
+  out_f="$(mktemp)"
+  if [ -n "$NGB_PROG_FILE" ]; then
+    before="$(progress_bytes)"
+    git -c core.quotePath=false "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
+    GIT_EC=$?
+    GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
+    progress_redact
+    progress_trim
+  else
+    err_f="$(mktemp)"
+    git -c core.quotePath=false "$@" > "$out_f" 2> "$err_f"
+    GIT_EC=$?
+    GIT_ERR="$(cat "$err_f" | redact_url)"
+    rm -f "$err_f"
+  fi
   GIT_OUT="$(cat "$out_f")"
-  GIT_ERR="$(cat "$err_f" | redact_url)"
-  rm -f "$out_f" "$err_f"
+  rm -f "$out_f"
   return $GIT_EC
 }
 
@@ -666,6 +784,7 @@ collect_status_fields() {
     skipWorktreeCount "$skip_count" \
     lastCommit "$last_commit" \
     remoteUrl "$remote_url" \
+    rescueBranches "$(git for-each-ref --format='%(refname:short)' 'refs/heads/ngb-rescue-*' 2>/dev/null || true)" \
     untrackedChildren "$UNTRACKED_CHILDREN" \
     mergeInProgress "$merge_active" \
     mergeMsg "$merge_msg" \
@@ -760,13 +879,47 @@ NGB_EXPIRY_GRACE="${NGB_EXPIRY_GRACE:-600}"
 
 run_git_net() {
   # Network git commands wrapped in a hard timeout so a dead link cannot hang the runner.
-  local out_f err_f
-  out_f="$(mktemp)"; err_f="$(mktemp)"
-  timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2> "$err_f"
-  GIT_EC=$?
+  local out_f err_f before
+  out_f="$(mktemp)"
+  # git shows a progress meter only when stderr is a terminal, and here it never
+  # is — so the one operation the user most wants to watch is the one that says
+  # nothing unless asked. `--progress` is inserted after the subcommand rather
+  # than appended, because a trailing option after a positional is not accepted
+  # everywhere, and only for the four that take it (`ls-remote` does not).
+  if [ -n "$NGB_PROG_FILE" ]; then
+    # The subcommand is not always $1: `-C <dir>` and `-c <key=value>` come
+    # before it, and a call that carries them would silently lose its meter.
+    local -a pre=()
+    while [ "${1:-}" = "-C" ] || [ "${1:-}" = "-c" ]; do
+      pre+=("$1" "${2:-}")
+      shift 2 || break
+    done
+    case "${1:-}" in
+      fetch | pull | push | clone)
+        local sub="$1"; shift
+        set -- ${pre[@]+"${pre[@]}"} "$sub" --progress "$@"
+        ;;
+      *)
+        set -- ${pre[@]+"${pre[@]}"} "$@"
+        ;;
+    esac
+  fi
+  if [ -n "$NGB_PROG_FILE" ]; then
+    before="$(progress_bytes)"
+    timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
+    GIT_EC=$?
+    GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
+    progress_redact
+    progress_trim
+  else
+    err_f="$(mktemp)"
+    timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2> "$err_f"
+    GIT_EC=$?
+    GIT_ERR="$(cat "$err_f" | redact_url)"
+    rm -f "$err_f"
+  fi
   GIT_OUT="$(cat "$out_f")"
-  GIT_ERR="$(cat "$err_f" | redact_url)"
-  rm -f "$out_f" "$err_f"
+  rm -f "$out_f"
   [ $GIT_EC -eq 124 ] && GIT_ERR="$GIT_ERR
 (timed out after ${NGB_NET_TIMEOUT}s)"
   return $GIT_EC
@@ -796,7 +949,10 @@ read_protected_paths() {
   return 0
 }
 
-conflicted_files() { git diff --name-only --diff-filter=U 2>/dev/null || true; }
+# The plugin opens these paths, so they must be the real bytes rather than
+# git's quoted-and-octal-escaped form. Same reason as `run_git`; this one does
+# not go through it.
+conflicted_files() { git -c core.quotePath=false diff --name-only --diff-filter=U 2>/dev/null || true; }
 
 merge_in_progress() { [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; }
 rebase_in_progress() {
@@ -828,6 +984,41 @@ stage_all_except_protected() {
     specs+=(":(exclude)$p")
   done
   run_git add -A -- "${specs[@]}"
+}
+
+# Would `git pull` refuse because of what is in the working tree right now?
+#
+# git will not merge over a path it has to change while that path is dirty, and
+# it will not create a file that already exists untracked. Both refusals are
+# absolute — no option talks git out of them — and both are decided by the same
+# thing: whether a path the merge touches is also a path WE have touched.
+#
+# So ask git for both sets and intersect them. `HEAD...@{upstream}` (three dots)
+# is the merge base against the remote, which is exactly the list of paths the
+# merge would bring in. Ours is everything differing from HEAD (staged or not)
+# plus everything untracked.
+#
+# Prints the first colliding path and returns 0; returns 1 when the pull is
+# clear. NUL-separated throughout: a path may contain anything but NUL, and
+# `--name-only` without `-z` quotes the awkward ones instead of listing them.
+pull_would_be_blocked_by() {
+  local p
+  declare -A incoming=()
+  while IFS= read -r -d '' p; do
+    [ -n "$p" ] && incoming["$p"]=1
+  done < <(git diff --name-only -z 'HEAD...@{upstream}' 2>/dev/null || true)
+  [ "${#incoming[@]}" -eq 0 ] && return 1
+  while IFS= read -r -d '' p; do
+    [ -z "$p" ] && continue
+    if [ -n "${incoming[$p]:-}" ]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done < <(
+    git diff --name-only -z HEAD 2>/dev/null || true
+    git ls-files -z --others --exclude-standard 2>/dev/null || true
+  )
+  return 1
 }
 
 require_identity() {
@@ -869,6 +1060,10 @@ action_pull() {
     return 1
   fi
   local pull_out="$GIT_OUT"
+  # The merge ignored skip-worktree, as it must, so the excluded files it
+  # touched are on disk with the bit cleared. Put that back before judging it —
+  # otherwise the gate blocks a pull over changes the pull itself produced.
+  reapply_sparse_if_enabled "after the pull" || return 1
   # Post-merge safety: a merge must never have materialized changes to protected paths.
   if ! safety_gate; then return 1; fi
   collect_status_fields
@@ -918,6 +1113,27 @@ action_push() {
   DATA=$(merge_data "$DATA" "$(obj_from_fields pushOutput "$push_out")")
 }
 
+# Put the sparse state back after an operation that ignored it.
+#
+# `git merge` does not honour skip-worktree: it cannot merge a file it cannot
+# see, so it materialises excluded files on disk and clears the bit. Afterwards
+# every one of them is an ordinary visible change under a protected path, the
+# safety gate blocks the commit, and the repair is offered a list it did not
+# create. Reapplying puts the bit back and takes the files off disk again —
+# which is the whole point of a sparse checkout: in the repository, in the
+# index, NOT on disk.
+#
+# Conflicted entries are the exception and are left alone: an unmerged path has
+# no single version to hide, and it belongs to the conflict UI.
+reapply_sparse_if_enabled() { # $1 = label for the error message
+  [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" = "true" ] || return 0
+  if ! run_git sparse-checkout reapply; then
+    ERROR=$(err_json "GIT_FAILED" "sparse-checkout reapply failed $1." "$GIT_OUT" "$GIT_ERR")
+    return 1
+  fi
+  return 0
+}
+
 action_sync() {
   local req_file="$1"
   read_protected_paths "$req_file" || return 1
@@ -929,6 +1145,7 @@ action_sync() {
 
   # 1-3. Verify + reapply sparse checkout when enabled (non-destructive).
   if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" = "true" ]; then
+    progress_note "sync: reapplying the sparse checkout"
     if ! run_git sparse-checkout reapply; then
       ERROR=$(err_json "GIT_FAILED" "sparse-checkout reapply failed during sync." "$GIT_OUT" "$GIT_ERR"); return 1
     fi
@@ -946,6 +1163,7 @@ action_sync() {
   fi
 
   # 5. Fetch, then integrate if behind.
+  progress_note "sync: fetching from origin"
   if ! run_git_net fetch --prune; then
     ERROR=$(err_json "GIT_FAILED" "git fetch failed during sync." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
@@ -954,6 +1172,42 @@ action_sync() {
   counts="$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null || echo '0 0')"
   behind="${counts%%[[:space:]]*}"; ahead="${counts##*[[:space:]]}"
   if [ "${behind:-0}" -gt 0 ]; then
+    # Commit first, but ONLY when the merge would otherwise be refused.
+    #
+    # Pulling before committing is what this action always did, and it has one
+    # state with no way out: a file changed locally and not yet committed that
+    # the incoming merge also changes. git refuses, the sync stops before it
+    # ever reaches the commit step, and pressing sync again repeats it forever.
+    # The user's only exit was to stage and commit by hand — the very work sync
+    # exists to do.
+    #
+    # Committing unconditionally would fix that and cost something real: a merge
+    # commit on every sync, and a local commit left behind whenever the pull
+    # then fails. Asking git first costs one tree diff and keeps today's
+    # behaviour in the ordinary case, where nothing collides and nothing needs
+    # committing yet.
+    local blocker
+    if blocker="$(pull_would_be_blocked_by)"; then
+      if ! stage_all_except_protected; then
+        ERROR=$(err_json "GIT_FAILED" "git add failed before the merge." "$GIT_OUT" "$GIT_ERR"); return 1
+      fi
+      safety_gate || return 1
+      if ! git diff --cached --quiet 2>/dev/null; then
+        if ! run_git commit -m "$msg"; then
+          ERROR=$(err_json "GIT_FAILED" "git commit failed before the merge." "$GIT_OUT" "$GIT_ERR"); return 1
+        fi
+        steps="$steps,committed-before-merge"
+      else
+        # The colliding path is one staging cannot reach — a protected sparse
+        # path. The gate above has already refused in that case; this is the
+        # belt for the braces, and it says which path rather than letting git
+        # fail with a message about a file the user cannot act on.
+        ERROR=$(err_json "SAFETY_BLOCKED" \
+          "The merge would overwrite '$blocker', which this device is not allowed to stage. Resolve it in Termux." "" "")
+        return 1
+      fi
+    fi
+    progress_note "sync: merging origin into this branch ($behind behind)"
     if ! run_git pull --no-rebase --no-edit; then
       local pull_out="$GIT_OUT" pull_err="$GIT_ERR"
       local conf; conf="$(conflicted_files)"
@@ -966,11 +1220,19 @@ action_sync() {
       return 1
     fi
     steps="$steps,merged"
-    # 6b. Post-merge safety.
+    # 6b. Put the sparse state back BEFORE judging it. The merge just
+    # materialised every excluded file it had to look at and cleared their
+    # skip-worktree bits, so without this the gate below sees a protected
+    # directory full of "changes" the merge itself created, and blocks the sync
+    # the user asked for over files they never touched.
+    reapply_sparse_if_enabled "after the merge" || return 1
+    steps="$steps,sparse-reapplied-after-merge"
+    # 6c. Post-merge safety.
     safety_gate || return 1
   fi
 
   # 7. Stage permitted changes only.
+  progress_note "sync: staging changes"
   if ! stage_all_except_protected; then
     ERROR=$(err_json "GIT_FAILED" "git add failed during sync." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
@@ -996,6 +1258,7 @@ action_sync() {
     if [ -z "$branch" ]; then
       ERROR=$(err_json "GIT_FAILED" "Detached HEAD; refusing to push." "" ""); return 1
     fi
+    progress_note "sync: pushing to origin/$branch"
     if ! run_git_net push -u origin "$branch"; then
       ERROR=$(err_json "GIT_FAILED" "git push failed during sync (local commit kept)." "$GIT_OUT" "$GIT_ERR"); return 1
     fi
@@ -1030,9 +1293,39 @@ action_resolve_conflict() {
         return 1 ;;
     esac
   done
-  if [ -z "$(git ls-files -u -- "$path" 2>/dev/null)" ]; then
+  local stages; stages="$(git ls-files -u -- "$path" 2>/dev/null)"
+  if [ -z "$stages" ]; then
     ERROR=$(err_json BAD_REQUEST "The file is not in a conflicted (unmerged) state." "" ""); return 1
   fi
+  # Which sides actually EXIST. In an unmerged index, stage 2 is ours and stage
+  # 3 is theirs, and a conflict where one side deleted the file simply has no
+  # entry for that stage.
+  #
+  # `git checkout --theirs` on such a path fails with "does not have their
+  # version", which is true and useless: the user picked a side, and on this
+  # kind of conflict picking the side that deleted the file MEANS deleting it.
+  # Choosing the side that still has it means keeping it. Both are ordinary
+  # resolutions and both used to be dead ends.
+  local has_ours=false has_theirs=false
+  printf '%s\n' "$stages" | awk '{print $3}' | grep -qx 2 && has_ours=true
+  printf '%s\n' "$stages" | awk '{print $3}' | grep -qx 3 && has_theirs=true
+
+  local wanted_missing=false
+  [ "$side" = "ours" ] && [ "$has_ours" = false ] && wanted_missing=true
+  [ "$side" = "theirs" ] && [ "$has_theirs" = false ] && wanted_missing=true
+
+  if [ "$wanted_missing" = true ]; then
+    # The chosen side does not have the file: it deleted it. Accepting that
+    # side is accepting the deletion.
+    if ! run_git rm -f --cached -- "$path"; then
+      ERROR=$(err_json GIT_FAILED "git rm (accept the deletion) failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+    rm -f -- "$path" 2>/dev/null || true
+    collect_status_fields
+    DATA=$(merge_data "$DATA" "$(obj_from_fields resolvedBy "deleted")")
+    return 0
+  fi
+
   if ! run_git checkout "--$side" -- "$path"; then
     ERROR=$(err_json GIT_FAILED "git checkout --$side failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
@@ -1040,6 +1333,467 @@ action_resolve_conflict() {
     ERROR=$(err_json GIT_FAILED "git add (mark resolved) failed." "$GIT_OUT" "$GIT_ERR"); return 1
   fi
   collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields resolvedBy "kept")")
+}
+
+# Remove loose objects that are EMPTY, then refetch. Nothing else.
+#
+# A zero-byte file under .git/objects is what git leaves when it was killed
+# between creating the file and writing to it — routine on Android, where the
+# system stops Termux in the background. The object is unreadable, so every
+# command that has to walk the tree fails, and there is nothing in the file to
+# lose: deleting it costs literally zero bytes of history, and a fetch brings
+# the real object back if the remote has it.
+#
+# A corrupt object that is NOT empty is a different thing entirely — it may
+# still hold recoverable data — so those are reported and never touched.
+#
+# What is MISSING from the object store, and nothing else.
+#
+# `--connectivity-only` rather than `--full`: it walks the reachable graph and
+# names what it cannot find, which is exactly the question, and it skips
+# re-hashing the content of every object, which is what made `--full` take
+# between four and thirty-nine minutes on a real vault — long enough that the
+# action's own budget could expire before it had an answer.
+#
+# The filter is the other half. fsck exits non-zero for findings that are not
+# faults at all: `dangling` objects are the ordinary residue of any rebase, and
+# `notice:` lines are advice. Treating its exit code as the verdict would report
+# a healthy repository as broken; ignoring the output entirely reported a broken
+# one as healthy, which is what happened here four times in a row.
+fsck_findings() {
+  # `--no-reflogs` matters as much as `--connectivity-only`.
+  #
+  # By default fsck treats every reflog entry as a root, so an object that only
+  # some discarded local commit ever referenced counts as a fault. Nothing is
+  # blocked by that: pull, merge, commit and checkout walk refs and the index,
+  # never the reflog. Counting it would make this action answer "the remote does
+  # not have these objects either, cloning the vault again is the way out" — the
+  # most destructive advice this plugin gives — about a repository that works.
+  #
+  # It was caught in the test fixture, where a deliberately damaged object from a
+  # commit that had since been reset away kept the verdict red.
+  git fsck --connectivity-only --no-reflogs --no-progress 2>&1 |
+    grep -E 'missing|unable to read|broken link|^error' |
+    grep -Ev '^(dangling|notice:)' | head -40 || true
+}
+
+# Of those findings, the ones a fetch can actually answer.
+#
+# The distinction is the difference between two endings the user has to be told
+# apart. An object that is GONE can come back from the remote. An object that is
+# present but corrupt is deliberately left alone — it may still hold recoverable
+# data, and deciding that needs a person at a terminal — so no amount of fetching
+# changes it, and offering the repair again would be the loop this action exists
+# to break.
+missing_from_findings() {
+  printf '%s\n' "$1" | grep -E 'missing|broken link|unable to read' || true
+}
+
+# Recover missing objects on a git that has no `--refetch`.
+#
+# Every cheaper idea was tried against a repository broken exactly the way the
+# device's was, and each one transfers nothing:
+#
+#   git fetch --prune origin                       → "Already up to date", silence
+#   git -c fetch.negotiationAlgorithm=noop fetch    → writes the ref, sends no pack
+#   ...the same into refs that do not exist yet     → same
+#
+# The reason is the same every time: fetch decides what to WANT by looking at
+# whether the wanted commit is present locally, and the commit is present — it is
+# a tree underneath it that is gone. Negotiation never gets a say, because no
+# transfer is started at all. `--refetch` exists precisely to say "want
+# everything, claim nothing", and before git 2.41 there is no way to say it.
+#
+# So: clone the remote into a temporary mirror and hand its pack files over.
+# Verified end to end on git 2.34 against the real breakage — `missing tree`
+# before, nothing missing after.
+#
+# It only ever ADDS. Pack files are named after their own content, so copying one
+# in cannot overwrite a different one, and no ref, index or working-tree file is
+# touched. The cost is honest and it is the same cost `--refetch` pays: the whole
+# history comes down, and it needs room for it under `runtime/` (removed as soon
+# as it has been read, and swept after 24 h if this run is killed first).
+# Ask the remote for exactly the objects that are missing, and nothing else.
+#
+# This is the route that should almost always be the one that runs, and it exists
+# because the alternative is indefensible on a real vault: the full-history
+# routes below download everything — for a vault of a few gigabytes that is a few
+# gigabytes, over a phone connection, to recover one tree object of a few hundred
+# bytes.
+#
+# The mechanism is git's own partial-clone plumbing. A repository that names a
+# remote as a *promisor* is allowed to be missing objects: when something asks
+# for one, git fetches that object from the promisor on the spot. Marking origin
+# as one turns "this object is gone" into "this object has not been fetched yet",
+# and then simply asking for it is the whole recovery.
+#
+# Measured on git 2.34 against a genuinely missing tree, with a remote that did
+# not even support filtering: 52 KB transferred against a 3.7 MB history, and the
+# repository whole afterwards. The proportion is what matters — it fetches the
+# missing objects, not the history.
+#
+# The marking is undone afterwards, always. A repository left marked as a partial
+# clone treats every missing object as "not fetched yet", which is exactly the
+# assumption that would make the verdict below dishonest again. A repository that
+# was ALREADY a partial clone is left alone: its configuration is the user's.
+RECOVER_ERR=""
+recover_missing_objects() { # $1 = fsck findings naming the missing objects
+  RECOVER_ERR=""
+  local shas
+  shas="$(printf '%s\n' "$1" | grep -oE '[0-9a-f]{40}' | sort -u)"
+  if [ -z "$shas" ]; then
+    RECOVER_ERR="git did not name the missing objects."
+    return 1
+  fi
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    RECOVER_ERR="This repository has no 'origin' remote, so nothing can be fetched back."
+    return 1
+  fi
+
+  local already fmt
+  already="$(git config --get extensions.partialclone 2>/dev/null || true)"
+  fmt="$(git config --get core.repositoryformatversion 2>/dev/null || echo 0)"
+  # Packs that arrived this way are marked `.promisor`, and a marker left behind
+  # after the extension is removed would let a later fsck treat objects in that
+  # pack as "not fetched yet" — masking a real fault. Remember which existed
+  # before, so only the ones this created are cleaned up.
+  local before_markers
+  before_markers="$(ls "$(git rev-parse --git-path objects/pack)"/*.promisor 2>/dev/null | sort || true)"
+
+  if [ -z "$already" ]; then
+    git config core.repositoryformatversion 1
+    git config extensions.partialclone origin
+    git config remote.origin.promisor true
+    # `blob:none` describes what this repository would lazily fetch if it were a
+    # real partial clone. A remote that does not support filtering ignores it and
+    # sends what was asked for anyway, which is the case that was measured.
+    git config remote.origin.partialclonefilter blob:none
+  fi
+
+  local sha n=0 total
+  total="$(printf '%s\n' "$shas" | grep -c .)"
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    n=$((n + 1))
+    progress_note "repair: asking origin for object $n of $total ($sha)"
+    # `-t`, not `-e`: existence can be answered without a fetch, and it is the
+    # asking that does the work here.
+    git cat-file -t "$sha" >/dev/null 2>&1 || true
+  done <<EOF
+$shas
+EOF
+
+  if [ -z "$already" ]; then
+    git config --unset extensions.partialclone 2>/dev/null || true
+    git config --unset remote.origin.promisor 2>/dev/null || true
+    git config --unset remote.origin.partialclonefilter 2>/dev/null || true
+    git config core.repositoryformatversion "$fmt" 2>/dev/null || true
+    local m
+    while IFS= read -r m; do
+      [ -n "$m" ] || continue
+      printf '%s\n' "$before_markers" | grep -qxF -- "$m" || rm -f "$m"
+    done < <(ls "$(git rev-parse --git-path objects/pack)"/*.promisor 2>/dev/null || true)
+  fi
+  return 0
+}
+
+MIRROR_ERR=""
+repair_from_mirror() {
+  MIRROR_ERR=""
+  local url tmp dest
+  if ! url="$(git remote get-url origin 2>/dev/null)"; then
+    MIRROR_ERR="This repository has no 'origin' remote."
+    return 1
+  fi
+  tmp="$NGB_RUNTIME_DIR/clone-tmp/repair-mirror.git"
+  rm -rf "$tmp"
+  if ! mkdir -p "$(dirname "$tmp")" 2>/dev/null; then
+    MIRROR_ERR="Could not create a working directory for the recovery copy."
+    return 1
+  fi
+
+  # An empty repository first, then a fetch into it — rather than `git clone`.
+  #
+  # `git clone` was the first version and it failed on the device with
+  # "could not read Username for 'https://github.com': terminal prompts
+  # disabled". Authentication here is configured PER REPOSITORY (the installer
+  # writes `credential.helper store --file=…/creds/<profile>` into the vault's
+  # own config, so two vaults cannot use each other's account), and a brand-new
+  # clone has no config yet — so it had no way to authenticate and, since the
+  # runner never allows a prompt, no way to ask.
+  if ! git init -q --bare "$tmp" 2>/dev/null; then
+    MIRROR_ERR="Could not create the recovery copy."
+    rm -rf "$tmp"
+    return 1
+  fi
+  # `safe.directory`, explicitly: the copy sits on shared storage, where the
+  # FUSE layer can report an owner that is not Termux's uid, and git then
+  # refuses the repository as "dubious ownership". The vault repository is
+  # covered by the safe.directory entry the installer had the user add; this
+  # freshly created path is not, and the 13:41 bundle of the 0.6.5 session
+  # shows the recovery failing on exactly that. Passed per call, not written
+  # to global config: the path is temporary and the exception must not
+  # outlive it.
+  git -c safe.directory="$tmp" -C "$tmp" remote add origin "$url" 2>/dev/null || true
+
+  # The credential configuration is passed on the COMMAND LINE, not written into
+  # the temporary repository's config file. That was the first fix and it was
+  # wrong: this directory lives under `runtime/`, which is inside the vault, on
+  # shared storage — where file modes are not enforced, any app holding the
+  # storage permission can read it, and whatever else syncs the vault folder
+  # would carry it off. Normally the value is a helper name and a path, but a
+  # helper that embeds a token inline is a shape people really use, and writing
+  # that into the vault is precisely what rule 11 forbids.
+  #
+  # On the command line it lives in this process's argv, which on Android is
+  # readable only by the same uid — Termux itself, which owns the credential file
+  # anyway. Nothing is written, so nothing outlives the fetch.
+  local -a cred=()
+  local k v line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    k="${line%% *}"
+    v="${line#* }"
+    [ "$k" = "$line" ] && continue
+    cred+=(-c "$k=$v")
+  done < <(git config --get-regexp '^credential\.' 2>/dev/null || true)
+
+  progress_note "repair: downloading a fresh copy of the history to recover objects from"
+  local saved="$NGB_NET_TIMEOUT"
+  # Clone-sized, and defaulted here rather than read from the global alone: this
+  # function is defined above where that global is assigned, and a repair should
+  # not inherit a 120 s budget because of where a line sits in this file.
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  local rc=0
+  # The destination repository holds nothing at all, so there is no negotiation
+  # to go wrong: everything reachable from the remote's branches comes down. That
+  # is the whole reason this route works on a git with no `--refetch`.
+  run_git_net -c safe.directory="$tmp" ${cred[@]+"${cred[@]}"} -C "$tmp" fetch origin '+refs/heads/*:refs/heads/*' || rc=1
+  NGB_NET_TIMEOUT="$saved"
+  if [ "$rc" != 0 ]; then
+    MIRROR_ERR="$GIT_ERR"
+    rm -rf "$tmp"
+    return 1
+  fi
+  dest="$(git rev-parse --git-path objects/pack)"
+  mkdir -p "$dest" 2>/dev/null || true
+  progress_note "repair: adding the recovered objects to this repository"
+  # `-n`: never clobber. Same name means same content, so a collision is a file
+  # we already have.
+  cp -n "$tmp"/objects/pack/*.pack "$dest"/ 2>/dev/null || true
+  cp -n "$tmp"/objects/pack/*.idx "$dest"/ 2>/dev/null || true
+  # A clone packs everything, so loose objects are not expected — copied anyway
+  # rather than assumed away, on the same no-clobber terms.
+  local d
+  for d in "$tmp"/objects/??; do
+    [ -d "$d" ] || continue
+    mkdir -p "$(git rev-parse --git-path objects)/$(basename "$d")" 2>/dev/null || true
+    cp -n "$d"/* "$(git rev-parse --git-path objects)/$(basename "$d")"/ 2>/dev/null || true
+  done
+  rm -rf "$tmp"
+  return 0
+}
+
+# ---- the repair, as four short actions ----------------------------------------
+#
+# One 4–13 minute action became four short ones. Android kills Termux mid-run,
+# and one long request loses the whole repair where a short one loses one step;
+# the runner's retry-exactly-once already covers an interrupted step. The
+# DECISIONS between the steps — fetch or not, refetch or not, what the verdict
+# is — moved to the plugin, where they are pure functions with unit tests. All
+# three defects the one-piece repair shipped were in the bash half of exactly
+# those decisions, and a fourth was found in its verdict: missing objects that
+# survive a refetch can belong to LOCAL, unpushed commits, where "clone the
+# vault again" throws those commits away and the honest exit is
+# `repair-reset-upstream` below.
+#
+# Every step that changes the object store re-runs the fsck itself and reports
+# fresh findings, so the plugin never spends a round trip (a companion trigger
+# plus a runner start) just to learn whether the step worked. A step therefore
+# answers ok=true even when objects are still missing: the findings are the
+# answer, and the verdict is the plugin's to draw — the same split
+# `verify-sparse-safety` has always had.
+
+# The fsck report every repair step ends with, merged over fresh status fields.
+repair_verify() {
+  progress_note "repair: verifying the object store"
+  local fsck_out still_missing
+  fsck_out="$(fsck_findings)"
+  still_missing="$(missing_from_findings "$fsck_out")"
+  log "REPAIR verify missing=$([ -n "$still_missing" ] && echo yes || echo no) findings=$([ -n "$fsck_out" ] && echo yes || echo no)"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    fsckMissing "$still_missing" \
+    fsckRemaining "$fsck_out")")
+}
+
+action_repair_scan() {
+  local removed=0 emptied=() f
+  progress_note "repair: scanning the object store for empty files"
+  # `-size 0` is the whole safety argument: an empty file cannot be data.
+  while IFS= read -r -d '' f; do
+    emptied+=("${f#*/objects/}")
+    rm -f "$f" && removed=$((removed + 1))
+  done < <(find "$(git rev-parse --git-dir)/objects" -type f -size 0 -print0 2>/dev/null || true)
+  log "REPAIR scan removed $removed empty object file(s)"
+
+  # Context the plugin's verdict needs and cannot cheaply learn on its own:
+  # whether the damage sits inside local-only state. Missing objects that
+  # survive a full refetch while the branch is ahead, or that the index's
+  # cache-tree names, were never on the remote — they belong to unpushed
+  # commits or to the index, and the exit is `repair-reset-upstream`, not a
+  # fresh clone.
+  progress_note "repair: checking what the object store is missing"
+  local ahead=0 has_up=false ct_broken=false
+  if git rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+    has_up=true
+    ahead="$(git rev-list --count '@{upstream}..HEAD' 2>/dev/null || echo 0)"
+  fi
+  repair_verify
+  printf '%s' "$(printf '%s' "$DATA" | jq -r '.fsckRemaining // ""')" | grep -q 'cache-tree' && ct_broken=true
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    removedObjects "$(printf '%s\n' "${emptied[@]:-}")" \
+    removedCount "$removed" \
+    aheadCount "$ahead" \
+    hasUpstream "$has_up" \
+    cacheTreeBroken "$ct_broken")")
+}
+
+action_repair_fetch_missing() {
+  local req_file="$1"
+  local oids oid n
+  oids="$(jq -r '.args.oids[]? // empty' "$req_file")"
+  if [ -z "$oids" ]; then
+    ERROR=$(err_json "BAD_REQUEST" "No object ids to fetch." "" ""); return 1
+  fi
+  n="$(printf '%s\n' "$oids" | grep -c .)"
+  if [ "$n" -gt 64 ]; then
+    ERROR=$(err_json "BAD_REQUEST" "Too many object ids in one request (max 64)." "" ""); return 1
+  fi
+  while IFS= read -r oid; do
+    [ -z "$oid" ] && continue
+    if ! printf '%s' "$oid" | grep -Eq '^[0-9a-f]{40}$'; then
+      ERROR=$(err_json "BAD_REQUEST" "Invalid object id in request." "" ""); return 1
+    fi
+  done <<EOF
+$oids
+EOF
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    ERROR=$(err_json "GIT_FAILED" "This repository has no 'origin' remote, so nothing can be fetched back." "" ""); return 1
+  fi
+  # Targeted, and by a wide margin the cheaper route: it asks for the missing
+  # objects themselves. Measured: 52 KB against a 3.7 MB history.
+  if ! recover_missing_objects "$oids"; then
+    ERROR=$(err_json "GIT_FAILED" "The targeted fetch could not run: $RECOVER_ERR" "" ""); return 1
+  fi
+  repair_verify
+  DATA=$(merge_data "$DATA" "$(obj_from_fields recoveredBy "targeted")")
+}
+
+action_repair_refetch() {
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    ERROR=$(err_json "GIT_FAILED" "This repository has no 'origin' remote, so nothing can be fetched back." "" ""); return 1
+  fi
+  # `--refetch` says "want everything, claim nothing" and arrived in git 2.41; a
+  # plain fetch was measured against this breakage and transfers nothing at all
+  # while reporting success, so the fallback is the recovery copy, never a plain
+  # fetch.
+  local how="" saved="$NGB_NET_TIMEOUT"
+  progress_note "repair: refetching the whole history"
+  # Clone-sized budget, deliberately: this step downloads the whole history,
+  # and the one-piece repair ran it under the ordinary 120 s network cap — on a
+  # vault of real size that is a timeout wearing a repair's name.
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  if run_git_net fetch --refetch --prune origin; then
+    how="refetch"
+  elif repair_from_mirror; then
+    how="recovery copy"
+  fi
+  NGB_NET_TIMEOUT="$saved"
+  if [ -z "$how" ]; then
+    repair_verify
+    ERROR=$(err_json "GIT_FAILED" "The history could not be downloaded again: ${MIRROR_ERR:-the fetch failed}" "" "$GIT_ERR")
+    return 1
+  fi
+  log "REPAIR refetch how=$how"
+  repair_verify
+  DATA=$(merge_data "$DATA" "$(obj_from_fields recoveredBy "$how")")
+}
+
+action_repair_reset_upstream() {
+  # The exit for damage inside local-only state: rebuild the branch on the
+  # remote's, keeping every file on disk. `reset --mixed` moves the branch and
+  # rebuilds the index from the upstream tree and never touches the working
+  # tree, so the content of the abandoned commits survives as ordinary
+  # uncommitted changes and the next sync commits it once. The index rebuild is
+  # also what cures a broken cache-tree. The commit HISTORY collapses, which is
+  # why the plugin puts a confirmation in front of this and nothing else does.
+  if merge_in_progress; then
+    ERROR=$(err_json "CONFLICT" "A merge is in progress. Resolve or abort it first." "" ""); return 1
+  fi
+  if rebase_in_progress; then
+    ERROR=$(err_json "CONFLICT" "A rebase is in progress. Finish or abort it in Termux first." "" ""); return 1
+  fi
+  local branch
+  branch="$(git symbolic-ref --short -q HEAD || true)"
+  if [ -z "$branch" ]; then
+    ERROR=$(err_json "GIT_FAILED" "Detached HEAD; there is no branch to rebuild." "" ""); return 1
+  fi
+  if ! git rev-parse --verify --quiet '@{upstream}' >/dev/null 2>&1; then
+    ERROR=$(err_json "GIT_FAILED" "This branch has no upstream, so there is no remote state to rebuild on." "" ""); return 1
+  fi
+  local old_head new_head backup
+  old_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  # A branch, not a hidden ref: the abandoned commits stay reachable and
+  # VISIBLE, deletable with ordinary tools once the user has checked nothing is
+  # lost. Unreachable is how a mistake becomes permanent.
+  backup="ngb-rescue-$(date -u +%Y%m%dT%H%M%SZ)"
+  if ! git update-ref "refs/heads/$backup" HEAD; then
+    ERROR=$(err_json "GIT_FAILED" "Could not write the backup branch; nothing was changed." "" ""); return 1
+  fi
+  progress_note "repair: rebuilding $branch on the remote state"
+  if ! run_git reset --mixed '@{upstream}'; then
+    git update-ref -d "refs/heads/$backup" 2>/dev/null || true
+    ERROR=$(err_json "GIT_FAILED" "git reset failed; the branch was not moved." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  # The reset cleared every skip-worktree bit; put the sparse state back before
+  # anything reads status, or 3900 hidden files present as deletions.
+  reapply_sparse_if_enabled "after the reset" || return 1
+  new_head="$(git rev-parse HEAD 2>/dev/null || true)"
+  log "REPAIR reset-upstream branch=$branch old=$old_head new=$new_head backup=$backup"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    backupRef "$backup" \
+    oldHead "$old_head" \
+    newHead "$new_head")")
+}
+
+# Delete the backup branch a `repair-reset-upstream` left behind — and ONLY
+# that. The name pattern is the allow-list: a branch this runner did not create
+# under that exact shape cannot be named, so this cannot serve as a general
+# branch-delete. Exists because the user must never be sent to Termux for
+# anything but installing the runner and entering credentials, and the old
+# success window did exactly that.
+action_repair_drop_backup() {
+  local req_file="$1" ref cur
+  ref=$(jq -r '.args.ref // empty' "$req_file")
+  if ! printf '%s' "$ref" | grep -Eq '^ngb-rescue-[0-9TZ]{6,32}$'; then
+    ERROR=$(err_json "BAD_REQUEST" "Not a repair backup branch." "" ""); return 1
+  fi
+  cur="$(git symbolic-ref --short -q HEAD || true)"
+  if [ "$cur" = "$ref" ]; then
+    ERROR=$(err_json "GIT_FAILED" "The backup branch is checked out; switch away from it first." "" ""); return 1
+  fi
+  if ! git rev-parse --verify --quiet "refs/heads/$ref" >/dev/null 2>&1; then
+    ERROR=$(err_json "GIT_FAILED" "There is no backup branch by that name; it may already be deleted." "" ""); return 1
+  fi
+  if ! run_git branch -D "$ref"; then
+    ERROR=$(err_json "GIT_FAILED" "Could not delete the backup branch." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  log "REPAIR dropped backup $ref"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields droppedRef "$ref")")
 }
 
 action_abort_merge() {
@@ -1329,7 +2083,7 @@ action_unstage_protected() {
   fi
   # Every path is checked BEFORE anything is removed, so a request that is
   # partly illegal changes nothing at all.
-  local accepted=()
+  local accepted=() unmerged=()
   for path in "${paths[@]}"; do
     valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
     ok_path=false
@@ -1346,7 +2100,18 @@ action_unstage_protected() {
     # in both cases `update-index --force-remove` then removes nothing while
     # the result claims a removal. Matching the printed path against the
     # requested one closes both.
-    if ! git ls-files --cached -- "$path" 2>/dev/null | grep -qxF -- "$path"; then
+    # `-z`, and it is the whole fix. `ls-files` QUOTES any path with a space or
+    # a byte outside ASCII and escapes it in octal, so a note called
+    # `Native Git Bridge — spec.md` came back as
+    # `"Native Git Bridge \342\200\224 spec.md"` while `$path` holds the real
+    # bytes the plugin unquoted for us. The comparison never matched, this took
+    # the "already gone from the index" branch below, and the action answered
+    # ok=true having removed nothing — so the user pressed sync, repaired,
+    # pressed sync, repaired, forever, over a vault full of em dashes.
+    #
+    # `-z` never quotes. `core.quotePath=false` is not enough on its own: git
+    # still quotes for a space.
+    if ! git ls-files --cached -z -- "$path" 2>/dev/null | tr '\0' '\n' | grep -qxF -- "$path"; then
       # Already gone from the index (or never an entry in the first place):
       # nothing to do and nothing to report as an error, so the repair stays
       # idempotent when it is re-run.
@@ -1357,6 +2122,22 @@ action_unstage_protected() {
     # would pass on the strength of a coincidence. `cat-file -e HEAD:<path>`
     # takes a literal path, resolves nested files, and fails cleanly on an
     # unborn HEAD (correctly meaning "not in HEAD").
+    # UNMERGED is its own case, and leaving it out is what made a loop with no
+    # exit. A conflicted file under a protected path cannot be resolved (this
+    # runner refuses to resolve inside a protected path, deliberately), cannot
+    # be force-removed (it IS in HEAD, so that would stage a deletion of
+    # committed content), and blocks the merge commit — while the sparse gate
+    # blocks the sync because the path shows as a change. Sync, repair, sync,
+    # repair, forever.
+    #
+    # `git reset -- <path>` is the exit: it restores the entry from HEAD and
+    # drops the three unmerged stages. Nothing on disk is touched and nothing
+    # committed is lost — HEAD's version is precisely what a sparse-hidden path
+    # should have, because this device never edits those files.
+    if [ -n "$(git ls-files -u -- "$path" 2>/dev/null)" ]; then
+      unmerged+=("$path")
+      continue
+    fi
     if git cat-file -e "HEAD:$path" 2>/dev/null; then
       ERROR=$(err_json SAFETY_BLOCKED "$path is tracked in HEAD. Removing it from the index here would stage a deletion of committed content; resolve that one in Termux." "" "")
       return 1
@@ -1374,9 +2155,19 @@ action_unstage_protected() {
       ERROR=$(err_json GIT_FAILED "git update-index --force-remove failed." "$GIT_OUT" "$GIT_ERR"); return 1
     fi
   fi
+  if [ "${#unmerged[@]}" -gt 0 ]; then
+    # After the removals, so a request carrying both kinds does each with the
+    # call that fits it.
+    if ! run_git reset -q -- "${unmerged[@]}"; then
+      ERROR=$(err_json GIT_FAILED "git reset (restore the committed version of a conflicted protected path) failed." "$GIT_OUT" "$GIT_ERR"); return 1
+    fi
+  fi
   collect_status_fields
   local list; list=$(printf '%s\n' ${accepted[@]+"${accepted[@]}"})
-  DATA=$(merge_data "$DATA" "$(obj_from_fields unstagedProtected "$list" unstagedProtectedCount "${#accepted[@]}")")
+  local ulist; ulist=$(printf '%s\n' ${unmerged[@]+"${unmerged[@]}"})
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    unstagedProtected "$list" unstagedProtectedCount "${#accepted[@]}" \
+    resolvedProtected "$ulist" resolvedProtectedCount "${#unmerged[@]}")")
 }
 
 # Apply one patch, in one of the three directions the hunk controls need.
@@ -1460,8 +2251,8 @@ action_apply_patch() {
 #
 # refuse_if_protected only rejects a path that IS protected or sits inside a
 # protected directory. A path can also be an ANCESTOR of one: staging the
-# folder row "Private" (or picking "Git: Stage" on a folder) would otherwise
-# run `git add -- Private` and sweep in `Private/AgentsMemory/…`, which is
+# folder row "Notes" (or picking "Git: Stage" on a folder) would otherwise
+# run `git add -- Notes` and sweep in a protected "Notes/Private/…", which is
 # exactly what the sparse gate then blocks at commit time. Per-path actions
 # therefore carry the same `:(exclude)` specs that stage-all already uses.
 PSPECS=()
@@ -1774,6 +2565,7 @@ exclude_from_outer_profiles() {
 #   checkout-index of the deleted paths -> everything the vault does NOT have
 #                   is written out of the index, and only those paths
 materialize_from_ref() { # $1 = ref to take the tree from
+  progress_note "writing the working tree from $1"
   if ! run_git reset -q "$1"; then
     ERROR=$(err_json GIT_FAILED "Linking the working tree to the repository failed." "$GIT_OUT" "$GIT_ERR")
     return 1
@@ -2046,6 +2838,7 @@ action_clone_into_vault() {
   local saved_timeout="$NGB_NET_TIMEOUT"
   NGB_NET_TIMEOUT="$NGB_CLONE_TIMEOUT"
   local ok=0
+  progress_note "clone: downloading the repository (no checkout yet)"
   run_git_net "${cargs[@]}" || ok=1
   NGB_NET_TIMEOUT="$saved_timeout"
   if [ "$ok" != 0 ]; then
@@ -2251,6 +3044,10 @@ process_request() {
 
   DATA='null'; ERROR='null'
   local ok=true ec=0
+  # From here on stderr is streamed where the plugin can watch it. Started after
+  # every rejection above, so a request that never ran leaves no stream to read.
+  progress_begin "$id"
+  progress_note "$action started"
   case "$action" in
     ping)                  action_ping || { ok=false; ec=1; } ;;
     status)                action_status || { ok=false; ec=1; } ;;
@@ -2262,6 +3059,11 @@ process_request() {
     commit)                action_commit "$req_file" || { ok=false; ec=1; } ;;
     push)                  action_push "$req_file" || { ok=false; ec=1; } ;;
     sync)                  action_sync "$req_file" || { ok=false; ec=1; } ;;
+    repair-scan)           action_repair_scan || { ok=false; ec=1; } ;;
+    repair-fetch-missing)  action_repair_fetch_missing "$req_file" || { ok=false; ec=1; } ;;
+    repair-refetch)        action_repair_refetch || { ok=false; ec=1; } ;;
+    repair-reset-upstream) action_repair_reset_upstream || { ok=false; ec=1; } ;;
+    repair-drop-backup)    action_repair_drop_backup "$req_file" || { ok=false; ec=1; } ;;
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
     abort-rebase)          action_abort_rebase || { ok=false; ec=1; } ;;
     continue-rebase)       action_continue_rebase || { ok=false; ec=1; } ;;
@@ -2323,6 +3125,12 @@ process_request() {
     esac
   fi
 
+  # The stream outlives the request on purpose: the plugin's "share the log"
+  # bundle collects it afterwards, which is the whole point of having written
+  # a long fetch's output down. The 24 h sweep below takes it.
+  progress_note "$action finished (ok=$ok)"
+  NGB_PROG_FILE=""
+
   write_result "$id" "$action" "$ok" "$ec" "$DATA" "$ERROR" "$started"
   log "DONE $id action=$action ok=$ok"
   json_cleanup
@@ -2333,6 +3141,9 @@ process_request() {
 
 cleanup_old() {
   find "$DONE_DIR" "$RES_DIR" "$CAN_DIR" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
+  # Progress streams are kept past their request so the log bundle can pick them
+  # up, which means nothing else would ever remove them.
+  [ -n "$PROG_DIR" ] && find "$PROG_DIR" -maxdepth 1 -type f -mmin +1440 -delete 2>/dev/null || true
   # A clone that was killed mid-flight (Android stopping Termux) leaves its
   # working directory behind. Nothing records that a clone finished — the
   # repository being in place IS the record — so a leftover here is by

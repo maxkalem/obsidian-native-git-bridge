@@ -16,10 +16,14 @@ The Termux scripts live in `native-git-bridge/termux/` and are edited there — 
 | `package.json` | `version` | npm scripts / CI consistency check |
 | `versions.json` | new <br>`"x.y.z": "minAppVersion"`<br> entry | Obsidian update mechanism (the build fails if the manifest version is missing here) |
 | `native-git-bridge/termux/native-git-bridge-runner.sh` | `RUNNER_VERSION` | handshake (bump only when the runner changes) |
-| `src/constants.ts` | `RUNNER_MIN_VERSION` | handshake (bump together with `RUNNER_VERSION`) |
+| `src/constants.ts` | `RUNNER_MIN_VERSION` | handshake (bump **only** when the plugin cannot work with the older runner) |
 | `companion/app/build.gradle.kts` | (none) | derived automatically from the root `manifest.json` (`versionName` = release version, `versionCode` = major×10000 + minor×100 + patch); nothing to bump by hand |
 
 The `build-plugin` workflow fails if the first three disagree.
+
+The two handshake numbers move for different reasons, and confusing them is how everyone is forced to reinstall for nothing. `RUNNER_VERSION` goes up whenever the runner script changes at all, because a number is never reused and the developer's own device may already carry that one. `RUNNER_MIN_VERSION` goes up only when the plugin genuinely cannot work with the older runner — a new argument an old runner would reject, or a changed result it cannot read. A runner that only changes how it does something it already did leaves the minimum alone.
+
+A brand new action needs neither: name it in `ACTION_MIN_RUNNER` instead, and the plugin refuses that one action on an older runner with a message naming the version, while everything else keeps working.
 
 ## Cutting a release
 
@@ -51,6 +55,31 @@ Without a keystore, the release carries `git-bridge-companion-DEBUG-SIGNATURE.ap
 Rejected alternative, the Termux approach: Termux signs its GitHub builds with a PUBLIC test key committed to the repository (`testkey_untrusted.jks`), which makes all GitHub builds update-compatible without secrets, at the price that anyone can forge an installable "update" (their README warns about this loudly). For the companion this trade-off is unacceptable: it holds the RUN_COMMAND permission, so a forged update would mean command execution inside the user's Termux. A private keystore costs five minutes and closes this.
 
 Keep the keystore private and back it up: Android updates install only when the new APK is signed with the same key as the installed one. Personal devices that already run the debug APK must uninstall it before switching to the signed one (different signature). This is standard Android behaviour, not a bridge limitation.
+
+## Before tagging: the checks worth running by hand
+
+CI runs all of this too, but a release is the one path where finding out afterwards is expensive.
+
+```
+# the version fields agree
+jq -r .version manifest.json package.json native-git-bridge/manifest.json
+jq -r --arg v "$(jq -r .version manifest.json)" '.[$v]' versions.json   # == minAppVersion
+jq -r '.version, .packages."".version' package-lock.json               # CI does not check this one
+
+# the runner handshake moves as a pair
+grep -m1 '^RUNNER_VERSION=' native-git-bridge/termux/native-git-bridge-runner.sh
+grep -n 'RUNNER_MIN_VERSION' src/constants.ts
+
+# the committed artifacts match a fresh build
+npm run build && git status --porcelain -- main.js styles.css native-git-bridge/
+
+# and the suites
+npm test && npm run test:e2e
+```
+
+One thing no machine checks, and it was wrong once: LF line endings on the three Termux scripts, `file native-git-bridge/termux/*.sh`. A CRLF checkout of those dies on Android with `$'\r': command not found`.
+
+Three things go stale first and none of them is checked by a machine: the runner version table in [protocol.md](protocol.md), the test counts in [submission.md](submission.md), and `package-lock.json`. The lockfile was correct as of 0.6.2, saying 0.6.2 and GPL-3.0-only; it had been wrong on both counts one release earlier.
 
 ## What CI cannot verify
 

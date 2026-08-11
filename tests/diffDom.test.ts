@@ -268,12 +268,62 @@ diff --git a/two.md b/two.md
     expect(__findByClass(ctxRow, "ngb-line-pick")).toBeNull();
   });
 
-  it("puts the checkbox in the gutter, before the numbers", () => {
+  /**
+   * The checkbox goes into the number column that has NO number.
+   *
+   * It used to sit before both numbers, which widened the gutter by its own
+   * width — so turning line-picking on shifted every number and every +/- to
+   * the right and the diff appeared to move under the reader. Exactly the lines
+   * that can be picked are the lines with a gap: an addition has no old number,
+   * a deletion has no new one.
+   */
+  it("puts the checkbox in the empty half of the number column", () => {
     const root = __fakeEl("div", "ngb-diff-view");
     renderUnifiedDiff(root, TWO_HUNKS, { lineCheckbox: () => undefined });
-    const gutter = __findByClass(codeRows(root)[0]!, "d2h-code-linenumber");
-    expect(gutter.children[0].hasClass("ngb-line-pick")).toBe(true);
-    expect(gutter.children[1].hasClass("line-num1")).toBe(true);
+    for (const row of codeRows(root)) {
+      const gutter = __findByClass(row, "d2h-code-linenumber");
+      const box = __findByClass(gutter, "ngb-line-pick");
+      if (box === null) continue;
+      // Whichever number cell holds it must be the empty one.
+      expect(box.parent.textContent).toBe("");
+      expect(box.parent.hasClass("line-num1") || box.parent.hasClass("line-num2")).toBe(true);
+    }
+    // The numbers keep their order and their place whether picking is on or off.
+    const g = __findByClass(codeRows(root)[0]!, "d2h-code-linenumber");
+    expect(g.children[0].hasClass("line-num1")).toBe(true);
+    expect(g.children[1].hasClass("line-num2")).toBe(true);
+  });
+
+  it("offers no checkbox on a context line, which has both numbers", () => {
+    // Nothing to pick there: a context line is not part of any change, and a
+    // box on it would have no gap to sit in either.
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS, { lineCheckbox: () => undefined });
+    for (const row of codeRows(root)) {
+      const gutter = __findByClass(row, "d2h-code-linenumber");
+      const nums = __findAllByClass(gutter, "line-num1").concat(__findAllByClass(gutter, "line-num2"));
+      const bothNumbered = nums.every((n: Any) => n.textContent !== "");
+      if (bothNumbered) expect(__findByClass(gutter, "ngb-line-pick")).toBeNull();
+    }
+  });
+
+  /**
+   * The `@@` row is ONE cell spanning both columns.
+   *
+   * It used to be an empty gutter cell followed by the content, and that empty
+   * cell was the whole reason the sticky hunk bar drifted: it started at the
+   * gutter's width and only reached the pane's left edge after the reader had
+   * scrolled that far. Nothing was ever drawn in it.
+   */
+  it("gives the hunk header one cell across both columns", () => {
+    const root = __fakeEl("div", "ngb-diff-view");
+    renderUnifiedDiff(root, TWO_HUNKS);
+    const header = __findAllByClass(root, "ngb-hunk-start")[0]!;
+    const cells = header.children.filter((c: Any) => c.tagName === "TD");
+    expect(cells).toHaveLength(1);
+    expect(cells[0].getAttribute("colspan")).toBe("2");
+    // And no empty gutter cell left behind on that row.
+    expect(__findByClass(header, "d2h-code-linenumber")).toBeNull();
   });
 
   it("makes them real checkboxes", () => {
@@ -284,12 +334,14 @@ diff --git a/two.md b/two.md
 
   // The wrapped layout gives the gutter a fixed width from this measurement, so
   // a checkbox it does not know about pushes the numbers past the cell border.
-  it("the measured gutter width leaves room for the checkbox", () => {
+  it("measures the same gutter width whether picking is on or off", () => {
+    // This is the assertion the old one inverted. The width used to grow by two
+    // when picking was switched on, and the whole column moved with it.
     const plain = __fakeEl("div", "ngb-diff-view");
     renderUnifiedDiff(plain, TWO_HUNKS);
     const picking = __fakeEl("div", "ngb-diff-view");
     renderUnifiedDiff(picking, TWO_HUNKS, { lineCheckbox: () => undefined });
-    expect(gutterWidthCh(picking)).toBeGreaterThan(gutterWidthCh(plain));
+    expect(gutterWidthCh(picking)).toBe(gutterWidthCh(plain));
   });
 
   it("the picking coordinate is what buildHunkPatch takes", () => {

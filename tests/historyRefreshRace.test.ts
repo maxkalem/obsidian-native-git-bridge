@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { __findAllByClass, __resetObsidianMock } from "./mocks/obsidian";
+import { __findAllByClass, __findByClass, __resetObsidianMock } from "./mocks/obsidian";
 import { HistoryView, type HistoryViewActions } from "../src/ui/HistoryView";
 import type { RepoLogEntry } from "../src/git/historyParsers";
 
@@ -61,15 +61,51 @@ function actions(over: Partial<HistoryViewActions> = {}): HistoryViewActions {
     openDiffAtCommit: () => undefined,
     openFile: () => undefined,
     progressText: () => "",
+    progressDetail: () => "",
     treeView: () => false,
     toggleTree: () => undefined,
     openStatusPanel: () => undefined,
+    openOutput: () => undefined,
+    rowsPerGroup: () => 30,
     ...over,
   };
 }
 
 /** Lets the awaited continuations after a resolve() actually run. */
 const settle = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
+describe("history panel, the plugin's progress tick", () => {
+  beforeEach(() => __resetObsidianMock());
+
+  it("shows the same state line as the git panel and the runner's words under it", () => {
+    // The state text is one and the same everywhere; the panel reads it back
+    // each tick, because without the tick its copy froze at whatever second
+    // the panel last drew itself.
+    let state = "";
+    let detail = "";
+    const view = new HistoryView(
+      leaf,
+      actions({ progressText: () => state, progressDetail: () => detail })
+    ) as Any;
+    view.renderShell();
+    const detailEl = __findByClass(view.contentEl, "ngb-sv-progress-detail");
+    expect(detailEl).not.toBeNull();
+    expect(detailEl.textContent).toBe("");
+    state = "sync… 7s";
+    detail = "sync: fetching from origin";
+    view.updatePluginProgress();
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-text").textContent).toBe("sync… 7s");
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-detail").textContent).toBe(
+      "sync: fetching from origin"
+    );
+    // Idle: the state line says so and the detail empties, but the line stays.
+    state = "";
+    detail = "";
+    view.updatePluginProgress();
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-text").textContent).toBe("Idle");
+    expect(__findByClass(view.contentEl, "ngb-sv-progress-detail").textContent).toBe("");
+  });
+});
 
 describe("history panel, refresh while a page is in flight", () => {
   beforeEach(() => __resetObsidianMock());
