@@ -36,6 +36,7 @@ var import_obsidian16 = require("obsidian");
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
 var RUNNER_MIN_VERSION = 12;
+var RUNNER_SHIPPED_VERSION = 14;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -57,7 +58,21 @@ var ACTION_TIMEOUT_SECONDS = {
   "repair-scan": 600,
   "repair-fetch-missing": 900,
   "repair-refetch": 900,
-  "repair-reset-upstream": 300
+  "repair-reset-upstream": 300,
+  // Storage maintenance. The repack rewrites every reachable object into one
+  // pack, which on a multi-gigabyte object database is tens of minutes of CPU
+  // on a phone — the longest budget in the file, and honestly so. Prune is
+  // I/O-bound and cheap next to it; the scan is one count-objects.
+  "maintenance-scan": 300,
+  "maintenance-prune": 600,
+  "maintenance-repack": 3600,
+  // Footprint changes. Shallowing transfers almost nothing (the history is
+  // already here); unshallow and partial-disable download history or content
+  // wholesale; partial-enable may shed and prefetch, both long on a real vault.
+  "repo-shallow": 900,
+  "repo-unshallow": 1800,
+  "repo-partial-enable": 1800,
+  "repo-partial-disable": 1800
 };
 var NETWORK_ACTIONS = /* @__PURE__ */ new Set(["fetch", "pull", "push", "sync"]);
 var MIN_NETWORK_TIMEOUT_SECONDS = 120;
@@ -120,7 +135,15 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repair-fetch-missing", 13],
   ["repair-refetch", 13],
   ["repair-reset-upstream", 13],
-  ["repair-drop-backup", 13]
+  ["repair-drop-backup", 13],
+  ["untrack-file", 14],
+  ["maintenance-scan", 14],
+  ["maintenance-prune", 14],
+  ["maintenance-repack", 14],
+  ["repo-shallow", 14],
+  ["repo-unshallow", 14],
+  ["repo-partial-enable", 14],
+  ["repo-partial-disable", 14]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -150,7 +173,14 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "abort-rebase",
   "continue-rebase",
   "unstage-protected",
-  "apply-patch"
+  "apply-patch",
+  "untrack-file",
+  "maintenance-prune",
+  "maintenance-repack",
+  "repo-shallow",
+  "repo-unshallow",
+  "repo-partial-enable",
+  "repo-partial-disable"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -189,7 +219,9 @@ var DEFAULT_DEVICE_SETTINGS = {
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
-  previousRepoDismissed: []
+  previousRepoDismissed: [],
+  shallowDepth: 100,
+  partialOfferShown: false
 };
 var DeviceLocalSettingsStore = class {
   constructor(backend, scopeId) {
@@ -1192,7 +1224,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     badge(`Plugin ${this.plugin.manifest.version}`, "plugin");
     const rv = this.plugin.lastRunnerVersion;
     badge(
-      rv === 0 ? `Runner: unknown` : rv === RUNNER_MIN_VERSION ? `Runner v${rv}` : `Runner v${rv} (needs v${RUNNER_MIN_VERSION})`,
+      rv === 0 ? `Runner: unknown` : rv < RUNNER_MIN_VERSION ? `Runner v${rv} (needs v${RUNNER_MIN_VERSION})` : `Runner v${rv}`,
       "runner"
     );
     badge(
@@ -1479,6 +1511,44 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
           if (!Number.isFinite(n) || n < 0) return;
           await this.plugin.updateDeviceSettings({ statusRefreshSeconds: n });
           this.plugin.restartStatusPoll();
+        })();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Repository footprint (this device)").setHeading();
+    const fp = this.plugin.footprintState();
+    const fpNote = !this.plugin.footprintAvailable() ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once." : fp === null ? "Run Status once so these toggles can show the repository's actual state." : "";
+    if (fpNote !== "") {
+      containerEl.createEl("p", { text: fpNote, cls: "setting-item-description" });
+    }
+    new import_obsidian3.Setting(containerEl).setName("Shallow history").setDesc(
+      "Keep only the newest commits on this device; the remote and your other devices keep everything. The history panels here reach only what stays, and enabling this also clears this device's reflog \u2014 without that the old commits stay pinned and nothing is freed. Turning it off downloads the full history back. Space returns after Clean up repository storage."
+    ).addToggle((t) => {
+      t.setValue(fp?.shallow ?? false).setDisabled(fp === null || !this.plugin.footprintAvailable()).onChange((v) => {
+        void (async () => {
+          if (v) await this.plugin.cmdShallowEnable();
+          else await this.plugin.cmdUnshallow();
+          this.refreshTab();
+        })();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Shallow depth").setDesc("How many newest commits stay when shallow history is enabled. Takes effect on the next enable.").addText((t) => {
+      t.inputEl.inputMode = "numeric";
+      t.setPlaceholder("100").setValue(String(s.shallowDepth)).onChange((v) => {
+        void (async () => {
+          const n = parseInt(v, 10);
+          if (!Number.isFinite(n) || n < 1 || n > 1e5) return;
+          await this.plugin.updateDeviceSettings({ shallowDepth: n });
+        })();
+      });
+    });
+    new import_obsidian3.Setting(containerEl).setName("Partial clone (blob:none)").setDesc(
+      "Fetch file content on demand instead of holding all of it. With sparse checkout the hidden files' content is never downloaded at all \u2014 but 'Show again' and old file versions then need the network. Turning it off downloads everything back first. Run Clean up repository storage after enabling to shed content that is already downloaded."
+    ).addToggle((t) => {
+      t.setValue(fp?.partial ?? false).setDisabled(fp === null || !this.plugin.footprintAvailable()).onChange((v) => {
+        void (async () => {
+          if (v) await this.plugin.cmdPartialEnable();
+          else await this.plugin.cmdPartialDisable();
+          this.refreshTab();
         })();
       });
     });
@@ -3536,6 +3606,9 @@ function buildMenuEntries(scope, f) {
       out.push({ action: "exclude-add", title: `Git: Add to .git exclude${where}${n}`, icon: "eye-off" });
     }
   }
+  if (f.untrack && single2 && (scope.group === "staged" || scope.group === "unstaged")) {
+    out.push({ action: "untrack", title: "Git: Stop tracking (keep the file)", icon: "eye-off", danger: true });
+  }
   return out;
 }
 
@@ -3739,6 +3812,69 @@ function parseIgnoreEntries(raw) {
 function ignoreEntryMatches(entries, path) {
   const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
   return entries.some((e) => variants.includes(e));
+}
+function trackedPathsAmong(status, paths) {
+  const tracked = /* @__PURE__ */ new Set();
+  for (const e of [...status.staged, ...status.unstaged, ...status.conflicted]) {
+    tracked.add(e.path);
+    if (e.origPath !== void 0) tracked.add(e.origPath);
+  }
+  return paths.filter((p) => tracked.has(p));
+}
+
+// src/git/objectStats.ts
+var FIELD_KEYS = {
+  count: "looseCount",
+  size: "looseKb",
+  "in-pack": "inPackCount",
+  packs: "packCount",
+  "size-pack": "packKb",
+  garbage: "garbageCount",
+  "size-garbage": "garbageKb"
+};
+function parseCountObjects(raw) {
+  const stats = {
+    looseCount: 0,
+    looseKb: 0,
+    inPackCount: 0,
+    packCount: 0,
+    packKb: 0,
+    garbageCount: 0,
+    garbageKb: 0
+  };
+  for (const line of raw.split("\n")) {
+    const m = /^([a-z-]+):\s*(\d+)\s*$/.exec(line.trim());
+    if (!m) continue;
+    const key = FIELD_KEYS[m[1]];
+    if (key !== void 0) stats[key] = parseInt(m[2], 10);
+  }
+  return stats;
+}
+function totalKb(s) {
+  return s.looseKb + s.packKb + s.garbageKb;
+}
+function maintenanceReportLines(s, rescueBranches) {
+  const lines = [
+    `Object database: ${formatSize(totalKb(s))} (${s.packCount} pack${s.packCount === 1 ? "" : "s"} ${formatSize(
+      s.packKb
+    )}, loose objects ${formatSize(s.looseKb)}).`,
+    `Leftover temporary files: ${s.garbageCount === 0 ? "none" : `${s.garbageCount}, ${formatSize(s.garbageKb)}`}.`,
+    "Cleanup removes stale temporary files and unreachable loose objects older than two weeks, then repacks everything reachable into one pack. Nothing any branch, tag, reflog or the index can reach is touched.",
+    "The repack is the long step and needs free space roughly the size of the repacked history while it runs."
+  ];
+  if (rescueBranches.length > 0) {
+    lines.push(
+      `Rescue branch${rescueBranches.length === 1 ? "" : "es"} ${rescueBranches.join(
+        ", "
+      )} still keeps its objects reachable, so the space it holds is not freed until the backup is deleted.`
+    );
+  }
+  return lines;
+}
+function maintenanceVerdict(before, after) {
+  const freedKb = totalKb(before) - totalKb(after);
+  if (freedKb <= 0) return `Nothing to free: the object database stays at ${formatSize(totalKb(after))}.`;
+  return `Freed ${formatSize(freedKb)}: ${formatSize(totalKb(before))} down to ${formatSize(totalKb(after))} (${after.packCount} pack${after.packCount === 1 ? "" : "s"} now).`;
 }
 
 // src/ui/HistoryView.ts
@@ -5841,6 +5977,7 @@ var RunnerOutputView = class extends import_obsidian15.ItemView {
     this.factsEl = null;
     this.cancelBtn = null;
     this.refreshBtn = null;
+    this.wrapBtn = null;
     // Named to collide with NOTHING on the base classes: a field here was once
     // called `open`, it shadowed an untyped runtime member of Obsidian's view
     // chain, and the panel rendered black — constructor run, `onOpen` never
@@ -5917,9 +6054,21 @@ Retrying every second.`
       b.addEventListener("click", () => this.setTab(tab));
       this.tabBtns.set(tab, b);
     };
+    tabBtn("current", "activity", "Live operation");
     tabBtn("past", "layers", "Earlier operations");
     tabBtn("runner", "scroll", "Termux runner log");
     tabBtn("oplog", "file-clock", "Plugin operation log");
+    bar.createDiv({ cls: "ngb-out-tab-sep" });
+    const wrapBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    wrapBtn.setAttribute("aria-label", "Wrap long lines");
+    (0, import_obsidian15.setIcon)(wrapBtn, "wrap-text");
+    wrapBtn.addEventListener("click", () => {
+      void (async () => {
+        await this.actions.toggleWrapLines();
+        this.applyWrapState();
+      })();
+    });
+    this.wrapBtn = wrapBtn;
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Read the output again now");
     (0, import_obsidian15.setIcon)(refreshBtn, "refresh-cw");
@@ -5950,6 +6099,14 @@ Retrying every second.`
     this.headlineEl?.setText("\u2026");
     this.factsEl = body.createDiv({ cls: "ngb-out-facts" });
     this.applyTabState();
+    this.applyWrapState();
+  }
+  /** The wrap toggle's highlight and the console's class, from the saved pref. */
+  applyWrapState() {
+    const on = this.actions.wrapLines();
+    this.wrapBtn?.toggleClass("ngb-sv-icon-active", on);
+    this.wrapBtn?.setAttribute("aria-pressed", on ? "true" : "false");
+    this.streamBox?.toggleClass("ngb-out-wrap", on);
   }
   /**
    * Back to the live-operation tab. Called by whatever OPENS the panel: the
@@ -5961,7 +6118,11 @@ Retrying every second.`
     this.outTab = "current";
     this.applyTabState();
   }
-  /** Select a tab; the active one tapped again returns to the live operation. */
+  /**
+   * Select a tab. Tapping the active one still returns to the live view (the
+   * pre-Live-button habit keeps working), and the Live tab itself is idempotent
+   * because "current" is what a deselection falls back to anyway.
+   */
   setTab(tab) {
     this.outTab = this.outTab === tab ? "current" : tab;
     this.applyTabState();
@@ -6050,6 +6211,7 @@ var DEFAULT_SHARED_PREFS = {
   showStatusBar: true,
   showRibbonIcon: true,
   wrapDiffLines: false,
+  wrapOutputLines: false,
   showInvisibles: false,
   keepLineSelection: false,
   showChangeWords: true,
@@ -6180,6 +6342,23 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     /** In-memory caches so the file context menu can decide add-vs-remove synchronously. */
     this.gitignoreLines = [];
     this.excludeLines = [];
+    /**
+     * Delete the `ngb-rescue-*` branch a rebuild left behind, after an explicit
+     * confirmation. The old success window said to do this in Termux, which
+     * breaks the rule that the user never touches Termux beyond installing the
+     * runner and entering credentials; the runner action it calls accepts
+     * nothing but the rescue-branch name shape, so it cannot delete anything
+     * else.
+     */
+    /**
+     * A rescue branch that outlived its window. The delete offer used to exist
+     * only in the rebuild's success window, which is shown exactly once —
+     * whoever closed it had no way back. Status now reports the branches, and
+     * this reminds once a day (device-local, like the previous-git reminder)
+     * until they are gone.
+     */
+    /** ngb-rescue branches as of the last status; what the palette command offers. */
+    this.lastRescueBranches = [];
   }
   async onload() {
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
@@ -6330,7 +6509,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         snapshot: (want) => this.outputSnapshot(want),
         cancel: () => void this.cmdCancel(),
         openStatusPanel: () => void this.openStatusPanel(),
-        openHistoryPanel: () => void this.openHistoryPanel()
+        openHistoryPanel: () => void this.openHistoryPanel(),
+        wrapLines: () => this.sharedPrefs.wrapOutputLines,
+        toggleWrapLines: () => this.setSharedPref({ wrapOutputLines: !this.sharedPrefs.wrapOutputLines })
       })
     );
     this.registerView(
@@ -6412,7 +6593,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       menuExclude: this.deviceSettings.menuExclude,
       ignored: single2 && this.isGitignored(path),
       sparseExcluded: single2 && this.isSparseExcluded(path),
-      excluded: single2 && this.isExcluded(path)
+      excluded: single2 && this.isExcluded(path),
+      // The entry is only honest when the runner can serve it; 0 (never heard
+      // from a runner) also stays silent rather than offering a refusal.
+      untrack: this.lastRunnerVersion >= 14
     });
     const head = this.sharedPrefs.showMenuHeader ? menuHeader(scope) : null;
     if (head !== null) {
@@ -6495,6 +6679,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         return;
       case "exclude-remove":
         void this.cmdExcludeChange(path, false);
+        return;
+      case "untrack":
+        this.offerUntrack(path);
         return;
     }
   }
@@ -7280,7 +7467,33 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           }).open();
           return;
         }
-        void this.runClone(verdict.url, replaceExisting);
+        this.askCloneKind(verdict.url, replaceExisting);
+      }
+    ).open();
+  }
+  /**
+   * Full or lightweight, decided while it is still cheap: a lightweight clone
+   * downloads a fraction up front, where converting later means enabling the
+   * filter and shedding what a full clone already brought. The ✕ cancels; two
+   * labelled buttons because these are two answers to one question, not an
+   * action and its decline.
+   */
+  askCloneKind(url, replaceExisting) {
+    new ResultModal(
+      this.app,
+      "How much should this device hold?",
+      [
+        "Full clone: the whole history and all file content. Everything works offline.",
+        "Lightweight (partial clone, blob:none): file content is fetched when something needs it, and content that a sparse checkout hides is never downloaded at all. Old file versions and 'Show again' need the network. Best for devices with little space."
+      ],
+      {
+        actions: [
+          { label: "Full clone", cta: true, onClick: () => void this.runClone(url, replaceExisting) },
+          {
+            label: "Lightweight (partial clone)",
+            onClick: () => void this.runClone(url, replaceExisting, "blob:none")
+          }
+        ]
       }
     ).open();
   }
@@ -7344,7 +7557,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     new ResultModal(
       this.app,
-      "Remote saved \u2014 but the two histories are unrelated",
+      "Remote saved; histories are unrelated",
       [
         `Origin is now ${shown}, and it already contains: ${remoteBranches.join(", ")}.`,
         "This vault also has commits of its own, made here. Git treats the two as unrelated histories: pull will refuse to merge them, and push will be rejected. Nothing is broken \u2014 but they cannot simply be joined.",
@@ -7374,9 +7587,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     new ResultModal(this.app, "Repository content taken over", lines.filter((l) => l !== "")).open();
   }
-  async runClone(url, replaceExisting = false) {
+  async runClone(url, replaceExisting = false, filter) {
     const args = { url };
     if (replaceExisting) args.replaceExisting = true;
+    if (filter !== void 0) args.filter = filter;
     const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
@@ -7559,7 +7773,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       // refuse for the same reasons the modal would.
       { id: "create-repository", name: "Create a new repository in this vault", cb: () => void this.cmdCreateRepository() },
       { id: "clone-repository", name: "Clone an existing remote into this vault", cb: () => void this.cmdCloneRepository() },
-      { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() }
+      { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() },
+      { id: "maintenance-cleanup", name: "Clean up repository storage (.git/objects)", cb: () => void this.cmdMaintenance() },
+      { id: "drop-rescue-backup", name: "Delete repair backup branch (ngb-rescue)", cb: () => this.cmdRescueCleanup() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
     this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
@@ -7724,6 +7940,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       this.inFlight.delete(req.id);
       if (mutating) this.lock.release(req.id);
       if (this.runningId === req.id) this.adoptNewestInFlight();
+      this.updateProgressInView(this.progressText, this.progressDetail);
       this.refreshStatusBarIdle();
       this.pushStatusToView();
     }
@@ -8248,8 +8465,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       await go();
     }
   }
-  /** Add/remove a line in .git/info/exclude (device-local ignore, via the runner). */
-  async cmdExcludeChange(path, add) {
+  /**
+   * Add/remove a line in .git/info/exclude (device-local ignore, via the runner).
+   *
+   * `standalone = false` is for the bulk route only: it suppresses the
+   * per-path tracked warning and the per-path status refresh, both of which
+   * the bulk confirmation does ONCE after its loop.
+   */
+  async cmdExcludeChange(path, add, standalone = true) {
     const result = await this.runOperation(add ? "exclude-add" : "exclude-remove", { path });
     if (!result) return;
     if (!result.ok) {
@@ -8262,6 +8485,258 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     this.absorbExcludeList(result.data?.excludeList);
     new import_obsidian16.Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
+    if (standalone && add) this.warnIfRuleTargetsTracked([path]);
+    if (standalone) await this.refreshAfterRuleChange(result.data);
+  }
+  /**
+   * Bring the panel in step after an ignore-rule change (.gitignore, sparse,
+   * .git/info/exclude). A result that carried fresh status fields is absorbed
+   * for free; one that did not (exclude-add/remove return only the exclude
+   * list, and .gitignore is written by the plugin itself) costs one status
+   * round trip. That cost is deliberate: every route that changes a rule must
+   * leave the panel agreeing with git, or the rule looks like it did nothing.
+   */
+  async refreshAfterRuleChange(data) {
+    if (data?.branchInfo) {
+      this.absorbStatusData(data);
+      return;
+    }
+    await this.cmdStatus(true);
+  }
+  /**
+   * Say when an ignore rule cannot do what it looks like it does. Rules in
+   * .gitignore and .git/info/exclude affect UNTRACKED files only; on a tracked
+   * path the file keeps appearing in the panel and in every commit until it is
+   * untracked, and without this notice the refresh after the rule reads as a
+   * refresh that failed. Untracking from the plugin needs a runner action and
+   * is scheduled with the next runner version, so the notice states the fact
+   * and promises nothing.
+   */
+  warnIfRuleTargetsTracked(paths) {
+    const st = this.lastStatus?.status;
+    if (!st) return;
+    const tracked = trackedPathsAmong(st, paths);
+    if (tracked.length === 0) return;
+    const subject = tracked.length === 1 ? `'${tracked[0]}' is tracked by git` : `${tracked.length} of these paths are tracked by git`;
+    const explanation = `${subject}: ignore rules only affect untracked files, so the changes will keep appearing until the file is untracked.`;
+    if (tracked.length === 1 && this.lastRunnerVersion >= 14) {
+      this.offerUntrack(tracked[0], explanation);
+      return;
+    }
+    new import_obsidian16.Notice(explanation);
+  }
+  /** The untrack confirmation, shared by the notice-upgrade and the menu entry. */
+  offerUntrack(path, lead) {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Stop tracking this file?",
+        body: [
+          ...lead === void 0 ? [] : [lead],
+          `'${path}' stays on disk; a deletion enters the index for you to commit.`,
+          "Once that commit reaches your other devices, their pull deletes their copy \u2014 or reports a conflict if it has local changes. The panel shows and resolves both.",
+          "Without an ignore rule for the path, the next sync or commit stages the file right back."
+        ],
+        confirmLabel: "Stop tracking",
+        icon: "eye-off",
+        danger: true
+      },
+      async (ok) => {
+        if (ok) await this.cmdUntrackFile(path);
+      }
+    ).open();
+  }
+  /** Stop tracking one file, keeping it on disk (`git rm --cached` semantics, runner v14). */
+  async cmdUntrackFile(path) {
+    const result = await this.runOperation("untrack-file", {
+      path,
+      protectedPaths: this.effectiveProtectedPaths()
+    });
+    if (!result) return;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: could not stop tracking the file", result);
+      return;
+    }
+    this.absorbStatusData(result.data ?? {});
+    new import_obsidian16.Notice(`No longer tracked (still on disk): ${path}. Commit the staged deletion to finish.`);
+    if (!this.isGitignored(path) && !this.isExcluded(path)) {
+      new import_obsidian16.Notice(`No ignore rule covers ${path} yet: the next sync or commit will track it again unless one is added.`);
+    }
+  }
+  /**
+   * Clean up `.git/objects`: scan, confirm with the real numbers, prune, then
+   * repack. The object database only ever grows on its own — every repair
+   * refetch ADDS a full pack and an interrupted download leaves a
+   * multi-gigabyte temporary file — and this is the designed exit (a real
+   * device reached 20 GB over a ~4 GB history). The decisions live here; the
+   * runner steps are dumb primitives, the same split the repair uses.
+   */
+  async cmdMaintenance() {
+    const scan = await this.runOperation("maintenance-scan", {});
+    if (!scan) return;
+    if (!scan.ok) {
+      new ResultModal(this.app, "Native Git: storage scan failed", [scan.error?.message ?? "Unknown error."], {
+        stdout: scan.error?.stdout,
+        stderr: scan.error?.stderr,
+        isError: true
+      }).open();
+      return;
+    }
+    this.absorbStatusData(scan.data ?? {});
+    const before = parseCountObjects(scan.data?.countObjects ?? "");
+    const rescue = (scan.data?.rescueBranches ?? "").split("\n").map((s) => s.trim()).filter((s) => s !== "");
+    new ConfirmModal(
+      this.app,
+      {
+        title: `Free up ${formatSize(totalKb(before))}?`,
+        body: maintenanceReportLines(before, rescue),
+        confirmLabel: "Clean up now",
+        icon: "eraser"
+      },
+      async (ok) => {
+        if (ok) await this.runMaintenanceSteps(before);
+      }
+    ).open();
+  }
+  async runMaintenanceSteps(before) {
+    const prune = await this.runOperation("maintenance-prune", { expire: "2.weeks.ago" });
+    if (!prune) return;
+    if (!prune.ok) {
+      this.renderMutationError("Native Git: storage cleanup failed", prune);
+      return;
+    }
+    this.absorbStatusData(prune.data ?? {});
+    const repack = await this.runOperation("maintenance-repack", {});
+    if (!repack) return;
+    if (!repack.ok) {
+      this.renderMutationError("Native Git: repack failed", repack);
+      return;
+    }
+    this.absorbStatusData(repack.data ?? {});
+    const after = parseCountObjects(repack.data?.countObjects ?? "");
+    const verdict = maintenanceVerdict(before, after);
+    this.log.add(
+      "info",
+      "maintenance",
+      `${verdict} (repack filter: ${repack.data?.repackFilter ?? "unknown"})`
+    );
+    new ResultModal(this.app, "Repository storage cleaned", [verdict]).open();
+  }
+  // ------------------------------------------------ repository footprint (v14)
+  /** What the settings toggles reflect; null until a status has been heard. */
+  footprintState() {
+    if (!this.lastStatus) return null;
+    return {
+      shallow: this.lastStatus.shallow === true,
+      partial: this.lastStatus.partialFilter !== void 0
+    };
+  }
+  /** Runner v14 is what serves every footprint action. */
+  footprintAvailable() {
+    return this.lastRunnerVersion >= 14;
+  }
+  /**
+   * All four footprint changes share one shape: confirm with the consequences
+   * stated, run the action, and let the ABSORBED status decide what the toggle
+   * shows — a change the runner refused changes nothing on screen.
+   */
+  footprintChange(title, body, confirmLabel, errTitle, action, args, danger, after) {
+    return new Promise((resolve) => {
+      new ConfirmModal(
+        this.app,
+        { title, body, confirmLabel, icon: "hard-drive", danger },
+        async (ok) => {
+          if (!ok) {
+            resolve();
+            return;
+          }
+          const result = await this.runOperation(action, args);
+          if (result) {
+            if (result.ok) {
+              this.absorbStatusData(result.data ?? {});
+              after?.();
+            } else {
+              this.renderMutationError(errTitle, result);
+            }
+          }
+          resolve();
+        }
+      ).open();
+    });
+  }
+  async cmdShallowEnable() {
+    const depth = this.deviceSettings.shallowDepth;
+    await this.footprintChange(
+      "Limit history on this device?",
+      [
+        `Only the newest ${depth} commits stay on this device; older history leaves it. The remote and your other devices keep everything.`,
+        "The history panels here reach only what stays, and restoring a file from an older commit is not possible on this device.",
+        "This also clears git's local undo journal (the reflog) on this device: with it kept, the old commits stay pinned and the cut would free nothing for 90 days.",
+        "Disk space returns after the next Clean up repository storage."
+      ],
+      `Keep ${depth} commits`,
+      "Native Git: shallow failed",
+      "repo-shallow",
+      { depth },
+      true,
+      () => new import_obsidian16.Notice(`History limited to the newest ${depth} commits on this device. Run Clean up repository storage to free the space.`)
+    );
+  }
+  async cmdUnshallow() {
+    await this.footprintChange(
+      "Download the full history back?",
+      ["One large download over the network; the budget is generous, and the output panel shows progress."],
+      "Download full history",
+      "Native Git: unshallow failed",
+      "repo-unshallow",
+      {},
+      false,
+      () => new import_obsidian16.Notice("Full history restored on this device.")
+    );
+  }
+  async cmdPartialEnable() {
+    await this.footprintChange(
+      "Enable partial clone on this device?",
+      [
+        "The repository is marked as a partial clone (blob:none): file content is fetched when something needs it, and the content of files your sparse checkout hides is never downloaded at all.",
+        "'Show again (remove sparse exclusion)' will need the NETWORK from now on: materialising hidden files fetches their content from the remote.",
+        "Old versions of files open on demand the same way, so file history needs the network for content this device has not fetched yet.",
+        "Applies to this device only. Run Clean up repository storage afterwards to shed content that is already downloaded."
+      ],
+      "Enable partial clone",
+      "Native Git: partial clone failed",
+      "repo-partial-enable",
+      {},
+      true,
+      () => new import_obsidian16.Notice("Partial clone enabled on this device. Run Clean up repository storage to shed already-downloaded content.")
+    );
+  }
+  async cmdPartialDisable() {
+    await this.footprintChange(
+      "Disable partial clone?",
+      [
+        "Everything the filter skipped is fetched from the remote first \u2014 one large download \u2014 and the repository is unmarked only once nothing is missing."
+      ],
+      "Disable partial clone",
+      "Native Git: partial clone stays",
+      "repo-partial-disable",
+      {},
+      false,
+      () => new import_obsidian16.Notice("Partial clone disabled; all content is local again.")
+    );
+  }
+  /**
+   * The one-time offer: sparse is hiding files, the runner can serve partial
+   * clone, and the device is still downloading content it will never show.
+   * Fires once per device; the settings toggle stays available either way.
+   */
+  maybeOfferPartialForSparse() {
+    if (this.deviceSettings.partialOfferShown) return;
+    const st = this.lastStatus;
+    if (!st || !st.sparse.enabled || st.partialFilter !== void 0) return;
+    if (this.lastRunnerVersion < 14) return;
+    this.deviceSettings = this.store.write({ partialOfferShown: true });
+    void this.cmdPartialEnable();
   }
   async refreshExcludeList() {
     const result = await this.runOperation("exclude-list");
@@ -8289,7 +8764,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   isGitignored(path) {
     return ignoreEntryMatches(parseIgnoreEntries(this.gitignoreLines.join("\n")), path);
   }
-  async gitignoreAdd(entry2) {
+  /** `standalone = false`: bulk route; it warns and refreshes once itself. */
+  async gitignoreAdd(entry2, standalone = true) {
     if (entry2.trim() === "" || hasControlChars(entry2)) {
       new import_obsidian16.Notice("Invalid .gitignore entry.");
       return;
@@ -8302,14 +8778,19 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.gitignoreLines.push(entry2.trim());
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
     new import_obsidian16.Notice(`Added to .gitignore: ${entry2.trim()}`);
+    if (standalone) {
+      this.warnIfRuleTargetsTracked([entry2.trim().replace(/^\//, "").replace(/\/$/, "")]);
+      await this.refreshAfterRuleChange();
+    }
   }
-  async gitignoreRemove(entry2) {
+  async gitignoreRemove(entry2, standalone = true) {
     await this.loadGitignore();
     const before = this.gitignoreLines.length;
     this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry2.trim());
     if (this.gitignoreLines.length === before) return;
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
     new import_obsidian16.Notice(`Removed from .gitignore: ${entry2.trim()}`);
+    if (standalone) await this.refreshAfterRuleChange();
   }
   isSparseExcluded(path) {
     return this.deviceSettings.derivedProtectedPaths.includes(path);
@@ -8715,9 +9196,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       // Absent on runners older than this one, which is exactly "no rebase":
       // an old runner cannot report a state it does not look for, and treating
       // the missing field as `true` would put a banner on every panel.
-      rebaseInProgress: d.rebaseInProgress === "true"
+      rebaseInProgress: d.rebaseInProgress === "true",
+      shallow: d.shallow === "true",
+      partialFilter: d.partialFilter?.trim() ? d.partialFilter.trim() : void 0
     };
     this.statusStale = false;
+    this.maybeOfferPartialForSparse();
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
   }
@@ -8847,7 +9331,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         ...issues.length > shown.length ? [`\u2026and ${issues.length - shown.length} more.`] : []
       ];
       const renamable = issues.filter((i) => !i.needsFolderRename);
-      new ResultModal(this.app, "Filenames other machines cannot check out", lines, {
+      new ResultModal(this.app, "Filenames too long for other machines", lines, {
         isError: true,
         actions: [
           ...renamable.length > 0 ? [
@@ -9166,27 +9650,28 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
       this.store.removeValue(REPAIR_JOB_KEY);
     }
   }
-  /**
-   * Delete the `ngb-rescue-*` branch a rebuild left behind, after an explicit
-   * confirmation. The old success window said to do this in Termux, which
-   * breaks the rule that the user never touches Termux beyond installing the
-   * runner and entering credentials; the runner action it calls accepts
-   * nothing but the rescue-branch name shape, so it cannot delete anything
-   * else.
-   */
-  /**
-   * A rescue branch that outlived its window. The delete offer used to exist
-   * only in the rebuild's success window, which is shown exactly once —
-   * whoever closed it had no way back. Status now reports the branches, and
-   * this reminds once a day (device-local, like the previous-git reminder)
-   * until they are gone.
-   */
   offerRescueCleanup(raw) {
     const refs = raw.split("\n").filter((r) => /^ngb-rescue-/.test(r.trim()));
+    this.lastRescueBranches = refs;
     if (refs.length === 0) return;
     const today = (/* @__PURE__ */ new Date()).toDateString();
     if (this.store.getValue("rescue-reminded") === today) return;
     this.store.setValue("rescue-reminded", today);
+    this.showRescueCleanup(refs);
+  }
+  /**
+   * On demand from the palette too, not only once a day: the daily gate left a
+   * user with a branch they WANTED gone (its shed blobs were spamming every
+   * prune with "not our ref") and no button until tomorrow.
+   */
+  cmdRescueCleanup() {
+    if (this.lastRescueBranches.length === 0) {
+      new import_obsidian16.Notice("No ngb-rescue backup branch is known. Run Status once if one should be here.");
+      return;
+    }
+    this.showRescueCleanup(this.lastRescueBranches);
+  }
+  showRescueCleanup(refs) {
     new ResultModal(
       this.app,
       "A repair backup branch is still here",
@@ -9886,10 +10371,15 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         });
       }
     }
-    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion !== RUNNER_MIN_VERSION) {
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER_MIN_VERSION) {
       out.push({
         part: "runner",
-        text: this.lastRunnerVersion < RUNNER_MIN_VERSION ? `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux \u2014 updating the plugin never updates the runner.` : `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin expects (v${RUNNER_MIN_VERSION}). Update the plugin from the latest release.`
+        text: `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux \u2014 updating the plugin never updates the runner.`
+      });
+    } else if (this.lastRunnerVersion > RUNNER_SHIPPED_VERSION) {
+      out.push({
+        part: "runner",
+        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Update the plugin from the latest release.`
       });
     }
     return out;
@@ -10125,8 +10615,10 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
       },
       async (ok) => {
         if (!ok) return;
-        for (const p of paths) await this.gitignoreAdd(`/${p}`);
+        for (const p of paths) await this.gitignoreAdd(`/${p}`, false);
         this.notify(`Added ${paths.length} paths to .gitignore.`);
+        this.warnIfRuleTargetsTracked(paths);
+        await this.refreshAfterRuleChange();
       }
     ).open();
   }
@@ -10155,9 +10647,10 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         if (!ok) return;
         for (const p of paths) {
           if (kind === "sparse") await this.cmdSparseExclude(p, true, true);
-          else await this.cmdExcludeChange(p, true);
+          else await this.cmdExcludeChange(p, true, false);
         }
         this.notify(`Applied to ${paths.length} paths.`);
+        if (kind === "exclude") this.warnIfRuleTargetsTracked(paths);
         await this.cmdStatus(true);
       }
     ).open();

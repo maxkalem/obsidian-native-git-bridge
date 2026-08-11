@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { PLUGIN_ID } from "../src/constants";
+import { PLUGIN_ID, RUNNER_MIN_VERSION, RUNNER_SHIPPED_VERSION } from "../src/constants";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
 
 /**
@@ -62,5 +62,27 @@ describe("PLUGIN_ID agrees with everything built from it", () => {
     // silently dead; that is worth failing on too.
     expect(segments.length).toBeGreaterThan(0);
     expect([...new Set(segments)]).toEqual([PLUGIN_ID]);
+  });
+});
+
+/**
+ * The same shape of agreement for the runner version: `RUNNER_SHIPPED_VERSION`
+ * is what version advice compares against, and it is a TypeScript copy of a
+ * bash literal no type checker can follow. When it lags the script, every
+ * correctly updated runner reads as "newer than this plugin knows" — the
+ * 0.6.3 release shipped exactly that defect, with the floor standing in for
+ * the shipped version.
+ */
+describe("RUNNER_SHIPPED_VERSION agrees with the runner script", () => {
+  it("equals RUNNER_VERSION in native-git-bridge-runner.sh", () => {
+    const m = /^RUNNER_VERSION=(\d+)$/m.exec(
+      repoFile("native-git-bridge/termux/native-git-bridge-runner.sh")
+    );
+    expect(m).not.toBeNull();
+    expect(parseInt(m![1]!, 10)).toBe(RUNNER_SHIPPED_VERSION);
+  });
+
+  it("is at least the minimum, or the advice branches can never both fire", () => {
+    expect(RUNNER_SHIPPED_VERSION).toBeGreaterThanOrEqual(RUNNER_MIN_VERSION);
   });
 });

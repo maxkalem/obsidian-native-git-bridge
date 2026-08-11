@@ -61,7 +61,27 @@ export type BridgeAction =
    * Stage, unstage and discard a hunk are the same operation pointed three
    * ways, so they share one action.
    */
-  | "apply-patch";
+  | "apply-patch"
+  /**
+   * Stop tracking one file, keeping it on disk (`git rm --cached` semantics).
+   * The missing half of the tracked-file notice: an ignore rule cannot hide a
+   * tracked file, and this is what makes the rule able to.
+   */
+  | "untrack-file"
+  // Storage maintenance (v14): the object database only ever grows — every
+  // refetch ADDS a full pack and an interrupted download leaves a
+  // multi-gigabyte tmp file. Scan reports, prune drops what nothing reaches,
+  // repack dedupes. Sequenced by the plugin like the repair steps.
+  | "maintenance-scan"
+  | "maintenance-prune"
+  | "maintenance-repack"
+  // Repository footprint (v14): device decisions, transactional from the
+  // settings — the toggle reflects the repository's actual state and moves
+  // only after the action answers ok.
+  | "repo-shallow"
+  | "repo-unshallow"
+  | "repo-partial-enable"
+  | "repo-partial-disable";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -94,6 +114,14 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["repair-refetch", 13],
   ["repair-reset-upstream", 13],
   ["repair-drop-backup", 13],
+  ["untrack-file", 14],
+  ["maintenance-scan", 14],
+  ["maintenance-prune", 14],
+  ["maintenance-repack", 14],
+  ["repo-shallow", 14],
+  ["repo-unshallow", 14],
+  ["repo-partial-enable", 14],
+  ["repo-partial-disable", 14],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -126,6 +154,13 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "continue-rebase",
   "unstage-protected",
   "apply-patch",
+  "untrack-file",
+  "maintenance-prune",
+  "maintenance-repack",
+  "repo-shallow",
+  "repo-unshallow",
+  "repo-partial-enable",
+  "repo-partial-disable",
 ]);
 
 export interface BridgeRequest {

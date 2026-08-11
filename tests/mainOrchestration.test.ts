@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  __findByClass,
   __notices,
   __openedModals,
   __protocolHandlers,
@@ -7,6 +8,7 @@ import {
   __setPlatformAndroid,
   __textOf,
 } from "./mocks/obsidian";
+import { HistoryView, NGB_HISTORY_VIEW } from "../src/ui/HistoryView";
 import NativeGitBridgePlugin, { compareVersions } from "../src/main";
 import { RUNNER_MIN_VERSION } from "../src/constants";
 import { BridgeClient } from "../src/bridge/BridgeClient";
@@ -110,6 +112,8 @@ function makeApp(adapter: MemAdapter): Any {
   const fileMenuHandlers: Array<(menu: Any, file: Any) => void> = [];
   /** Every pane the plugin opened: { type, state }. */
   const openedViews: Array<{ type: string; state?: Any }> = [];
+  /** Test hook: real view instances registered as open panes, by view type. */
+  const leaves: Record<string, Any[]> = {};
   let activeFile: Any = null;
   const collectMenu = (path: string): { titles: string[]; head: string } => {
     const titles: string[] = [];
@@ -120,6 +124,10 @@ function makeApp(adapter: MemAdapter): Any {
   };
   return {
     openedViews,
+    /** Register a real view instance so `getLeavesOfType` hands it back. */
+    registerLeaf: (type: string, view: Any) => {
+      (leaves[type] ??= []).push({ view });
+    },
     setActiveFile: (path: string) => {
       activeFile = { path };
     },
@@ -135,7 +143,7 @@ function makeApp(adapter: MemAdapter): Any {
         layoutReady = cb;
       },
       fireLayoutReady: () => layoutReady?.(),
-      getLeavesOfType: () => [],
+      getLeavesOfType: (t: string) => leaves[t] ?? [],
       getRightLeaf: () => null,
       revealLeaf: () => undefined,
       getLeaf: () => ({
@@ -1422,5 +1430,283 @@ describe("panel context menus reflect the row's own group", () => {
     const off = collect();
     h.plugin.buildGroupMenu(off.menu, "staged");
     expect(off.titles).toEqual(["Git: Unstage in group (1)"]);
+  });
+});
+
+/**
+ * The teardown at the end of `runOperation` has to reach every surface that
+ * shows the plugin's state line, not only the status panel. The history
+ * panels' copy is written by the per-second tick, and the ticker is already
+ * cleared inside `finally`, so without a final push their line froze at the
+ * last rendered second — "diff-file… 4s", forever, after opening a diff from
+ * the repository history (seen on the device in 0.6.3).
+ */
+describe("teardown reaches the panels that show the state line", () => {
+  const historyView = (h: Harness): Any => {
+    const view = new HistoryView({} as Any, {
+      loadPage: async () => [],
+      openDiffAtCommit: () => undefined,
+      openFile: () => undefined,
+      progressText: () => (h.plugin as Any).progressText ?? "",
+      progressDetail: () => (h.plugin as Any).progressDetail ?? "",
+      treeView: () => false,
+      toggleTree: () => undefined,
+      openStatusPanel: () => undefined,
+      openOutput: () => undefined,
+      rowsPerGroup: () => 30,
+    }) as Any;
+    view.renderShell();
+    h.app.registerLeaf(NGB_HISTORY_VIEW, view);
+    return view;
+  };
+  const stateLine = (view: Any): string =>
+    __findByClass(view.contentEl, "ngb-sv-progress-text").textContent ?? "";
+
+  it("releases the history panel's state line when the last request finishes", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let capturedId = "";
+    h.runner.onTrigger = (id) => {
+      capturedId = id;
+    };
+    const view = historyView(h);
+    const op = (h.plugin as Any).runOperation("status", {}) as Promise<Any>;
+    for (let i = 0; i < 200 && capturedId === ""; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(capturedId).not.toBe("");
+    // A tick paints the running state into the panel's copy…
+    view.updatePluginProgress();
+    expect(stateLine(view)).toMatch(/^status… /);
+    // …the runner answers and the operation tears down…
+    h.adapter.files.set(paths.resultFile(capturedId), okStatusResult(capturedId));
+    await op;
+    // …and the line is released rather than frozen at the last tick.
+    expect(stateLine(view)).toBe("Idle");
+  });
+});
+
+/**
+ * Every route that changes an ignore rule must leave the panel agreeing with
+ * git. The exclude actions return only the exclude list (see protocol.md), so
+ * the plugin follows them with a status request of its own; .gitignore is
+ * written by the plugin itself, so the same applies. Without this, a rule
+ * "added" was still on screen after a refresh the user had no reason to run.
+ */
+describe("an ignore-rule change refreshes the panel", () => {
+  const answering = (h: Harness) => {
+    h.runner.onTrigger = (id) => {
+      const req = JSON.parse(h.adapter.files.get(paths.requestFile(id))!) as Any;
+      if (req.action === "exclude-add" || req.action === "exclude-remove") {
+        h.adapter.files.set(
+          paths.resultFile(id),
+          JSON.stringify({
+            protocolVersion: 1,
+            id,
+            action: req.action,
+            ok: true,
+            exitCode: 0,
+            runnerVersion: 4,
+            data: { excludeList: "/Notes/x.md" },
+          })
+        );
+      } else {
+        h.adapter.files.set(paths.resultFile(id), okStatusResult(id));
+      }
+    };
+  };
+  const sentActions = (h: Harness): string[] =>
+    requestFiles(h.adapter)
+      .sort()
+      .map((f) => (JSON.parse(h.adapter.files.get(f)!) as Any).action as string);
+
+  it("an exclude change is followed by the plugin's own status request", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answering(h);
+    await h.plugin.cmdExcludeChange("Notes/x.md", true);
+    // Order-insensitive: two ids minted in the same millisecond sort by their
+    // random suffix, and the claim is "both were sent", not which file sorts first.
+    expect(sentActions(h).sort()).toEqual(["exclude-add", "status"]);
+  });
+
+  it("a .gitignore add refreshes too, and one edit costs one status", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answering(h);
+    await h.plugin.gitignoreAdd("/Notes/x.md");
+    expect(h.adapter.files.get(".gitignore")).toContain("/Notes/x.md");
+    expect(sentActions(h)).toEqual(["status"]);
+  });
+
+  it("says so when the rule targets a TRACKED path, which no ignore rule hides", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answering(h);
+    (h.plugin as Any).lastStatus = {
+      status: {
+        ahead: 0,
+        behind: 0,
+        detached: false,
+        staged: [],
+        unstaged: [{ path: ".obsidian/workspace-mobile.json", index: ".", worktree: "M" }],
+        untracked: [],
+        conflicted: [],
+      },
+      sparse: { enabled: false, coneMode: undefined, patterns: [], skipWorktreeCount: 0 },
+      fetchedAt: "now",
+    };
+    await h.plugin.gitignoreAdd("/.obsidian/workspace-mobile.json");
+    expect(__notices.some((n) => n.includes("tracked by git"))).toBe(true);
+  });
+
+  it("stays quiet about an untracked path: that rule works as it reads", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answering(h);
+    await h.plugin.gitignoreAdd("/Notes/new-untracked.md");
+    expect(__notices.some((n) => n.includes("tracked by git"))).toBe(false);
+  });
+});
+
+/**
+ * `untrack-file` (runner v14): the missing half of the tracked-file notice.
+ * The runner side is proven in e2e phase 17; what is asserted here is the
+ * plugin's own flow — status absorbed from the result, the user told what to
+ * do next, and the ignore-rule gap named rather than silently left open.
+ */
+describe("untrack-file flow", () => {
+  it("absorbs the result's status and names the missing ignore rule", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let sentAction = "";
+    h.runner.onTrigger = (id) => {
+      sentAction = (JSON.parse(h.adapter.files.get(paths.requestFile(id))!) as Any).action as string;
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, 14, { untrackedPath: ".obsidian/workspace-mobile.json" })
+      );
+    };
+    await h.plugin.cmdUntrackFile(".obsidian/workspace-mobile.json");
+    expect(sentAction).toBe("untrack-file");
+    expect(__notices.some((n) => n.includes("No longer tracked"))).toBe(true);
+    expect(__notices.some((n) => n.includes("No ignore rule covers"))).toBe(true);
+  });
+
+  it("does not nag about the rule when one already covers the path", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.adapter.files.set(".gitignore", "/.obsidian/workspace-mobile.json\n");
+    await (h.plugin as Any).loadGitignore();
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, 14, { untrackedPath: ".obsidian/workspace-mobile.json" })
+      );
+    };
+    await h.plugin.cmdUntrackFile(".obsidian/workspace-mobile.json");
+    expect(__notices.some((n) => n.includes("No longer tracked"))).toBe(true);
+    expect(__notices.some((n) => n.includes("No ignore rule covers"))).toBe(false);
+  });
+});
+
+/**
+ * Repository footprint (runner v14). The settings toggles show the
+ * repository's ACTUAL state, reported with every status; the runner side is
+ * proven in e2e phase 18. Asserted here: the state round trip, and the
+ * one-time partial-clone offer for sparse users — once per device, never on a
+ * runner that cannot serve it.
+ */
+describe("repository footprint (runner v14)", () => {
+  const answeringStatus = (h: Harness, runnerVersion: number, extra: Record<string, string> = {}) => {
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, runnerVersion, extra));
+    };
+  };
+  const confirmModals = () => __openedModals.filter((m) => m === "ConfirmModal").length;
+
+  it("reflects shallow and partial state from the status result", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answeringStatus(h, 14, { shallow: "true", partialFilter: "blob:none" });
+    expect(h.plugin.footprintState()).toBeNull();
+    await h.plugin.cmdStatus(true);
+    expect(h.plugin.footprintState()).toEqual({ shallow: true, partial: true });
+    expect(h.plugin.footprintAvailable()).toBe(true);
+  });
+
+  it("offers partial clone ONCE when sparse is on and the runner can serve it", async () => {
+    // okStatusResult's fixture repository has sparse enabled and no filter,
+    // which is exactly the state the offer exists for.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answeringStatus(h, 14);
+    await h.plugin.cmdStatus(true);
+    const afterFirst = confirmModals();
+    expect(afterFirst).toBeGreaterThan(0);
+    await h.plugin.cmdStatus(true);
+    expect(confirmModals()).toBe(afterFirst); // once per device, not per status
+  });
+
+  it("stays silent on a runner older than v14, and once partial is already on", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answeringStatus(h, 13);
+    await h.plugin.cmdStatus(true);
+    expect(confirmModals()).toBe(0);
+
+    const h2 = await loadPlugin();
+    await enableBridge(h2);
+    h2.useFastClient();
+    answeringStatus(h2, 14, { partialFilter: "blob:none" });
+    await h2.plugin.cmdStatus(true);
+    expect(__openedModals.filter((m) => m === "ConfirmModal").length).toBe(0);
+  });
+});
+
+/**
+ * Version advice compares the runner against the RANGE a correct installation
+ * can be in, [RUNNER_MIN_VERSION, RUNNER_SHIPPED_VERSION]. It used to compare
+ * against the floor alone, so 0.6.3 (floor 12, shipping v13) told every
+ * correctly installed device its runner was "NEWER than this plugin expects" —
+ * the user met the same message the moment they installed v14.
+ */
+describe("runner version advice", () => {
+  const adviceFor = async (runnerVersion: number) => {
+    const h = await loadPlugin();
+    (h.plugin as Any).lastRunnerVersion = runnerVersion;
+    return h.plugin.versionAdvice().filter((a) => a.part === "runner");
+  };
+
+  it("says nothing for any runner the plugin actually ships or accepts", async () => {
+    expect(await adviceFor(12)).toEqual([]);
+    expect(await adviceFor(13)).toEqual([]);
+    expect(await adviceFor(14)).toEqual([]);
+  });
+
+  it("flags a runner below the floor as outdated, with the reinstall route", async () => {
+    const advice = await adviceFor(11);
+    expect(advice).toHaveLength(1);
+    expect(advice[0]!.text).toContain("older than this plugin needs");
+  });
+
+  it("flags a runner above the shipped version as the plugin being behind", async () => {
+    const advice = await adviceFor(15);
+    expect(advice).toHaveLength(1);
+    expect(advice[0]!.text).toContain("NEWER than this plugin knows");
+  });
+
+  it("stays silent before the first result: 0 means never heard, not broken", async () => {
+    expect(await adviceFor(0)).toEqual([]);
   });
 });

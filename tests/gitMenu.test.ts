@@ -8,6 +8,7 @@ const allOn: GitMenuFlags = {
   ignored: false,
   sparseExcluded: false,
   excluded: false,
+  untrack: true,
 };
 const actions = (s: MenuScope, f: Partial<GitMenuFlags> = {}) =>
   buildMenuEntries(s, { ...allOn, ...f }).map((e) => e.action);
@@ -115,6 +116,20 @@ describe("git context menu, one description for every surface", () => {
       "gitignore-add",
       "sparse-add",
       "exclude-add",
+      "untrack",
     ]);
+  });
+
+  it("untrack is offered for single TRACKED files only, and only when the runner can serve it", () => {
+    // Tracked groups: offered.
+    expect(actions({ kind: "file", path: "a.md", group: "unstaged" })).toContain("untrack");
+    expect(actions({ kind: "file", path: "a.md", group: "staged" })).toContain("untrack");
+    // Untracked: there is nothing to untrack, an ignore rule already works.
+    expect(actions({ kind: "file", path: "a.md", group: "untracked" })).not.toContain("untrack");
+    // Bulk: never — the modify/delete consequence on other devices is per file.
+    expect(actions({ kind: "folder", path: "d", group: "unstaged", count: 3 })).not.toContain("untrack");
+    expect(actions({ kind: "group", group: "unstaged", count: 3 })).not.toContain("untrack");
+    // Runner older than v14: the entry would only ever produce a refusal.
+    expect(actions({ kind: "file", path: "a.md", group: "unstaged" }, { untrack: false })).not.toContain("untrack");
   });
 });

@@ -419,6 +419,23 @@
    (The collapsible-section rules that used to live here went with the
    sections themselves; the tabs replaced them.) */
 .ngb-out-tab-on { color: var(--text-accent); }
+/* Divider between the log tabs and the field controls (wrap, refresh): the
+   tabs choose WHAT the console shows, everything right of the line acts on
+   how it is shown. */
+.ngb-out-tab-sep {
+  width: 1px;
+  align-self: stretch;
+  margin: 0 4px;
+  background: var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+/* Wrap long lines in the console field instead of scrolling sideways. Both
+   the pre and the code carry white-space rules, so both flip. */
+.ngb-out-stream.ngb-out-wrap,
+.ngb-out-stream.ngb-out-wrap code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 /* The cancel button keeps its space when idle: invisible but non-collapsing. */
 .ngb-sv-cancel-slot { flex: 0 0 auto; }
 .ngb-slot-inactive { visibility: hidden; pointer-events: none; }

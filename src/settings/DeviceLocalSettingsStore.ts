@@ -90,6 +90,18 @@ export interface DeviceLocalSettings {
    * a diff feels instant or not.
    */
   diffLimitKb: number;
+  /**
+   * Depth for the shallow-history toggle (runner v14). Device-local twice
+   * over: the shallow boundary itself lives in this device's .git, and the
+   * number trades disk for how far back the history panels can reach here.
+   */
+  shallowDepth: number;
+  /**
+   * Whether the one-time "sparse is on — partial clone would stop downloading
+   * the hidden files' content" offer has been shown on this device. The offer
+   * fires once; the settings toggle stays either way.
+   */
+  partialOfferShown: boolean;
 }
 
 /** Selectable budgets, in KB. The default is deliberately modest. */
@@ -142,6 +154,8 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
   previousRepoDismissed: [],
+  shallowDepth: 100,
+  partialOfferShown: false,
 };
 
 /** Minimal localStorage-compatible backend, injectable for tests. */

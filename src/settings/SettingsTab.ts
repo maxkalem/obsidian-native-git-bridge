@@ -52,13 +52,15 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     const ver = containerEl.createDiv({ cls: "ngb-version-row" });
     badge(`Plugin ${this.plugin.manifest.version}`, "plugin");
     const rv = this.plugin.lastRunnerVersion;
-    // "needs vN" only when it actually differs — otherwise it reads like a problem.
+    // "needs vN" only when the runner is actually BELOW the floor. Comparing
+    // for inequality branded every runner newer than the minimum — that is,
+    // every correct installation — with a hint that reads like a problem.
     badge(
       rv === 0
         ? `Runner: unknown`
-        : rv === RUNNER_MIN_VERSION
-          ? `Runner v${rv}`
-          : `Runner v${rv} (needs v${RUNNER_MIN_VERSION})`,
+        : rv < RUNNER_MIN_VERSION
+          ? `Runner v${rv} (needs v${RUNNER_MIN_VERSION})`
+          : `Runner v${rv}`,
       "runner"
     );
     badge(
@@ -491,6 +493,75 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
             if (!Number.isFinite(n) || n < 0) return;
             await this.plugin.updateDeviceSettings({ statusRefreshSeconds: n });
             this.plugin.restartStatusPoll();
+          })(); });
+      });
+
+    new Setting(containerEl).setName("Repository footprint (this device)").setHeading();
+
+    // Both toggles REFLECT the repository's actual state, reported by the
+    // runner with every status; they move only after a change is confirmed and
+    // the runner answers ok. A decline, a refusal or an unreachable runner
+    // re-renders the tab and the toggle simply shows what is still true.
+    const fp = this.plugin.footprintState();
+    const fpNote = !this.plugin.footprintAvailable()
+      ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once."
+      : fp === null
+        ? "Run Status once so these toggles can show the repository's actual state."
+        : "";
+    if (fpNote !== "") {
+      containerEl.createEl("p", { text: fpNote, cls: "setting-item-description" });
+    }
+
+    new Setting(containerEl)
+      .setName("Shallow history")
+      .setDesc(
+        "Keep only the newest commits on this device; the remote and your other " +
+          "devices keep everything. The history panels here reach only what " +
+          "stays, and enabling this also clears this device's reflog — without " +
+          "that the old commits stay pinned and nothing is freed. Turning it " +
+          "off downloads the full history back. Space returns after Clean up " +
+          "repository storage."
+      )
+      .addToggle((t) => {
+        t.setValue(fp?.shallow ?? false)
+          .setDisabled(fp === null || !this.plugin.footprintAvailable())
+          .onChange((v) => { void (async () => {
+            if (v) await this.plugin.cmdShallowEnable();
+            else await this.plugin.cmdUnshallow();
+            this.refreshTab();
+          })(); });
+      });
+
+    new Setting(containerEl)
+      .setName("Shallow depth")
+      .setDesc("How many newest commits stay when shallow history is enabled. Takes effect on the next enable.")
+      .addText((t) => {
+        t.inputEl.inputMode = "numeric";
+        t.setPlaceholder("100")
+          .setValue(String(s.shallowDepth))
+          .onChange((v) => { void (async () => {
+            const n = parseInt(v, 10);
+            if (!Number.isFinite(n) || n < 1 || n > 100000) return;
+            await this.plugin.updateDeviceSettings({ shallowDepth: n });
+          })(); });
+      });
+
+    new Setting(containerEl)
+      .setName("Partial clone (blob:none)")
+      .setDesc(
+        "Fetch file content on demand instead of holding all of it. With sparse " +
+          "checkout the hidden files' content is never downloaded at all — but " +
+          "'Show again' and old file versions then need the network. Turning it " +
+          "off downloads everything back first. Run Clean up repository storage " +
+          "after enabling to shed content that is already downloaded."
+      )
+      .addToggle((t) => {
+        t.setValue(fp?.partial ?? false)
+          .setDisabled(fp === null || !this.plugin.footprintAvailable())
+          .onChange((v) => { void (async () => {
+            if (v) await this.plugin.cmdPartialEnable();
+            else await this.plugin.cmdPartialDisable();
+            this.refreshTab();
           })(); });
       });
 

@@ -2307,6 +2307,165 @@ bash "$RUNNER"
 check '[ ! -e "$RUNTIME/progress/r-20260810T130030Z-pr04.txt" ]' \
   "a request rejected before it ran leaves no stream"
 
+# ================================================================================
+# phase 17: untrack-file and storage maintenance (runner v14)
+# ================================================================================
+# untrack-file is `git rm --cached` semantics: the file stays on disk, a staged
+# deletion enters the index. The maintenance trio is the exit from an object
+# database that only ever grows: every refetch ADDS a pack and an interrupted
+# download leaves a tmp_pack_* nothing collects (20 GB over a ~4 GB history on
+# a real device).
+
+cd "$ROOT/vault"
+echo "# phase 17: untrack-file keeps the file and stages a deletion"
+mkdir -p Notes
+echo "tracked content" > Notes/e2e-untrack.md
+git add Notes/e2e-untrack.md
+git commit -qm "phase 17 fixture"
+req "r-20260811T140000Z-ut01" untrack-file "$TOKEN" '{"path":"Notes/e2e-untrack.md","protectedPaths":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T140000Z-ut01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "untrack-file ok"
+check '[ -f Notes/e2e-untrack.md ]' "the file is still on disk"
+check '! git ls-files -- Notes/e2e-untrack.md | grep -q .' "the index no longer tracks it"
+check 'git diff --cached --name-status -- Notes/e2e-untrack.md | grep -q "^D"' "a staged deletion is what the user commits"
+check 'jq -e ".data.untrackedPath == \"Notes/e2e-untrack.md\"" "$RES" >/dev/null' "the result names the path"
+check 'jq -e ".data.branchInfo | length > 0" "$RES" >/dev/null' "fresh status rides along"
+
+echo "# phase 17: untrack-file refuses what it must"
+req "r-20260811T140001Z-ut02" untrack-file "$TOKEN" '{"path":"Notes/never-committed.md","protectedPaths":[]}'
+bash "$RUNNER"
+check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T140001Z-ut02.json" >/dev/null' \
+  "an untracked path -> BAD_REQUEST (an ignore rule already works there)"
+req "r-20260811T140002Z-ut03" untrack-file "$TOKEN" '{"path":"Private/Hidden/mem.md","protectedPaths":["Private/Hidden"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == false and .error.code == \"SAFETY_BLOCKED\"" "$RUNTIME/results/r-20260811T140002Z-ut03.json" >/dev/null' \
+  "a protected path -> SAFETY_BLOCKED (that staged deletion is what the gate exists to prevent)"
+git reset -q -- Notes/e2e-untrack.md   # leave the index clean for the maintenance checks
+
+echo "# phase 17: maintenance-scan reports packs and garbage"
+# Duplicate packs the way real damage makes them: repack everything into one
+# pack, commit something, then repack again WITHOUT -d — the second pack holds
+# every object the first one does, and nothing removes the first, which is the
+# refetch fallback's exact end state. The commit in between is not decoration:
+# pack names are content hashes, so two repacks of IDENTICAL content produce
+# one file, not two (the same lesson the object-recovery fixtures paid for).
+git repack -a -d -q
+echo "second pack filler" > Notes/e2e-pack2.md
+git add Notes/e2e-pack2.md
+git commit -qm "phase 17 second pack"
+git repack -a -q
+PACKDIR="$ROOT/vault/.git/objects/pack"
+# Interrupted-download residue: one old tmp pack and one fresh. BOTH must go:
+# the runner is single-instance locked, so no fetch of ours can own a tmp file
+# while maintenance runs, and an hour of age grace once spared a 4.31 GB
+# corpse twice in one afternoon on a real device.
+printf 'not a real pack' > "$PACKDIR/tmp_pack_e2estale"
+touch -d "2 hours ago" "$PACKDIR/tmp_pack_e2estale"
+printf 'not a real pack either' > "$PACKDIR/tmp_pack_e2efresh"
+req "r-20260811T140003Z-mt01" maintenance-scan "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T140003Z-mt01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "maintenance-scan ok"
+check 'jq -r ".data.countObjects" "$RES" | grep -q "^packs: 2"' "count-objects sees both packs"
+check 'jq -r ".data.countObjects" "$RES" | grep -q "^garbage: 2"' "…and counts the tmp files as garbage"
+check 'jq -r ".data.packFiles" "$RES" | grep -q "tmp_pack_e2estale"' "the pack listing names the leftover tmp file"
+
+echo "# phase 17: maintenance-prune collects tmp files whatever their age"
+req "r-20260811T140004Z-mt02" maintenance-prune "$TOKEN" '{"expire":"2.weeks.ago"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T140004Z-mt02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "maintenance-prune ok"
+check '[ ! -e "$PACKDIR/tmp_pack_e2estale" ]' "the old tmp pack is gone"
+check '[ ! -e "$PACKDIR/tmp_pack_e2efresh" ]' "…and so is the fresh one: nothing can own it while maintenance runs"
+check 'jq -r ".data.removedTmp" "$RES" | grep -q "tmp_pack_e2estale"' "the result names what it removed"
+req "r-20260811T140005Z-mt03" maintenance-prune "$TOKEN" '{"expire":"next.tuesday"}'
+bash "$RUNNER"
+check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T140005Z-mt03.json" >/dev/null' \
+  "expire is a whitelist, not a passthrough to git"
+
+echo "# phase 17: maintenance-repack dedupes to one pack and the repository still reads"
+req "r-20260811T140006Z-mt04" maintenance-repack "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T140006Z-mt04.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "maintenance-repack ok"
+check '[ "$(ls "$PACKDIR"/*.pack 2>/dev/null | wc -l)" -eq 1 ]' "one pack remains"
+check 'jq -r ".data.countObjects" "$RES" | grep -q "^packs: 1"' "…and the result's own count agrees"
+check 'git fsck --connectivity-only --no-reflogs 2>/dev/null' "the graph is whole after the cleanup"
+check 'git log --oneline -1 >/dev/null 2>&1' "history still reads"
+
+# ================================================================================
+# phase 18: repository footprint — shallow history and partial clone (runner v14)
+# ================================================================================
+# Device decisions that live inside .git. Status reports both facts so the
+# settings toggles reflect reality. The parts a 2.34 sandbox cannot prove —
+# `repack --filter` (2.42+) and `git backfill` (2.49+) — are skipped by the
+# runner's own capability checks, which is itself asserted here.
+
+cd "$ROOT/vault"
+echo "# phase 18: repo-shallow cuts history and clears this device's reflog"
+FULL_COUNT="$(git rev-list --count HEAD)"
+req "r-20260811T150000Z-fp01" repo-shallow "$TOKEN" '{"depth":1}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150000Z-fp01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repo-shallow ok"
+check '[ -f .git/shallow ]' "the shallow boundary exists"
+check 'jq -e ".data.shallow == \"true\"" "$RES" >/dev/null' "status reports shallow=true"
+check '[ "$(git rev-list --count HEAD)" -lt "$FULL_COUNT" ]' "history on this device is shorter than it was"
+check '[ "$(git reflog 2>/dev/null | wc -l)" -eq 0 ]' "the reflog is cleared, so the cut can actually free space"
+req "r-20260811T150001Z-fp02" repo-shallow "$TOKEN" '{"depth":"evil; rm -rf"}'
+bash "$RUNNER"
+check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T150001Z-fp02.json" >/dev/null' \
+  "depth is digits or nothing"
+
+echo "# phase 18: repo-unshallow brings the full history back"
+req "r-20260811T150002Z-fp03" repo-unshallow "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150002Z-fp03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repo-unshallow ok"
+check '[ ! -f .git/shallow ]' "the shallow boundary is gone"
+check 'jq -e ".data.shallow == \"false\"" "$RES" >/dev/null' "status reports shallow=false"
+check '[ "$(git rev-list --count HEAD)" -eq "$FULL_COUNT" ]' "every commit is back"
+
+echo "# phase 18: partial clone marking, on and honestly off"
+req "r-20260811T150003Z-fp04" repo-partial-enable "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150003Z-fp04.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repo-partial-enable ok"
+check '[ "$(git config --get remote.origin.promisor)" = "true" ]' "origin is a promisor"
+check '[ "$(git config --get remote.origin.partialclonefilter)" = "blob:none" ]' "the filter is recorded"
+check '[ "$(git config --get core.repositoryformatversion)" = "1" ]' "format version raised for the extension"
+check 'jq -e ".data.partialFilter == \"blob:none\"" "$RES" >/dev/null' "status reports the filter"
+check 'jq -e ".data.partialShed == \"false\"" "$RES" >/dev/null' "git 2.34 cannot shed (repack --filter is 2.42+), and the result says so"
+
+echo "# phase 18: the shed waits while unpushed commits exist"
+# Phase 17's fixture commits were never pushed, so blobs exist here that the
+# promisor could not give back — the exact state where a filtered repack shed
+# a real rescue branch's content and every later walk spammed "not our ref".
+# The guard is checked BEFORE the version gate, so even this 2.34 sandbox
+# reports the true reason the filter waited.
+req "r-20260811T150007Z-fp07" maintenance-repack "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150007Z-fp07.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "maintenance-repack on a partial clone ok"
+check 'jq -r ".data.repackFilter" "$RES" | grep -q "^kept (unpushed"' \
+  "…and it reports the filter WAITED for the unpushed commits, not that it ran"
+
+req "r-20260811T150004Z-fp05" repo-partial-disable "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150004Z-fp05.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repo-partial-disable ok (nothing was missing, so no refetch was needed)"
+check '! git config --get remote.origin.promisor >/dev/null 2>&1' "the promisor marking is gone"
+check '[ "$(git config --get core.repositoryformatversion)" = "0" ]' "format version back to 0"
+check 'jq -e ".data.partialFilter == \"\"" "$RES" >/dev/null' "status reports no filter"
+
+echo "# phase 18: the clone filter is a whitelist"
+req "r-20260811T150005Z-fp06" clone-into-vault "$TOKEN" "{\"url\":\"file://$ROOT/vault\",\"replaceExisting\":true,\"filter\":\"tree:0\"}"
+bash "$RUNNER"
+check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T150005Z-fp06.json" >/dev/null' \
+  "only blob:none passes; nothing was cloned or replaced"
+check '[ -d .git ] && git log --oneline -1 >/dev/null 2>&1' "the vault's repository is untouched"
+
 cd "$ROOT/vault"
 git checkout -- . 2>/dev/null || true
 git reset -q 2>/dev/null || true

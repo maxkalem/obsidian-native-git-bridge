@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=13
+RUNNER_VERSION=14
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -775,9 +775,16 @@ collect_status_fields() {
   skip_count="$(git ls-files -v 2>/dev/null | grep -c '^S ' || true)"
   last_commit="$(git log -1 --format='%H%x09%cI%x09%s' 2>/dev/null || true)"
   remote_url="$(git remote get-url origin 2>/dev/null | redact_url || true)"
+  # Repository footprint (v14): the settings UI shows the repository's ACTUAL
+  # state, so both facts ride along with every status.
+  local is_shallow=false partial_filter=""
+  [ -f "$(git rev-parse --git-path shallow 2>/dev/null)" ] && is_shallow=true
+  partial_filter="$(git config --get remote.origin.partialclonefilter 2>/dev/null || true)"
   collect_untracked_children
   DATA=$(obj_from_fields \
     branchInfo "$branch_info" \
+    shallow "$is_shallow" \
+    partialFilter "$partial_filter" \
     sparseEnabled "$sparse_enabled" \
     sparseCone "$sparse_cone" \
     sparseList "$sparse_list" \
@@ -2516,6 +2523,284 @@ action_exclude_remove() {
   emit_exclude_list
 }
 
+# ---- untrack and storage maintenance (v14) -------------------------------------
+# The object database only ever grows: every refetch ADDS a full pack (the
+# recovery path copies packs in and deliberately never removes anything), and an
+# interrupted download leaves a multi-gigabyte tmp_pack_* file that nothing
+# collects. On a real device that reached 20 GB over a ~4 GB history. The
+# cleanup is scan / prune / repack, sequenced by the plugin like the repair:
+# short steps lose a step to an Android kill, not the whole job, and the
+# decisions live in TypeScript. `git gc` was rejected as the one-shot answer
+# because it also expires reflogs, and the reflog is the safety net this
+# plugin's own verdicts rely on staying conservative.
+
+# Stop tracking ONE file, keeping it on disk. `git rm --cached` semantics via
+# `update-index --force-remove`, which needs no `--sparse` on any git version
+# (the same reason unstage-protected uses it). The index gets a staged deletion
+# for the user to commit; the worktree copy is untouched and becomes untracked,
+# which is the state an ignore rule can finally act on. Protected paths are
+# refused: dropping the index entry of a path that IS in HEAD stages a deletion
+# of content the safety gate exists to keep untouchable.
+action_untrack_file() {
+  local req_file="$1" path
+  path=$(jq -r '.args.path // empty' "$req_file")
+  valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
+  read_protected_paths "$req_file" || return 1
+  refuse_if_protected "$path" || return 1
+  # An EXACT index entry, matched with -z (never quoted), for the same reason
+  # unstage-protected matches this way: `valid_rel_path` does not reject glob
+  # characters, and a directory would match its children — in both cases the
+  # action would answer ok having untracked something other than what was named.
+  local hit=false f
+  while IFS= read -r -d '' f; do
+    [ "$f" = "$path" ] && hit=true
+  done < <(git ls-files -z -- "$path" 2>/dev/null || true)
+  if [ "$hit" != true ]; then
+    ERROR=$(err_json BAD_REQUEST "Not a tracked file: $path" "" ""); return 1
+  fi
+  if ! run_git update-index --force-remove -- "$path"; then
+    ERROR=$(err_json GIT_FAILED "git update-index --force-remove failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields untrackedPath "$path")")
+}
+
+# Read-only: what the object database holds. `count-objects -v` is the cheap
+# truth (loose count/size, packs and their total, and "garbage" — files that
+# are neither objects nor packs, which is where an interrupted fetch's
+# tmp_pack_* lands, with its size). Raw output travels; parsing happens in
+# TypeScript. The pack files are listed by size and name so the report can show
+# what the duplicates actually are.
+action_maintenance_scan() {
+  run_git count-objects -v || { ERROR=$(err_json GIT_FAILED "git count-objects failed." "$GIT_OUT" "$GIT_ERR"); return 1; }
+  local counts="$GIT_OUT" packdir packs=""
+  packdir="$(git rev-parse --git-path objects/pack)"
+  if [ -d "$packdir" ]; then
+    packs="$(find "$packdir" -maxdepth 1 -type f -printf '%s\t%f\n' 2>/dev/null | sort -rn || true)"
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields countObjects "$counts" packFiles "$packs")")
+}
+
+# Remove what holds no data anyone can reach: temporary pack files left by
+# interrupted downloads, and unreachable loose objects past git's own expiry.
+# `git prune` walks refs, reflogs and the index, so nothing they reference is
+# touched, and it collects loose tmp_obj_* itself — but pack-directory garbage
+# is `git gc`'s job (clean_pack_garbage), and gc is not used here (see the
+# section comment), so tmp_* / .tmp-* in the pack directory are removed by
+# hand, on their own one-hour clock (reasoning at the removal). The expire
+# value is a whitelist, not a passthrough: it reaches git as an argument.
+action_maintenance_prune() {
+  local req_file="$1" expire
+  expire=$(jq -r '.args.expire // "2.weeks.ago"' "$req_file")
+  case "$expire" in
+    2.weeks.ago|now) ;;
+    *) ERROR=$(err_json BAD_REQUEST "Invalid expire: use 2.weeks.ago or now." "" ""); return 1 ;;
+  esac
+  # Temporary pack files get NO age grace at all. The first version gave them
+  # one hour "in case a live fetch owns one", and the hour bit the same user
+  # twice in one afternoon: a 4.31 GB corpse from a killed fetch was 56 and
+  # then 57 minutes old at the two cleanups that should have taken it. The
+  # grace protected nothing real: this runner is single-instance locked, so no
+  # fetch of ours can be running while prune runs, and nothing else writes
+  # here (the user's own standing rule is that git in Termux is never run by
+  # hand). A tmp file present during maintenance is an orphan by construction.
+  local packdir removed=""
+  packdir="$(git rev-parse --git-path objects/pack)"
+  if [ -d "$packdir" ]; then
+    removed="$(find "$packdir" -maxdepth 1 -type f \( -name 'tmp_*' -o -name '.tmp-*' \) -printf '%s\t%f\n' 2>/dev/null || true)"
+    find "$packdir" -maxdepth 1 -type f \( -name 'tmp_*' -o -name '.tmp-*' \) -delete 2>/dev/null || true
+  fi
+  progress_note "maintenance: pruning unreachable loose objects (expire: $expire)"
+  if ! run_git prune --expire="$expire"; then
+    ERROR=$(err_json GIT_FAILED "git prune failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  run_git count-objects -v || true
+  local counts="$GIT_OUT"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields countObjects "$counts" removedTmp "$removed")")
+}
+
+# The dedupe: one new pack from everything reachable, redundant packs removed
+# by git itself and only after the new pack is complete, so an interruption
+# leaves the repository whole plus one tmp file the next prune collects. This
+# is the long step, and it needs roughly the repository's real size free while
+# it runs; the plugin says both before starting. `repack` prints no meter when
+# stderr is not a terminal and has no --progress flag, so the note before it is
+# the only narration this step gets — the same deal fsck has.
+action_maintenance_repack() {
+  # On a partial clone the repack honours the filter where this git can
+  # (2.42+): "everything reachable" there means "everything the filter keeps",
+  # and this is also what sheds old blob content a pre-2.42 enable left behind.
+  local -a rargs=(repack -a -d) rfilter="none" unpushed
+  if [ -n "$(git config --get remote.origin.partialclonefilter 2>/dev/null || true)" ]; then
+    unpushed="$(git rev-list --count --branches --not --remotes 2>/dev/null || echo 0)"
+    case "$unpushed" in ''|*[!0-9]*) unpushed=0 ;; esac
+    if [ "$unpushed" -gt 0 ]; then
+      # Blobs only unpushed commits hold have no promisor to come back from;
+      # shedding them is data loss (see repo-partial-enable). Checked FIRST,
+      # so even an old git reports the true reason the filter waited.
+      rfilter="kept (unpushed commits: $unpushed)"
+    elif [ "$(git_version_num)" -ge 242 ]; then # repack --filter, git 2.42+
+      rargs+=(--filter=blob:none)
+      rfilter="blob:none"
+    else
+      # The repository is a partial clone but THIS git cannot shed (2.42+).
+      # Say so, in the stream and in the result: a repack that silently keeps
+      # gigabytes the filter should have dropped is otherwise
+      # indistinguishable from one that shed them.
+      rfilter="unsupported"
+    fi
+  fi
+  progress_note "maintenance: repacking all objects into one pack (filter: $rfilter; the long step; git prints nothing while it works)"
+  if ! run_git "${rargs[@]}"; then
+    ERROR=$(err_json GIT_FAILED "git repack failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  run_git count-objects -v || true
+  local counts="$GIT_OUT"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields countObjects "$counts" repackFilter "$rfilter")")
+}
+
+# ---- repository footprint (v14): shallow history and partial clone -------------
+# Both are DEVICE decisions: the shallow boundary and the partial-clone marking
+# live inside .git, which git never syncs, so nothing here reaches another
+# device. The settings UI reflects the repository's actual state (status now
+# carries `shallow` and `partialFilter`) and flips only after one of these
+# actions answers ok — a toggle that cannot reach the runner does not move.
+
+# Cut this device's history to the newest N commits. The reflog expiry is not
+# optional and the confirmation window says so: reflog entries pin the old
+# commits, and with the reflog kept the cut would free nothing for 90 days —
+# a toggle that visibly does nothing. The user is explicitly discarding old
+# history here, so discarding this device's undo journal over it is the same
+# decision, stated once. Space returns after the maintenance repack.
+action_repo_shallow() {
+  local req_file="$1" depth
+  depth=$(jq -r '.args.depth // empty' "$req_file")
+  case "$depth" in
+    ''|*[!0-9]*) ERROR=$(err_json BAD_REQUEST "Invalid depth." "" ""); return 1 ;;
+  esac
+  if [ "$depth" -lt 1 ] || [ "$depth" -gt 100000 ]; then
+    ERROR=$(err_json BAD_REQUEST "Depth out of range (1..100000)." "" ""); return 1
+  fi
+  # The clone-sized budget, not the 120 s network default: on a real vault the
+  # transfer is small but the negotiation and the local post-processing are
+  # not, and the default `timeout` killed a fetch that had already received
+  # everything — "Receiving objects: 100%, done" followed by the kill.
+  local saved="$NGB_NET_TIMEOUT" rc=0
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  progress_note "shallow: limiting this device's history to the newest $depth commits"
+  run_git_net fetch --depth="$depth" origin || rc=1
+  NGB_NET_TIMEOUT="$saved"
+  if [ "$rc" != 0 ]; then
+    ERROR=$(err_json GIT_FAILED "git fetch --depth failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  run_git reflog expire --expire=now --all || true
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields shallowDepth "$depth")")
+}
+
+# Bring the full history back: one large download, behind its own confirmation
+# in the plugin. `--unshallow` on an already-full repository fails, which the
+# state-reflecting toggle makes unreachable in practice.
+action_repo_unshallow() {
+  local saved="$NGB_NET_TIMEOUT"
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  progress_note "unshallow: downloading the full history"
+  local rc=0
+  run_git_net fetch --unshallow origin || rc=1
+  NGB_NET_TIMEOUT="$saved"
+  if [ "$rc" != 0 ]; then
+    ERROR=$(err_json GIT_FAILED "git fetch --unshallow failed." "$GIT_OUT" "$GIT_ERR"); return 1
+  fi
+  collect_status_fields
+}
+
+# Version-number probe for git features. Probing help output proved unreliable
+# twice on one device in one day: parse-options `-h` exits 129, so
+# `cmd -h >/dev/null 2>&1` reads as "absent" even when the command exists, and
+# `git repack -h` on git 2.55 does not list `--filter` although the option
+# works. A version number is a contract; help text is not.
+git_version_num() { # "git version 2.55.0" -> 255; unparsable -> 0
+  git version 2>/dev/null | awk '{ n = split($3, v, "."); if (n < 2) print 0; else print v[1] * 100 + v[2] }'
+}
+
+# Mark the repository as a permanent partial clone (blob:none): the same
+# marking the object recovery uses temporarily, made permanent at the user's
+# request — blobs are fetched when something needs them, and blobs of files a
+# sparse checkout hides are never fetched at all. Two follow-up steps run only
+# where this git can: `repack --filter` (2.42+) sheds the blobs already held,
+# and `git backfill` (2.49+) prefetches the current checkout's blobs so the
+# working set stays readable offline, honouring the sparse cone. On older git
+# both are skipped and reported: the marking still makes every FUTURE fetch
+# light, and a later maintenance on newer git sheds the rest.
+action_repo_partial_enable() {
+  if ! git remote get-url origin >/dev/null 2>&1; then
+    ERROR=$(err_json BAD_REQUEST "Partial clone needs an 'origin' remote to promise the missing content." "" ""); return 1
+  fi
+  run_git config remote.origin.promisor true
+  run_git config remote.origin.partialclonefilter blob:none
+  run_git config extensions.partialClone origin
+  run_git config core.repositoryformatversion 1
+  # Blobs that exist ONLY in unpushed commits have no promisor to come back
+  # from: shedding them is data loss wearing a maintenance icon. Found live —
+  # a filtered repack shed the blobs of a local rescue branch, and every later
+  # walk spammed "remote error: not our ref" trying to fetch what the remote
+  # never had. With anything unpushed, the shed waits; the marking itself is
+  # still safe, because on-demand fetching only ever concerns objects git no
+  # longer holds.
+  local shed=false prefetched=false gitv unpushed
+  gitv="$(git_version_num)"
+  unpushed="$(git rev-list --count --branches --not --remotes 2>/dev/null || echo 0)"
+  case "$unpushed" in ''|*[!0-9]*) unpushed=0 ;; esac
+  if [ "$unpushed" -gt 0 ]; then
+    progress_note "partial: NOT shedding local content — $unpushed unpushed commit(s) hold data the remote cannot give back; push them (or delete a leftover rescue branch) and run the storage cleanup"
+  elif [ "$gitv" -ge 242 ]; then # repack --filter, git 2.42+
+    progress_note "partial: shedding blob content the filter no longer keeps (git repack --filter)"
+    run_git repack -a -d --filter=blob:none && shed=true
+  fi
+  if [ "$gitv" -ge 249 ]; then # git backfill, 2.49+
+    progress_note "partial: prefetching the current checkout's content (git backfill --sparse)"
+    run_git_net backfill --sparse && prefetched=true
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields partialShed "$shed" partialPrefetched "$prefetched")")
+}
+
+# Undo the marking honestly: every promised object is brought back FIRST, and
+# a repository that would be left lying about its own completeness is refused.
+# `.promisor` pack markers go with the config — a stale one lets a later fsck
+# treat that pack's objects as promised rather than missing (the 0.6.4 lesson).
+action_repo_partial_disable() {
+  local missing packdir
+  missing="$(git rev-list --objects --missing=print --all 2>/dev/null | grep -c '^?' || true)"
+  if [ "$missing" -gt 0 ]; then
+    local saved="$NGB_NET_TIMEOUT"
+    NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+    progress_note "partial: fetching all promised content back (git fetch --refetch)"
+    local rc=0
+    run_git_net fetch --refetch origin || rc=1
+    NGB_NET_TIMEOUT="$saved"
+    if [ "$rc" != 0 ]; then
+      ERROR=$(err_json GIT_FAILED "Could not fetch the promised content back (needs git 2.41+ and the network); leaving partial clone enabled." "$GIT_OUT" "$GIT_ERR")
+      return 1
+    fi
+    missing="$(git rev-list --objects --missing=print --all 2>/dev/null | grep -c '^?' || true)"
+    if [ "$missing" -gt 0 ]; then
+      ERROR=$(err_json GIT_FAILED "Content is still missing after the refetch; leaving partial clone enabled rather than hiding that." "" "")
+      return 1
+    fi
+  fi
+  run_git config --unset remote.origin.promisor || true
+  run_git config --unset remote.origin.partialclonefilter || true
+  run_git config --unset extensions.partialClone || true
+  run_git config core.repositoryformatversion 0
+  packdir="$(git rev-parse --git-path objects/pack)"
+  rm -f "$packdir"/*.promisor 2>/dev/null || true
+  collect_status_fields
+}
+
 # ---- repository bootstrap (v11) ------------------------------------------------
 # The missing beginning of the story: a vault that is not a repository yet, or
 # one without a remote. Everything interactive (a PAT, a passphrase) stays in
@@ -2834,12 +3119,47 @@ action_clone_into_vault() {
   mkdir -p "$tmp" || { ERROR=$(err_json GIT_FAILED "Could not create a working directory for the clone." "" ""); return 1; }
   local -a cargs=(clone --no-checkout --origin origin)
   [ -n "$branch" ] && cargs+=(--branch "$branch")
+  # Lightweight clone (v14). The filter is a whitelist of one value, and the
+  # depth is digits only: both reach git as arguments. A remote that cannot
+  # serve filters makes git fall back to a full clone with a warning, which is
+  # the right failure: a vault, just heavier.
+  local cfilter cdepth
+  cfilter=$(jq -r '.args.filter // empty' "$req_file")
+  cdepth=$(jq -r '.args.depth // empty' "$req_file")
+  if [ -n "$cfilter" ]; then
+    [ "$cfilter" = "blob:none" ] || { ERROR=$(err_json BAD_REQUEST "Invalid filter (only blob:none)." "" ""); return 1; }
+    cargs+=(--filter=blob:none)
+  fi
+  if [ -n "$cdepth" ]; then
+    case "$cdepth" in *[!0-9]*|'') ERROR=$(err_json BAD_REQUEST "Invalid depth." "" ""); return 1 ;; esac
+    cargs+=(--depth "$cdepth")
+  fi
   cargs+=(-- "$url" "$tmp/repo")
+  # A re-clone of a private remote must authenticate, and a fresh clone has no
+  # credential configuration of its own: per-repository auth is the design
+  # (rule 11), so the new repository starts with none, and the runner never
+  # permits a prompt — the 18:03 bundle of the after-0.6.3 session shows
+  # exactly this failing ("could not read Password … terminal prompts
+  # disabled"). When a repository is being REPLACED, its credential.* keys are
+  # passed on the command line, the same way and for the same reasons as the
+  # object recovery's fetch: argv only, nothing written, nothing outliving
+  # the clone. A bootstrap clone (no repository yet) still relies on a global
+  # helper or an SSH key, as documented.
+  local -a ccred=()
+  if [ "$PROFILE_STATE" = "ready" ]; then
+    local ckey cline
+    while IFS= read -r cline; do
+      [ -n "$cline" ] || continue
+      ckey="${cline%% *}"
+      [ "$ckey" = "$cline" ] && continue
+      ccred+=(-c "$ckey=${cline#* }")
+    done < <(git config --get-regexp '^credential\.' 2>/dev/null || true)
+  fi
   local saved_timeout="$NGB_NET_TIMEOUT"
   NGB_NET_TIMEOUT="$NGB_CLONE_TIMEOUT"
   local ok=0
   progress_note "clone: downloading the repository (no checkout yet)"
-  run_git_net "${cargs[@]}" || ok=1
+  run_git_net ${ccred[@]+"${ccred[@]}"} "${cargs[@]}" || ok=1
   NGB_NET_TIMEOUT="$saved_timeout"
   if [ "$ok" != 0 ]; then
     rm -rf "$tmp"
@@ -3064,6 +3384,14 @@ process_request() {
     repair-refetch)        action_repair_refetch || { ok=false; ec=1; } ;;
     repair-reset-upstream) action_repair_reset_upstream || { ok=false; ec=1; } ;;
     repair-drop-backup)    action_repair_drop_backup "$req_file" || { ok=false; ec=1; } ;;
+    untrack-file)          action_untrack_file "$req_file" || { ok=false; ec=1; } ;;
+    maintenance-scan)      action_maintenance_scan || { ok=false; ec=1; } ;;
+    maintenance-prune)     action_maintenance_prune "$req_file" || { ok=false; ec=1; } ;;
+    maintenance-repack)    action_maintenance_repack || { ok=false; ec=1; } ;;
+    repo-shallow)          action_repo_shallow "$req_file" || { ok=false; ec=1; } ;;
+    repo-unshallow)        action_repo_unshallow || { ok=false; ec=1; } ;;
+    repo-partial-enable)   action_repo_partial_enable || { ok=false; ec=1; } ;;
+    repo-partial-disable)  action_repo_partial_disable || { ok=false; ec=1; } ;;
     abort-merge)           action_abort_merge || { ok=false; ec=1; } ;;
     abort-rebase)          action_abort_rebase || { ok=false; ec=1; } ;;
     continue-rebase)       action_continue_rebase || { ok=false; ec=1; } ;;
@@ -3116,7 +3444,7 @@ process_request() {
   if [ "$ok" = false ]; then
     case "$action" in
       # Read-only, or already collecting status themselves.
-      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list) ;;
+      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|maintenance-scan) ;;
       *)
         error_data="$DATA"
         collect_status_fields

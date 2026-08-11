@@ -65,6 +65,9 @@ export interface RunnerOutputActions {
   openStatusPanel(): void;
   /** Open (or focus) the repository history panel. */
   openHistoryPanel(): void;
+  /** Wrap long lines in the console field (shared preference, own toggle). */
+  wrapLines(): boolean;
+  toggleWrapLines(): Promise<void>;
 }
 
 /**
@@ -94,6 +97,7 @@ export class RunnerOutputView extends ItemView {
   private factsEl: HTMLElement | null = null;
   private cancelBtn: HTMLElement | null = null;
   private refreshBtn: HTMLElement | null = null;
+  private wrapBtn: HTMLElement | null = null;
   // Named to collide with NOTHING on the base classes: a field here was once
   // called `open`, it shadowed an untyped runtime member of Obsidian's view
   // chain, and the panel rendered black — constructor run, `onOpen` never
@@ -179,8 +183,11 @@ export class RunnerOutputView extends ItemView {
     const mobile = Platform.isPhone;
 
     const bar = (mobile ? footBar : headEl).createDiv({ cls: "ngb-sv-toolbar" });
-    // The log tabs, left of refresh. Each shows ONE log in the panel's single
-    // console field; tapping the active one returns to the live operation.
+    // The tabs, left of refresh. Each shows ONE log in the panel's single
+    // console field. The live view has a button of its OWN: it used to be
+    // reachable only by tapping the active tab a second time, and a user who
+    // switched tabs while reading the idle view's newest stream had no visible
+    // way back to it — an affordance nobody can discover is not one.
     this.tabBtns.clear();
     const tabBtn = (tab: RunnerOutputTab, icon: string, label: string) => {
       const b = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon ngb-out-tab" });
@@ -189,9 +196,25 @@ export class RunnerOutputView extends ItemView {
       b.addEventListener("click", () => this.setTab(tab));
       this.tabBtns.set(tab, b);
     };
+    tabBtn("current", "activity", "Live operation");
     tabBtn("past", "layers", "Earlier operations");
     tabBtn("runner", "scroll", "Termux runner log");
     tabBtn("oplog", "file-clock", "Plugin operation log");
+    // The divider separates two kinds of control: the tabs choose WHAT the
+    // console shows, everything right of the line acts on how it is shown.
+    bar.createDiv({ cls: "ngb-out-tab-sep" });
+    const wrapBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
+    wrapBtn.setAttribute("aria-label", "Wrap long lines");
+    setIcon(wrapBtn, "wrap-text");
+    wrapBtn.addEventListener("click", () => {
+      // Await the preference write before reading it back: the highlight and
+      // the class must be set from what was SAVED, not from what was hoped.
+      void (async () => {
+        await this.actions.toggleWrapLines();
+        this.applyWrapState();
+      })();
+    });
+    this.wrapBtn = wrapBtn;
     const refreshBtn = bar.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     refreshBtn.setAttribute("aria-label", "Read the output again now");
     setIcon(refreshBtn, "refresh-cw");
@@ -235,6 +258,15 @@ export class RunnerOutputView extends ItemView {
     // Shown only on the live tab; the log tabs are the console field alone.
     this.factsEl = body.createDiv({ cls: "ngb-out-facts" });
     this.applyTabState();
+    this.applyWrapState();
+  }
+
+  /** The wrap toggle's highlight and the console's class, from the saved pref. */
+  private applyWrapState(): void {
+    const on = this.actions.wrapLines();
+    this.wrapBtn?.toggleClass("ngb-sv-icon-active", on);
+    this.wrapBtn?.setAttribute("aria-pressed", on ? "true" : "false");
+    this.streamBox?.toggleClass("ngb-out-wrap", on);
   }
 
   /**
@@ -248,7 +280,11 @@ export class RunnerOutputView extends ItemView {
     this.applyTabState();
   }
 
-  /** Select a tab; the active one tapped again returns to the live operation. */
+  /**
+   * Select a tab. Tapping the active one still returns to the live view (the
+   * pre-Live-button habit keeps working), and the Live tab itself is idempotent
+   * because "current" is what a deselection falls back to anyway.
+   */
   private setTab(tab: RunnerOutputTab): void {
     this.outTab = this.outTab === tab ? "current" : tab;
     this.applyTabState();

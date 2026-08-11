@@ -218,6 +218,16 @@ The file does not exist at that commit (rename? use the file history view, which
 
 The file-history panel restores a block only when the current file still contains it exactly as it was before or after that commit. If the note has drifted since, the plugin refuses instead of guessing where the block belongs, and says so. Restore the whole file version from that commit, or copy the lines by hand from the expanded diff.
 
+## A file added to .gitignore or the exclude list still shows its changes
+
+That is git, not the panel. Ignore rules only affect files git does not track yet: a file that has ever been committed keeps reporting its changes whatever `.gitignore` or `.git/info/exclude` say, and it stays in every commit. The plugin says so when you add a rule for such a file, and offers **Stop tracking (keep the file)** — also available in the file's git menu (runner v14 or newer). Untracking stages a deletion for you to commit; the file stays on disk and becomes untracked, which is the state the ignore rule can act on. Two things to know before committing it: once that commit reaches your other devices, their pull removes their copy of the file (or reports a conflict if it has local changes there), and without an ignore rule the next sync or commit stages the file right back. *Hide on this device (sparse)* is different: it removes the file from this device's working tree entirely, tracked or not, which is the wrong tool for a file Obsidian keeps rewriting.
+
+## `.git/objects` keeps growing
+
+The object database grows and never shrinks by itself, and two things grow it fast: every full-history repair download adds a complete pack without removing the old ones (deliberately — removing anything mid-recovery would risk the repository it is trying to save), and an interrupted download leaves a temporary pack file as large as whatever arrived. Repeated repairs can multiply gigabytes this way.
+
+**Clean up repository storage** in the command palette is the exit. It scans first and shows the real numbers — how large the object database is, how many packs, how much is leftover temporary files — then, after your confirmation, removes stale temporary files and unreachable loose objects older than two weeks and repacks everything reachable into one pack. Nothing any branch, tag, reflog or the index can reach is touched, and reflogs are not expired. The repack is the long step: it needs free space roughly the size of the repacked history while it runs, and the output panel shows what is happening. A repair backup branch (`ngb-rescue-…`) keeps its objects alive on purpose; the report names it, and its space is freed once you delete the backup.
+
 ## A move shows as a deletion plus an untracked file
 
 That is git, not the panel. Rename detection compares the index, so a file moved in the working tree is a deletion and a new untracked file until the change is staged; `git status --find-renames` does not change it. Stage both halves (the "+" buttons on the Changes and Untracked groups, or Stage all) and the two rows collapse into one "renamed" row that shows the old path.

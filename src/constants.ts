@@ -1,6 +1,15 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
 export const RUNNER_MIN_VERSION = 12;
+/**
+ * The runner version this build SHIPS (RUNNER_VERSION in
+ * native-git-bridge/termux/native-git-bridge-runner.sh; a test asserts the two
+ * agree). Version advice compares against this, not against the minimum: any
+ * runner in [min, shipped] is a correct installation, and comparing against
+ * the floor branded every up-to-date runner "newer than expected" — the
+ * released 0.6.3 showed that warning to every correctly installed device.
+ */
+export const RUNNER_SHIPPED_VERSION = 14;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).
@@ -49,6 +58,20 @@ export const ACTION_TIMEOUT_SECONDS: Readonly<Record<string, number>> = {
   "repair-fetch-missing": 900,
   "repair-refetch": 900,
   "repair-reset-upstream": 300,
+  // Storage maintenance. The repack rewrites every reachable object into one
+  // pack, which on a multi-gigabyte object database is tens of minutes of CPU
+  // on a phone — the longest budget in the file, and honestly so. Prune is
+  // I/O-bound and cheap next to it; the scan is one count-objects.
+  "maintenance-scan": 300,
+  "maintenance-prune": 600,
+  "maintenance-repack": 3600,
+  // Footprint changes. Shallowing transfers almost nothing (the history is
+  // already here); unshallow and partial-disable download history or content
+  // wholesale; partial-enable may shed and prefetch, both long on a real vault.
+  "repo-shallow": 900,
+  "repo-unshallow": 1800,
+  "repo-partial-enable": 1800,
+  "repo-partial-disable": 1800,
 };
 
 /**

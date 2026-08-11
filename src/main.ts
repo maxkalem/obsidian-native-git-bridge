@@ -66,7 +66,14 @@ import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui
 import { buildMenuEntries, menuHeader, type MenuAction, type MenuScope } from "./ui/gitMenu";
 import { looksLikeObjectCorruption, summarizeGitError } from "./git/gitErrors";
 import { describeRestore, restoreBlockInFile } from "./git/restoreBlock";
-import { ignoreEntryMatches, parseIgnoreEntries } from "./git/ignoreFile";
+import { ignoreEntryMatches, parseIgnoreEntries, trackedPathsAmong } from "./git/ignoreFile";
+import {
+  maintenanceReportLines,
+  maintenanceVerdict,
+  parseCountObjects,
+  totalKb,
+  type ObjectStats,
+} from "./git/objectStats";
 import type { DiffHunk } from "./git/hunks";
 import { HistoryView, NGB_HISTORY_VIEW } from "./ui/HistoryView";
 import { DiffView, NGB_DIFF_VIEW, type DiffLoadResult, type DiffViewState } from "./ui/DiffView";
@@ -98,6 +105,7 @@ import {
   bootstrapCommand,
   bootstrapCommandLocal,
   RUNNER_MIN_VERSION,
+  RUNNER_SHIPPED_VERSION,
   RUNNER_OUTDATED_HINT,
   TERMUX_FDROID_URL,
   TERMUX_SITE_URL,
@@ -129,6 +137,10 @@ interface SharedUiPrefs {
   showRibbonIcon: boolean;
   /** Wrap long lines in the diff pane instead of scrolling horizontally. */
   wrapDiffLines: boolean;
+  /** Wrap long lines in the output panel's console field. Its own toggle, not
+   * `wrapDiffLines`: a diff is code read in columns, a console is prose-ish
+   * git output, and the user reading one has no reason to re-wrap the other. */
+  wrapOutputLines: boolean;
   /** Render whitespace glyphs (· → ␍) in the diff pane. */
   showInvisibles: boolean;
   /**
@@ -193,6 +205,7 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showStatusBar: true,
   showRibbonIcon: true,
   wrapDiffLines: false,
+  wrapOutputLines: false,
   showInvisibles: false,
   keepLineSelection: false,
   showChangeWords: true,
@@ -339,6 +352,9 @@ export default class NativeGitBridgePlugin extends Plugin {
     mergeInProgress?: boolean;
     /** An unfinished rebase (started in Termux; nothing here starts one). */
     rebaseInProgress?: boolean;
+    /** Repository footprint (runner v14): what the settings toggles reflect. */
+    shallow?: boolean;
+    partialFilter?: string;
   } | null = null;
 
   async onload(): Promise<void> {
@@ -513,6 +529,9 @@ export default class NativeGitBridgePlugin extends Plugin {
           cancel: () => void this.cmdCancel(),
           openStatusPanel: () => void this.openStatusPanel(),
           openHistoryPanel: () => void this.openHistoryPanel(),
+          wrapLines: () => this.sharedPrefs.wrapOutputLines,
+          toggleWrapLines: () =>
+            this.setSharedPref({ wrapOutputLines: !this.sharedPrefs.wrapOutputLines }),
         })
     );
 
@@ -614,6 +633,9 @@ export default class NativeGitBridgePlugin extends Plugin {
       ignored: single && this.isGitignored(path),
       sparseExcluded: single && this.isSparseExcluded(path),
       excluded: single && this.isExcluded(path),
+      // The entry is only honest when the runner can serve it; 0 (never heard
+      // from a runner) also stays silent rather than offering a refusal.
+      untrack: this.lastRunnerVersion >= 14,
     });
     // What the menu is about, above what it can do. A panel row truncates its
     // name to fit one line and the file explorer shows no path at all, so this
@@ -700,6 +722,9 @@ export default class NativeGitBridgePlugin extends Plugin {
         return;
       case "exclude-remove":
         void this.cmdExcludeChange(path, false);
+        return;
+      case "untrack":
+        this.offerUntrack(path);
         return;
     }
   }
@@ -1590,7 +1615,34 @@ export default class NativeGitBridgePlugin extends Plugin {
           }).open();
           return;
         }
-        void this.runClone(verdict.url, replaceExisting);
+        this.askCloneKind(verdict.url, replaceExisting);
+      }
+    ).open();
+  }
+
+  /**
+   * Full or lightweight, decided while it is still cheap: a lightweight clone
+   * downloads a fraction up front, where converting later means enabling the
+   * filter and shedding what a full clone already brought. The ✕ cancels; two
+   * labelled buttons because these are two answers to one question, not an
+   * action and its decline.
+   */
+  private askCloneKind(url: string, replaceExisting: boolean): void {
+    new ResultModal(
+      this.app,
+      "How much should this device hold?",
+      [
+        "Full clone: the whole history and all file content. Everything works offline.",
+        "Lightweight (partial clone, blob:none): file content is fetched when something needs it, and content that a sparse checkout hides is never downloaded at all. Old file versions and 'Show again' need the network. Best for devices with little space.",
+      ],
+      {
+        actions: [
+          { label: "Full clone", cta: true, onClick: () => void this.runClone(url, replaceExisting) },
+          {
+            label: "Lightweight (partial clone)",
+            onClick: () => void this.runClone(url, replaceExisting, "blob:none"),
+          },
+        ],
       }
     ).open();
   }
@@ -1655,7 +1707,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     new ResultModal(
       this.app,
-      "Remote saved — but the two histories are unrelated",
+      "Remote saved; histories are unrelated",
       [
         `Origin is now ${shown}, and it already contains: ${remoteBranches.join(", ")}.`,
         "This vault also has commits of its own, made here. Git treats the two as unrelated histories: pull will refuse to merge them, and push will be rejected. Nothing is broken — but they cannot simply be joined.",
@@ -1687,9 +1739,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     new ResultModal(this.app, "Repository content taken over", lines.filter((l) => l !== "")).open();
   }
 
-  private async runClone(url: string, replaceExisting = false): Promise<void> {
+  private async runClone(url: string, replaceExisting = false, filter?: string): Promise<void> {
     const args: Record<string, unknown> = { url };
     if (replaceExisting) args.replaceExisting = true;
+    if (filter !== undefined) args.filter = filter;
     const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
     if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
@@ -1901,6 +1954,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       { id: "create-repository", name: "Create a new repository in this vault", cb: () => void this.cmdCreateRepository() },
       { id: "clone-repository", name: "Clone an existing remote into this vault", cb: () => void this.cmdCloneRepository() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() },
+      { id: "maintenance-cleanup", name: "Clean up repository storage (.git/objects)", cb: () => void this.cmdMaintenance() },
+      { id: "drop-rescue-backup", name: "Delete repair backup branch (ngb-rescue)", cb: () => this.cmdRescueCleanup() },
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
 
@@ -2160,6 +2215,12 @@ export default class NativeGitBridgePlugin extends Plugin {
       // level up: clear only what is still yours, and hand the slots to
       // whatever is still in flight rather than to nobody.
       if (this.runningId === req.id) this.adoptNewestInFlight();
+      // The history panels' copy of the state line is written only by the
+      // per-second tick, and the ticker is already cleared by now, so without
+      // a final push their line froze at the last rendered second after the
+      // request finished ("diff-file… 4s", forever). `pushStatusToView` below
+      // reaches the status panel only; this call is what reaches the rest.
+      this.updateProgressInView(this.progressText, this.progressDetail);
       this.refreshStatusBarIdle();
       this.pushStatusToView();
     }
@@ -2781,8 +2842,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
   }
 
-  /** Add/remove a line in .git/info/exclude (device-local ignore, via the runner). */
-  async cmdExcludeChange(path: string, add: boolean): Promise<void> {
+  /**
+   * Add/remove a line in .git/info/exclude (device-local ignore, via the runner).
+   *
+   * `standalone = false` is for the bulk route only: it suppresses the
+   * per-path tracked warning and the per-path status refresh, both of which
+   * the bulk confirmation does ONCE after its loop.
+   */
+  async cmdExcludeChange(path: string, add: boolean, standalone = true): Promise<void> {
     const result = await this.runOperation(add ? "exclude-add" : "exclude-remove", { path });
     if (!result) return;
     if (!result.ok) {
@@ -2795,6 +2862,297 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     this.absorbExcludeList(result.data?.excludeList);
     new Notice(add ? `Added to .git/info/exclude: /${path}` : `Removed from exclude: ${path}`);
+    if (standalone && add) this.warnIfRuleTargetsTracked([path]);
+    if (standalone) await this.refreshAfterRuleChange(result.data);
+  }
+
+  /**
+   * Bring the panel in step after an ignore-rule change (.gitignore, sparse,
+   * .git/info/exclude). A result that carried fresh status fields is absorbed
+   * for free; one that did not (exclude-add/remove return only the exclude
+   * list, and .gitignore is written by the plugin itself) costs one status
+   * round trip. That cost is deliberate: every route that changes a rule must
+   * leave the panel agreeing with git, or the rule looks like it did nothing.
+   */
+  private async refreshAfterRuleChange(data?: Record<string, string>): Promise<void> {
+    if (data?.branchInfo) {
+      this.absorbStatusData(data);
+      return;
+    }
+    await this.cmdStatus(true);
+  }
+
+  /**
+   * Say when an ignore rule cannot do what it looks like it does. Rules in
+   * .gitignore and .git/info/exclude affect UNTRACKED files only; on a tracked
+   * path the file keeps appearing in the panel and in every commit until it is
+   * untracked, and without this notice the refresh after the rule reads as a
+   * refresh that failed. Untracking from the plugin needs a runner action and
+   * is scheduled with the next runner version, so the notice states the fact
+   * and promises nothing.
+   */
+  private warnIfRuleTargetsTracked(paths: string[]): void {
+    const st = this.lastStatus?.status;
+    if (!st) return;
+    const tracked = trackedPathsAmong(st, paths);
+    if (tracked.length === 0) return;
+    const subject =
+      tracked.length === 1
+        ? `'${tracked[0]}' is tracked by git`
+        : `${tracked.length} of these paths are tracked by git`;
+    const explanation = `${subject}: ignore rules only affect untracked files, so the changes will keep appearing until the file is untracked.`;
+    // With a v14 runner the plugin can fix what it just explained; a single
+    // tracked file gets the offer, and an older runner gets the bare fact.
+    if (tracked.length === 1 && this.lastRunnerVersion >= 14) {
+      this.offerUntrack(tracked[0]!, explanation);
+      return;
+    }
+    new Notice(explanation);
+  }
+
+  /** The untrack confirmation, shared by the notice-upgrade and the menu entry. */
+  private offerUntrack(path: string, lead?: string): void {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Stop tracking this file?",
+        body: [
+          ...(lead === undefined ? [] : [lead]),
+          `'${path}' stays on disk; a deletion enters the index for you to commit.`,
+          "Once that commit reaches your other devices, their pull deletes their copy — or reports a conflict if it has local changes. The panel shows and resolves both.",
+          "Without an ignore rule for the path, the next sync or commit stages the file right back.",
+        ],
+        confirmLabel: "Stop tracking",
+        icon: "eye-off",
+        danger: true,
+      },
+      async (ok) => {
+        if (ok) await this.cmdUntrackFile(path);
+      }
+    ).open();
+  }
+
+  /** Stop tracking one file, keeping it on disk (`git rm --cached` semantics, runner v14). */
+  async cmdUntrackFile(path: string): Promise<void> {
+    const result = await this.runOperation("untrack-file", {
+      path,
+      protectedPaths: this.effectiveProtectedPaths(),
+    });
+    if (!result) return;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: could not stop tracking the file", result);
+      return;
+    }
+    this.absorbStatusData(result.data ?? {});
+    new Notice(`No longer tracked (still on disk): ${path}. Commit the staged deletion to finish.`);
+    // The ignore-rule half. Without one the next `git add -A` re-stages the
+    // file, and the user just asked for the opposite; said, not done for them.
+    if (!this.isGitignored(path) && !this.isExcluded(path)) {
+      new Notice(`No ignore rule covers ${path} yet: the next sync or commit will track it again unless one is added.`);
+    }
+  }
+
+  /**
+   * Clean up `.git/objects`: scan, confirm with the real numbers, prune, then
+   * repack. The object database only ever grows on its own — every repair
+   * refetch ADDS a full pack and an interrupted download leaves a
+   * multi-gigabyte temporary file — and this is the designed exit (a real
+   * device reached 20 GB over a ~4 GB history). The decisions live here; the
+   * runner steps are dumb primitives, the same split the repair uses.
+   */
+  async cmdMaintenance(): Promise<void> {
+    const scan = await this.runOperation("maintenance-scan", {});
+    if (!scan) return;
+    if (!scan.ok) {
+      new ResultModal(this.app, "Native Git: storage scan failed", [scan.error?.message ?? "Unknown error."], {
+        stdout: scan.error?.stdout,
+        stderr: scan.error?.stderr,
+        isError: true,
+      }).open();
+      return;
+    }
+    this.absorbStatusData(scan.data ?? {});
+    const before = parseCountObjects(scan.data?.countObjects ?? "");
+    const rescue = (scan.data?.rescueBranches ?? "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
+    new ConfirmModal(
+      this.app,
+      {
+        title: `Free up ${formatSize(totalKb(before))}?`,
+        body: maintenanceReportLines(before, rescue),
+        confirmLabel: "Clean up now",
+        icon: "eraser",
+      },
+      async (ok) => {
+        if (ok) await this.runMaintenanceSteps(before);
+      }
+    ).open();
+  }
+
+  private async runMaintenanceSteps(before: ObjectStats): Promise<void> {
+    const prune = await this.runOperation("maintenance-prune", { expire: "2.weeks.ago" });
+    if (!prune) return;
+    if (!prune.ok) {
+      this.renderMutationError("Native Git: storage cleanup failed", prune);
+      return;
+    }
+    this.absorbStatusData(prune.data ?? {});
+    const repack = await this.runOperation("maintenance-repack", {});
+    if (!repack) return;
+    if (!repack.ok) {
+      this.renderMutationError("Native Git: repack failed", repack);
+      return;
+    }
+    this.absorbStatusData(repack.data ?? {});
+    const after = parseCountObjects(repack.data?.countObjects ?? "");
+    const verdict = maintenanceVerdict(before, after);
+    // Into the operation log as well as the modal: every bundle this feature
+    // was debugged from carried four ok=true lines and no sizes, and the
+    // numbers are the whole point of the operation.
+    this.log.add(
+      "info",
+      "maintenance",
+      `${verdict} (repack filter: ${repack.data?.repackFilter ?? "unknown"})`
+    );
+    new ResultModal(this.app, "Repository storage cleaned", [verdict]).open();
+  }
+
+  // ------------------------------------------------ repository footprint (v14)
+
+  /** What the settings toggles reflect; null until a status has been heard. */
+  footprintState(): { shallow: boolean; partial: boolean } | null {
+    if (!this.lastStatus) return null;
+    return {
+      shallow: this.lastStatus.shallow === true,
+      partial: this.lastStatus.partialFilter !== undefined,
+    };
+  }
+
+  /** Runner v14 is what serves every footprint action. */
+  footprintAvailable(): boolean {
+    return this.lastRunnerVersion >= 14;
+  }
+
+  /**
+   * All four footprint changes share one shape: confirm with the consequences
+   * stated, run the action, and let the ABSORBED status decide what the toggle
+   * shows — a change the runner refused changes nothing on screen.
+   */
+  private footprintChange(
+    title: string,
+    body: string[],
+    confirmLabel: string,
+    /** SHORT failure-window title of its own: reusing the question ran past
+     * the modal's one line, and a truncated title states less than a plain one. */
+    errTitle: string,
+    action: BridgeAction,
+    args: Record<string, unknown>,
+    danger: boolean,
+    after?: () => void
+  ): Promise<void> {
+    return new Promise((resolve) => {
+      new ConfirmModal(
+        this.app,
+        { title, body, confirmLabel, icon: "hard-drive", danger },
+        async (ok) => {
+          if (!ok) {
+            resolve();
+            return;
+          }
+          const result = await this.runOperation(action, args);
+          if (result) {
+            if (result.ok) {
+              this.absorbStatusData(result.data ?? {});
+              after?.();
+            } else {
+              this.renderMutationError(errTitle, result);
+            }
+          }
+          resolve();
+        }
+      ).open();
+    });
+  }
+
+  async cmdShallowEnable(): Promise<void> {
+    const depth = this.deviceSettings.shallowDepth;
+    await this.footprintChange(
+      "Limit history on this device?",
+      [
+        `Only the newest ${depth} commits stay on this device; older history leaves it. The remote and your other devices keep everything.`,
+        "The history panels here reach only what stays, and restoring a file from an older commit is not possible on this device.",
+        "This also clears git's local undo journal (the reflog) on this device: with it kept, the old commits stay pinned and the cut would free nothing for 90 days.",
+        "Disk space returns after the next Clean up repository storage.",
+      ],
+      `Keep ${depth} commits`,
+      "Native Git: shallow failed",
+      "repo-shallow",
+      { depth },
+      true,
+      () => new Notice(`History limited to the newest ${depth} commits on this device. Run Clean up repository storage to free the space.`)
+    );
+  }
+
+  async cmdUnshallow(): Promise<void> {
+    await this.footprintChange(
+      "Download the full history back?",
+      ["One large download over the network; the budget is generous, and the output panel shows progress."],
+      "Download full history",
+      "Native Git: unshallow failed",
+      "repo-unshallow",
+      {},
+      false,
+      () => new Notice("Full history restored on this device.")
+    );
+  }
+
+  async cmdPartialEnable(): Promise<void> {
+    await this.footprintChange(
+      "Enable partial clone on this device?",
+      [
+        "The repository is marked as a partial clone (blob:none): file content is fetched when something needs it, and the content of files your sparse checkout hides is never downloaded at all.",
+        "'Show again (remove sparse exclusion)' will need the NETWORK from now on: materialising hidden files fetches their content from the remote.",
+        "Old versions of files open on demand the same way, so file history needs the network for content this device has not fetched yet.",
+        "Applies to this device only. Run Clean up repository storage afterwards to shed content that is already downloaded.",
+      ],
+      "Enable partial clone",
+      "Native Git: partial clone failed",
+      "repo-partial-enable",
+      {},
+      true,
+      () => new Notice("Partial clone enabled on this device. Run Clean up repository storage to shed already-downloaded content.")
+    );
+  }
+
+  async cmdPartialDisable(): Promise<void> {
+    await this.footprintChange(
+      "Disable partial clone?",
+      [
+        "Everything the filter skipped is fetched from the remote first — one large download — and the repository is unmarked only once nothing is missing.",
+      ],
+      "Disable partial clone",
+      "Native Git: partial clone stays",
+      "repo-partial-disable",
+      {},
+      false,
+      () => new Notice("Partial clone disabled; all content is local again.")
+    );
+  }
+
+  /**
+   * The one-time offer: sparse is hiding files, the runner can serve partial
+   * clone, and the device is still downloading content it will never show.
+   * Fires once per device; the settings toggle stays available either way.
+   */
+  private maybeOfferPartialForSparse(): void {
+    if (this.deviceSettings.partialOfferShown) return;
+    const st = this.lastStatus;
+    if (!st || !st.sparse.enabled || st.partialFilter !== undefined) return;
+    if (this.lastRunnerVersion < 14) return;
+    this.deviceSettings = this.store.write({ partialOfferShown: true });
+    void this.cmdPartialEnable();
   }
 
   async refreshExcludeList(): Promise<string[] | null> {
@@ -2831,7 +3189,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     return ignoreEntryMatches(parseIgnoreEntries(this.gitignoreLines.join("\n")), path);
   }
 
-  async gitignoreAdd(entry: string): Promise<void> {
+  /** `standalone = false`: bulk route; it warns and refreshes once itself. */
+  async gitignoreAdd(entry: string, standalone = true): Promise<void> {
     if (entry.trim() === "" || hasControlChars(entry)) {
       new Notice("Invalid .gitignore entry.");
       return;
@@ -2844,15 +3203,24 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.gitignoreLines.push(entry.trim());
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
     new Notice(`Added to .gitignore: ${entry.trim()}`);
+    if (standalone) {
+      // The menu writes the anchored form (`/path`); the settings tab may hand
+      // over any pattern, which simply matches no tracked path and warns nothing.
+      this.warnIfRuleTargetsTracked([entry.trim().replace(/^\//, "").replace(/\/$/, "")]);
+      // .gitignore changes what `status` reports, and the plugin edited it
+      // behind git's back, so only a fresh status can bring the panel in step.
+      await this.refreshAfterRuleChange();
+    }
   }
 
-  async gitignoreRemove(entry: string): Promise<void> {
+  async gitignoreRemove(entry: string, standalone = true): Promise<void> {
     await this.loadGitignore();
     const before = this.gitignoreLines.length;
     this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry.trim());
     if (this.gitignoreLines.length === before) return;
     await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
     new Notice(`Removed from .gitignore: ${entry.trim()}`);
+    if (standalone) await this.refreshAfterRuleChange();
   }
 
   isSparseExcluded(path: string): boolean {
@@ -3336,8 +3704,11 @@ export default class NativeGitBridgePlugin extends Plugin {
       // an old runner cannot report a state it does not look for, and treating
       // the missing field as `true` would put a banner on every panel.
       rebaseInProgress: d.rebaseInProgress === "true",
+      shallow: d.shallow === "true",
+      partialFilter: d.partialFilter?.trim() ? d.partialFilter.trim() : undefined,
     };
     this.statusStale = false;
+    this.maybeOfferPartialForSparse();
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();
   }
@@ -3503,7 +3874,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         ...(issues.length > shown.length ? [`…and ${issues.length - shown.length} more.`] : []),
       ];
       const renamable = issues.filter((i) => !i.needsFolderRename);
-      new ResultModal(this.app, "Filenames other machines cannot check out", lines, {
+      new ResultModal(this.app, "Filenames too long for other machines", lines, {
         isError: true,
         actions: [
           ...(renamable.length > 0
@@ -3890,12 +4261,33 @@ export default class NativeGitBridgePlugin extends Plugin {
    * this reminds once a day (device-local, like the previous-git reminder)
    * until they are gone.
    */
+  /** ngb-rescue branches as of the last status; what the palette command offers. */
+  private lastRescueBranches: string[] = [];
+
   private offerRescueCleanup(raw: string): void {
     const refs = raw.split("\n").filter((r) => /^ngb-rescue-/.test(r.trim()));
+    this.lastRescueBranches = refs;
     if (refs.length === 0) return;
     const today = new Date().toDateString();
     if (this.store.getValue("rescue-reminded") === today) return;
     this.store.setValue("rescue-reminded", today);
+    this.showRescueCleanup(refs);
+  }
+
+  /**
+   * On demand from the palette too, not only once a day: the daily gate left a
+   * user with a branch they WANTED gone (its shed blobs were spamming every
+   * prune with "not our ref") and no button until tomorrow.
+   */
+  cmdRescueCleanup(): void {
+    if (this.lastRescueBranches.length === 0) {
+      new Notice("No ngb-rescue backup branch is known. Run Status once if one should be here.");
+      return;
+    }
+    this.showRescueCleanup(this.lastRescueBranches);
+  }
+
+  private showRescueCleanup(refs: string[]): void {
     new ResultModal(
       this.app,
       "A repair backup branch is still here",
@@ -4687,13 +5079,19 @@ export default class NativeGitBridgePlugin extends Plugin {
         });
       }
     }
-    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion !== RUNNER_MIN_VERSION) {
+    // Anything in [RUNNER_MIN_VERSION, RUNNER_SHIPPED_VERSION] is a correct
+    // installation. Comparing against the floor instead branded every
+    // up-to-date runner "newer than expected" — 0.6.3 shipped runner v13 with
+    // a floor of 12, so every correctly installed device saw a red warning.
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER_MIN_VERSION) {
       out.push({
         part: "runner",
-        text:
-          this.lastRunnerVersion < RUNNER_MIN_VERSION
-            ? `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux — updating the plugin never updates the runner.`
-            : `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin expects (v${RUNNER_MIN_VERSION}). Update the plugin from the latest release.`,
+        text: `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux — updating the plugin never updates the runner.`,
+      });
+    } else if (this.lastRunnerVersion > RUNNER_SHIPPED_VERSION) {
+      out.push({
+        part: "runner",
+        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Update the plugin from the latest release.`,
       });
     }
     return out;
@@ -4995,8 +5393,11 @@ export default class NativeGitBridgePlugin extends Plugin {
       },
       async (ok) => {
         if (!ok) return;
-        for (const p of paths) await this.gitignoreAdd(`/${p}`);
+        // One warning and one refresh after the loop, not one per path.
+        for (const p of paths) await this.gitignoreAdd(`/${p}`, false);
         this.notify(`Added ${paths.length} paths to .gitignore.`);
+        this.warnIfRuleTargetsTracked(paths);
+        await this.refreshAfterRuleChange();
       }
     ).open();
   }
@@ -5028,9 +5429,14 @@ export default class NativeGitBridgePlugin extends Plugin {
         if (!ok) return;
         for (const p of paths) {
           if (kind === "sparse") await this.cmdSparseExclude(p, true, true);
-          else await this.cmdExcludeChange(p, true);
+          // standalone=false: the warning and the status refresh happen once
+          // below, not once per path on top of every exclude round trip.
+          else await this.cmdExcludeChange(p, true, false);
         }
         this.notify(`Applied to ${paths.length} paths.`);
+        // Sparse hides tracked files too (skip-worktree), so only the exclude
+        // kind can silently target something a rule cannot hide.
+        if (kind === "exclude") this.warnIfRuleTargetsTracked(paths);
         await this.cmdStatus(true);
       }
     ).open();

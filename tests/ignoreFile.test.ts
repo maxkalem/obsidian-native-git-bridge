@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ignoreEntryMatches, parseIgnoreEntries } from "../src/git/ignoreFile";
+import { ignoreEntryMatches, parseIgnoreEntries, trackedPathsAmong } from "../src/git/ignoreFile";
+import type { GitStatusSummary } from "../src/types";
 
 /**
  * `.gitignore` and `.git/info/exclude` are listed in the settings as things a
@@ -59,5 +60,52 @@ describe("ignoreEntryMatches", () => {
   it("does not match a different path that starts the same way", () => {
     expect(ignoreEntryMatches(["/Notes/xy"], "Notes/x")).toBe(false);
     expect(ignoreEntryMatches([], "Notes/x")).toBe(false);
+  });
+});
+
+/**
+ * Ignore rules affect untracked files only. `trackedPathsAmong` is what lets
+ * the plugin say so at the moment a rule is added for a tracked path, instead
+ * of leaving the user to conclude that the refresh "did not work" — the real
+ * case was `.obsidian/workspace-mobile.json`, modified in every commit.
+ */
+describe("trackedPathsAmong", () => {
+  const entry = (path: string, origPath?: string) => ({ path, origPath, index: "M", worktree: "." });
+  const status = (partial: Partial<GitStatusSummary>): GitStatusSummary => ({
+    ahead: 0,
+    behind: 0,
+    detached: false,
+    staged: [],
+    unstaged: [],
+    untracked: [],
+    conflicted: [],
+    ...partial,
+  });
+
+  it("reports a path from any tracked group: staged, unstaged, conflicted", () => {
+    const st = status({
+      staged: [entry("a.md")],
+      unstaged: [entry(".obsidian/workspace-mobile.json")],
+      conflicted: [entry("c.md")],
+    });
+    expect(trackedPathsAmong(st, [".obsidian/workspace-mobile.json"])).toEqual([
+      ".obsidian/workspace-mobile.json",
+    ]);
+    expect(trackedPathsAmong(st, ["a.md", "c.md", "new.md"])).toEqual(["a.md", "c.md"]);
+  });
+
+  it("does not report an untracked path: the rule WILL hide that one", () => {
+    const st = status({ untracked: ["new.md"] });
+    expect(trackedPathsAmong(st, ["new.md"])).toEqual([]);
+  });
+
+  it("recognises both sides of a rename", () => {
+    const st = status({ staged: [entry("new-name.md", "old-name.md")] });
+    expect(trackedPathsAmong(st, ["old-name.md"])).toEqual(["old-name.md"]);
+    expect(trackedPathsAmong(st, ["new-name.md"])).toEqual(["new-name.md"]);
+  });
+
+  it("answers nothing for a path git has not mentioned at all", () => {
+    expect(trackedPathsAmong(status({}), ["quiet.md"])).toEqual([]);
   });
 });

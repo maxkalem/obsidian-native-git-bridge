@@ -58,6 +58,8 @@ function viewFor(
     cancel: () => undefined,
     openStatusPanel: () => undefined,
     openHistoryPanel: () => undefined,
+    wrapLines: () => false,
+    toggleWrapLines: async () => undefined,
     ...hooks,
   };
   const view = new RunnerOutputView(leaf, actions) as Any;
@@ -152,18 +154,36 @@ describe("the output panel", () => {
     const { view, asked } = viewFor({ runnerLog: "2026-08-10T09:32:36Z DONE action=sync ok=true" });
     await view.tick();
     const tabs = __findAllByClass(view.contentEl, "ngb-out-tab");
-    expect(tabs).toHaveLength(3);
-    __fire(tabs[1], "click"); // [past, runner, oplog]
+    expect(tabs).toHaveLength(4); // [live, past, runner, oplog]
+    __fire(tabs[2], "click");
     // The click starts a fresh snapshot; awaiting a tick is how the test waits
     // for it, and it is the same call the panel makes.
     await view.tick();
     expect(asked.some((a) => a.runnerLog)).toBe(true);
     expect(__textOf(__findByClass(view.contentEl, "ngb-out-stream"))).toContain("DONE action=sync");
-    expect(tabs[1].hasClass("ngb-out-tab-on")).toBe(true);
+    expect(tabs[2].hasClass("ngb-out-tab-on")).toBe(true);
     // Tapping the active tab returns to the live operation.
-    __fire(tabs[1], "click");
+    __fire(tabs[2], "click");
     await view.tick();
-    expect(tabs[1].hasClass("ngb-out-tab-on")).toBe(false);
+    expect(tabs[2].hasClass("ngb-out-tab-on")).toBe(false);
+    expect(__textOf(__findByClass(view.contentEl, "ngb-out-stream"))).toContain("repair: scanning");
+  });
+
+  it("the live view has a visible tab of its own, so switching away is reversible", async () => {
+    // It used to be reachable only by tapping the ACTIVE tab a second time —
+    // an affordance nobody can discover. A user reading the idle view's newest
+    // stream, who switched to another tab, had no visible way back to it.
+    const { view } = viewFor({ runnerLog: "runner line" });
+    await view.tick();
+    const tabs = __findAllByClass(view.contentEl, "ngb-out-tab");
+    expect(tabs[0].hasClass("ngb-out-tab-on")).toBe(true); // live is where the panel opens
+    __fire(tabs[2], "click");
+    await view.tick();
+    expect(tabs[0].hasClass("ngb-out-tab-on")).toBe(false);
+    __fire(tabs[0], "click"); // the way back is a button, not a secret
+    await view.tick();
+    expect(tabs[0].hasClass("ngb-out-tab-on")).toBe(true);
+    expect(tabs[2].hasClass("ngb-out-tab-on")).toBe(false);
     expect(__textOf(__findByClass(view.contentEl, "ngb-out-stream"))).toContain("repair: scanning");
   });
 
@@ -171,7 +191,7 @@ describe("the output panel", () => {
     const { view, asked } = viewFor({ opLog: "2026-08-11T00:00:00Z [info] sync: Queued request r-x." });
     await view.tick();
     const tabs = __findAllByClass(view.contentEl, "ngb-out-tab");
-    __fire(tabs[2], "click");
+    __fire(tabs[3], "click");
     await view.tick();
     expect(asked.some((a) => a.opLog)).toBe(true);
     expect(__textOf(__findByClass(view.contentEl, "ngb-out-stream"))).toContain("Queued request r-x.");
@@ -210,6 +230,26 @@ describe("the output panel", () => {
     expect(box.scrollTop).toBe(120);
   });
 
+  it("wraps long lines on demand, and the toggle sits apart from the tabs", async () => {
+    // The tabs choose WHAT the console shows; wrap changes how. The divider is
+    // the visual statement of that split, so its absence is a regression too.
+    let wrap = false;
+    const { view } = viewFor(
+      {},
+      { wrapLines: () => wrap, toggleWrapLines: async () => void (wrap = !wrap) }
+    );
+    await view.tick();
+    expect(__findByClass(view.contentEl, "ngb-out-tab-sep")).not.toBeNull();
+    expect(view.streamBox.hasClass("ngb-out-wrap")).toBe(false);
+    __fire(view.wrapBtn, "click");
+    await new Promise((r) => setTimeout(r, 0)); // the click awaits the saved pref
+    expect(view.streamBox.hasClass("ngb-out-wrap")).toBe(true);
+    expect(view.wrapBtn.hasClass("ngb-sv-icon-active")).toBe(true);
+    __fire(view.wrapBtn, "click");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(view.streamBox.hasClass("ngb-out-wrap")).toBe(false);
+  });
+
   it("labels an earlier stream from the stream itself", async () => {
     // The runner opens every stream with "<action> started", so nothing has to
     // be remembered about a request that finished in another session.
@@ -218,7 +258,7 @@ describe("the output panel", () => {
     });
     await view.tick();
     const tabs = __findAllByClass(view.contentEl, "ngb-out-tab");
-    __fire(tabs[0], "click");
+    __fire(tabs[1], "click");
     await view.tick();
     expect(__textOf(view.contentEl)).toContain("sync · r-20260810T093000Z-old");
   });

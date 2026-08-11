@@ -119,15 +119,63 @@ for a in "$@"; do [ "$a" = "--with-ssh" ] && WITH_SSH=true; done
 
 say "== Native Git Bridge installer =="
 
-# 1. Verify we are inside Termux.
+# 1. Verify we are inside Termux — and WHICH Termux. The Play Store app was
+# frozen at 0.101 in 2020 and its package repository with it: nothing modern
+# installs there and the failure mode is quiet (a years-old git, no upgrades,
+# everything "works" until a feature needs a version the repo cannot give).
+# Markers, in order of certainty: TERMUX_VERSION is exported by the app since
+# 0.107, so an environment WITHOUT it is a frozen-era build; newer builds also
+# name their store in TERMUX_APK_RELEASE. A frozen REPOSITORY is caught
+# functionally in step 2, whatever the app says.
 case "${PREFIX:-}" in
   */com.termux/*) : ;;
   *) fail "This installer must run inside Termux (PREFIX=${PREFIX:-unset})." ;;
 esac
+if [ -z "${TERMUX_VERSION:-}" ]; then
+  say "!! WARNING: this looks like the abandoned Play Store Termux (pre-0.107):"
+  say "   TERMUX_VERSION is not set. Its package repository is frozen in 2020,"
+  say "   so git and everything else stay at old versions and parts of this"
+  say "   plugin will NOT work. Install Termux from F-Droid:"
+  say "   https://f-droid.org/packages/com.termux/"
+else
+  case "${TERMUX_APK_RELEASE:-}" in
+    *PLAY*)
+      say "!! WARNING: this Termux came from Google Play (TERMUX_APK_RELEASE=${TERMUX_APK_RELEASE})."
+      say "   Play builds lag behind F-Droid and their repository can hold old"
+      say "   packages; if git below stays under 2.42, install the F-Droid build." ;;
+  esac
+fi
 
-# 2. Install required packages.
-say "-- Installing packages (git, jq, openssh)..."
+# 2. Packages: install what is missing, UPGRADE what can be upgraded. `pkg
+# install` alone only ensures a package exists — with a stale apt index it
+# kept a years-old git through two runner reinstalls in one day on a real
+# device — so the index is refreshed first (that is what makes `apt install`
+# an upgrade), and the version git ACTUALLY ends up at is reported and judged
+# rather than assumed. The plugin's partial-clone shedding needs
+# `repack --filter` (git 2.42+); prefetching the visible files afterwards
+# (`git backfill --sparse`) needs 2.49+.
+say "-- Refreshing the package index..."
+pkg update -y >/dev/null 2>&1 || say "   (index refresh failed; installs may use stale versions)"
+GIT_BEFORE="$(git --version 2>/dev/null | awk '{print $3}')"
+say "-- Installing/upgrading packages (git, jq, openssh)..."
 pkg install -y git jq openssh >/dev/null || fail "pkg install failed"
+GIT_VERSION="$(git --version 2>/dev/null | awk '{print $3}')"
+if [ -n "$GIT_BEFORE" ] && [ "$GIT_BEFORE" != "$GIT_VERSION" ]; then
+  say "-- git $GIT_BEFORE -> $GIT_VERSION"
+else
+  say "-- git $GIT_VERSION"
+fi
+GIT_MAJ="${GIT_VERSION%%.*}"; GIT_REST="${GIT_VERSION#*.}"; GIT_MIN="${GIT_REST%%.*}"
+case "$GIT_MAJ$GIT_MIN" in ''|*[!0-9]*) GIT_MAJ=0; GIT_MIN=0 ;; esac
+if [ "$GIT_MAJ" -lt 2 ] || { [ "$GIT_MAJ" -eq 2 ] && [ "$GIT_MIN" -lt 42 ]; }; then
+  # The index was JUST refreshed and this is still the best git on offer, so
+  # the repository itself is outdated — the functional Play-Store marker,
+  # whatever the app's environment claimed above.
+  say "!! git is older than 2.42 and this is the newest this Termux can install:"
+  say "   the package repository itself is outdated (a Play Store build, or a"
+  say "   very old install). Partial-clone storage cleanup cannot shed content"
+  say "   on this git. Install Termux from F-Droid for current packages."
+fi
 
 # 3. Storage access: request it and WAIT for the user to accept the dialog,
 # so the installer continues by itself instead of demanding a re-run.
@@ -147,7 +195,40 @@ if [ ! -d "$HOME/storage" ]; then
   fi
 fi
 
-# 4. Repository path: use the argument, otherwise auto-detect vaults
+# 4. Allow the companion app to trigger the runner (RUN_COMMAND intent), and
+# install the runner itself. BOTH happen before any vault is looked for: they
+# depend on nothing vault-shaped, and the old order meant a brand-new device
+# (no vault yet) failed out of the installer with the property never enabled
+# and no runner installed — the ChromeOS first-run hit exactly that. The
+# property only permits apps that ALSO hold the RUN_COMMAND permission, which
+# the user grants per-app in Android settings.
+TP="$HOME/.termux/termux.properties"
+mkdir -p "$HOME/.termux"
+if ! grep -Eq '^\s*allow-external-apps\s*=\s*true\s*$' "$TP" 2>/dev/null; then
+  printf '\nallow-external-apps=true\n' >> "$TP"
+  command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings || true
+  say "-- Enabled allow-external-apps in ~/.termux/termux.properties (needed for the companion app)."
+else
+  say "-- allow-external-apps already enabled."
+fi
+
+CONF_DIR="$HOME/.config/native-git-bridge"
+PROFILES_DIR="$CONF_DIR/profiles"
+mkdir -p "$PROFILES_DIR"
+chmod 700 "$CONF_DIR" "$PROFILES_DIR"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+RUNNER_SRC="$SCRIPT_DIR/native-git-bridge-runner.sh"
+[ -f "$RUNNER_SRC" ] || fail "runner script not found next to installer: $RUNNER_SRC"
+cp "$RUNNER_SRC" "$CONF_DIR/runner.sh"
+chmod 700 "$CONF_DIR/runner.sh"
+say "-- Runner installed to $CONF_DIR/runner.sh."
+# Migrate an existing single-repo config before looking for a profile: the
+# runner does it on its first run, so one implementation covers both paths.
+# NGB_SCAN_ROOTS="" keeps this run from scanning shared storage - it is here to
+# migrate, and a scan of a full phone would look like a hang.
+NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" >/dev/null 2>&1 || true
+
+# 5. Repository path: use the argument, otherwise auto-detect vaults
 # (folders on shared storage containing both .obsidian and .git).
 if [ -z "$REPO_ARG" ]; then
   say "-- No path given; scanning shared storage for Obsidian vaults with a git repo..."
@@ -163,10 +244,21 @@ if [ -z "$REPO_ARG" ]; then
     REPO_ARG="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
     [ -n "$REPO_ARG" ] || fail "Invalid selection."
   else
-    say "-- No vault with a .git repository was found on shared storage. Either pass the path explicitly:"
+    # Not a failure. Everything a vaultless device CAN have is already
+    # installed above, and the plugin pairs a new vault by itself: it writes a
+    # claim file and the runner adopts it on its next idle run, token minted
+    # here in Termux. This is the ordinary first run on a brand-new device.
+    say "-- No vault with a git repository was found, and none was named."
+    say "   The runner and the companion permission are installed anyway."
+    say ""
+    say "== Done (runner installed; no vault paired yet) =="
+    say "Finish from inside Obsidian: open (or create) your vault, enable the"
+    say "plugin in Settings -> Native Git Bridge, and use 'Set up repository'."
+    say "It pairs this vault first (no token copying), then creates or clones"
+    say "the repository without leaving the app."
+    say "Re-running this installer with the vault's path also works:"
     sayr "     bash install.sh /storage/emulated/0/<YourVault>"
-    say "   or, if the vault has no repository yet, let the plugin make one: open the vault in Obsidian and use Settings -> Native Git Bridge -> Set up repository (it pairs the vault first, then creates or clones the repository without leaving the app)."
-    fail "No vault with a .git repository found on shared storage."
+    exit 0
   fi
 fi
 REPO_DIR="$REPO_ARG"
@@ -195,40 +287,10 @@ else
   say "-- Sparse checkout: not enabled (that's fine if you don't use it)."
 fi
 
-# 4b. Allow the companion app to trigger the runner (RUN_COMMAND intent).
-# This only permits apps that ALSO hold the RUN_COMMAND permission, which the
-# user grants per-app in Android settings.
-TP="$HOME/.termux/termux.properties"
-mkdir -p "$HOME/.termux"
-if ! grep -Eq '^\s*allow-external-apps\s*=\s*true\s*$' "$TP" 2>/dev/null; then
-  printf '\nallow-external-apps=true\n' >> "$TP"
-  command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings || true
-  say "-- Enabled allow-external-apps in ~/.termux/termux.properties (needed for the companion app)."
-else
-  say "-- allow-external-apps already enabled."
-fi
-
-# 5. Install runner + profile + token.
+# 6. Profile + token for this vault (the runner itself went in at step 4).
 # One profile per vault: profiles/<id>.conf, mode 600, its own token. Running
 # this installer for a second vault ADDS a profile; it never overwrites the
 # first one (which used to leave that vault silently unanswered).
-CONF_DIR="$HOME/.config/native-git-bridge"
-PROFILES_DIR="$CONF_DIR/profiles"
-mkdir -p "$PROFILES_DIR"
-chmod 700 "$CONF_DIR" "$PROFILES_DIR"
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-RUNNER_SRC="$SCRIPT_DIR/native-git-bridge-runner.sh"
-[ -f "$RUNNER_SRC" ] || fail "runner script not found next to installer: $RUNNER_SRC"
-cp "$RUNNER_SRC" "$CONF_DIR/runner.sh"
-chmod 700 "$CONF_DIR/runner.sh"
-
-# Migrate an existing single-repo config before looking for a profile: the
-# runner does it on its first run, so one implementation covers both paths.
-# NGB_SCAN_ROOTS="" keeps this run from scanning shared storage - it is here to
-# migrate, and a scan of a full phone would look like a hang.
-NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" >/dev/null 2>&1 || true
-
 profile_value() { # $1 file, $2 key
   sed -n "s/^$2=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" "$1" | head -1
 }
@@ -265,7 +327,7 @@ NGB_RUNTIME_DIR="$RUNTIME_DIR"
 NGB_TOKEN="$TOKEN"
 CONF
 chmod 600 "$PROFILE_FILE"
-say "-- Runner installed to $CONF_DIR/runner.sh (profile chmod 600)."
+say "-- Profile written (chmod 600)."
 
 # Every profile on the device, numbered, with the one just written marked.
 #

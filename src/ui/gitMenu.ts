@@ -22,6 +22,11 @@ export interface GitMenuFlags {
   ignored: boolean;
   sparseExcluded: boolean;
   excluded: boolean;
+  /**
+   * Whether the runner can serve `untrack-file` (v14+). The entry is offered
+   * only when acting on it can succeed; an older runner would refuse by name.
+   */
+  untrack: boolean;
 }
 
 /**
@@ -68,7 +73,8 @@ export type MenuAction =
   | "sparse-add"
   | "sparse-remove"
   | "exclude-add"
-  | "exclude-remove";
+  | "exclude-remove"
+  | "untrack";
 
 export interface MenuEntry {
   action: MenuAction;
@@ -169,6 +175,13 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
     } else {
       out.push({ action: "exclude-add", title: `Git: Add to .git exclude${where}${n}`, icon: "eye-off" });
     }
+  }
+  // 10. Stop tracking, single tracked files only. It belongs beside the config
+  // entries because it is their missing half: an ignore rule cannot hide a
+  // tracked file, and this is what makes the rule able to. Same eye-off family
+  // as the rules — all of them mean "make git stop seeing this".
+  if (f.untrack && single && (scope.group === "staged" || scope.group === "unstaged")) {
+    out.push({ action: "untrack", title: "Git: Stop tracking (keep the file)", icon: "eye-off", danger: true });
   }
   return out;
 }

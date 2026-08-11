@@ -1,3 +1,5 @@
+import type { GitStatusSummary } from "../types";
+
 /**
  * The entries of a `.gitignore` or `.git/info/exclude`, as things a person can
  * act on.
@@ -33,4 +35,27 @@ export function parseIgnoreEntries(raw: string): string[] {
 export function ignoreEntryMatches(entries: readonly string[], path: string): boolean {
   const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
   return entries.some((e) => variants.includes(e));
+}
+
+/**
+ * Which of these paths does git currently TRACK, judged from the last status?
+ *
+ * Ignore rules (.gitignore, .git/info/exclude) affect untracked files only: a
+ * rule added for a tracked path changes nothing, and the file keeps appearing
+ * in the panel and in every commit until it is untracked. The plugin uses this
+ * to say so at the moment the rule is added, instead of leaving the user to
+ * discover it from a refresh that "did not work".
+ *
+ * Judged from status, so a tracked file with NO current changes is not
+ * caught. That is accepted: such a file is not in the panel either, and the
+ * case that actually confuses people is the one that reappears after every
+ * change (.obsidian/workspace-mobile.json being the canonical example).
+ */
+export function trackedPathsAmong(status: GitStatusSummary, paths: readonly string[]): string[] {
+  const tracked = new Set<string>();
+  for (const e of [...status.staged, ...status.unstaged, ...status.conflicted]) {
+    tracked.add(e.path);
+    if (e.origPath !== undefined) tracked.add(e.origPath);
+  }
+  return paths.filter((p) => tracked.has(p));
 }
