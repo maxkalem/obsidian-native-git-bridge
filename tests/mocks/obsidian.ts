@@ -12,11 +12,19 @@
 
 export const __notices: string[] = [];
 export const __openedModals: string[] = [];
+/**
+ * Titles of opened modals, where the modal carries one (ResultModal and the
+ * confirm family keep it as a field). Two windows of the same CLASS can mean
+ * two very different things — "clone failed" and "clone needs credentials"
+ * are both a ResultModal — and the class list alone cannot tell them apart.
+ */
+export const __modalTitles: string[] = [];
 /** obsidian:// protocol handlers registered by the plugin (action -> handler). */
 export const __protocolHandlers = new Map<string, (params: Record<string, string>) => void>();
 export function __resetObsidianMock(): void {
   __notices.length = 0;
   __openedModals.length = 0;
+  __modalTitles.length = 0;
   __protocolHandlers.clear();
   // Popups and overlays are appended to the shared body; without this one
   // test's popup is visible to the next one's assertions.
@@ -286,6 +294,10 @@ export class Modal {
   }
   open(): void {
     __openedModals.push(this.constructor.name);
+    // The title field, when the concrete modal keeps one: the class name alone
+    // cannot tell "clone failed" from "clone needs credentials".
+    const t = (this as unknown as { title?: unknown }).title;
+    if (typeof t === "string") __modalTitles.push(t);
     // Intentionally does NOT call onOpen(): orchestration tests assert WHICH
     // modal was opened, not its DOM contents.
   }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeObjectCorruption, summarizeGitError } from "../src/git/gitErrors";
+import {
+  looksLikeObjectCorruption,
+  looksLikeStaleLock,
+  needsTermuxCredentials,
+  summarizeGitError,
+} from "../src/git/gitErrors";
 
 /**
  * A failed sync said "git pull failed during sync." and put the reason behind a
@@ -111,5 +116,60 @@ describe("looksLikeObjectCorruption", () => {
 
   it("looks at stdout too", () => {
     expect(looksLikeObjectCorruption("", "fatal: unable to read object")).toBe(true);
+  });
+});
+
+describe("needsTermuxCredentials", () => {
+  it("recognises every shape of 'git wanted credentials and could not ask'", () => {
+    // The first two are exactly what the device produced (18:03 bundle of the
+    // after-0.6.3 session, and the 0.6.5 mirror recovery before it).
+    for (const s of [
+      "fatal: could not read Password for 'https://github.com': terminal prompts disabled",
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+      "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+      "Host key verification failed.",
+    ]) {
+      expect(needsTermuxCredentials(s), s).toBe(true);
+    }
+  });
+
+  it("stays quiet where a terminal prompt would not be the fix", () => {
+    for (const s of [
+      "git@github.com: Permission denied (publickey).", // a missing key, not a missing answer
+      "error: Your local changes to the following files would be overwritten by merge:",
+      "fatal: unable to read tree (2d9ebf5bcd0b5beda5a893c098db9075884b6af7)",
+      "fatal: unable to access 'https://github.com/x/y.git/': Could not resolve host: github.com",
+      "",
+    ]) {
+      expect(needsTermuxCredentials(s), s).toBe(false);
+    }
+  });
+
+  it("looks at stdout too", () => {
+    expect(needsTermuxCredentials("", "fatal: Authentication failed for 'https://h/r.git/'")).toBe(true);
+  });
+});
+
+describe("looksLikeStaleLock", () => {
+  it("recognises the two lines a leftover index.lock produces", () => {
+    // Verbatim from a real device (the 00:34 bundle's reset-all).
+    expect(
+      looksLikeStaleLock(
+        "fatal: Unable to create '/storage/emulated/0/Documents/Kalem/.git/index.lock': File exists.\n\n" +
+          "Another git process seems to be running in this repository, or the lock file may be stale"
+      )
+    ).toBe(true);
+    expect(looksLikeStaleLock("Another git process seems to be running in this repository")).toBe(true);
+  });
+
+  it("stays quiet on ordinary failures", () => {
+    for (const s of [
+      "error: Your local changes to the following files would be overwritten by merge:",
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+      "fatal: unable to read tree (2d9ebf5bcd0b5beda5a893c098db9075884b6af7)",
+      "",
+    ]) {
+      expect(looksLikeStaleLock(s), s).toBe(false);
+    }
   });
 });

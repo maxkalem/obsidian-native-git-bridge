@@ -36,7 +36,7 @@ var import_obsidian16 = require("obsidian");
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
 var RUNNER_MIN_VERSION = 12;
-var RUNNER_SHIPPED_VERSION = 14;
+var RUNNER_SHIPPED_VERSION = 15;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -48,7 +48,11 @@ var PROGRESS_DIR = "progress";
 var POLL_INTERVAL_MS = 400;
 var DEFAULT_TIMEOUT_SECONDS = 90;
 var ACTION_TIMEOUT_SECONDS = {
-  "clone-into-vault": 900,
+  // 3600, raised from 900 at the user's instruction: a full clone of a real
+  // vault outlives fifteen minutes on a phone connection, and the interactive
+  // credential route adds the time a person takes to paste the command and
+  // answer git's prompts. The runner's own NGB_CLONE_TIMEOUT matches.
+  "clone-into-vault": 3600,
   "adopt-remote": 900,
   // The repair steps. Each ends with `git fsck --connectivity-only`, which is
   // minutes on a vault of real size, so none of them fits the ordinary 90 s.
@@ -143,7 +147,8 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repo-shallow", 14],
   ["repo-unshallow", 14],
   ["repo-partial-enable", 14],
-  ["repo-partial-disable", 14]
+  ["repo-partial-disable", 14],
+  ["repair-stale-lock", 15]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -180,7 +185,8 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "repo-shallow",
   "repo-unshallow",
   "repo-partial-enable",
-  "repo-partial-disable"
+  "repo-partial-disable",
+  "repair-stale-lock"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -732,13 +738,10 @@ function placeModalAction(modal, opts) {
   b.setAttribute("aria-label", opts.label);
   b.addEventListener("click", opts.onClick);
   if (import_obsidian2.Platform.isMobile && opts.hasInput === true) {
-    modal.modalEl.addClass("ngb-modal-has-top-action");
-    b.addClass("ngb-modal-action-top");
-    modal.modalEl.insertBefore(b, modal.modalEl.firstChild);
-  } else {
-    const wrap = modal.contentEl.createDiv({ cls: "ngb-buttons ngb-modal-action-bottom" });
-    wrap.appendChild(b);
+    modal.modalEl.addClass("ngb-modal-keyboard-safe");
   }
+  const wrap = modal.contentEl.createDiv({ cls: "ngb-buttons ngb-modal-action-bottom" });
+  wrap.appendChild(b);
   return b;
 }
 function outputSection(el, label2, text) {
@@ -785,6 +788,7 @@ var ResultModal = class extends import_obsidian2.Modal {
       const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
       linkifyInto(div, line);
     }
+    if (this.opts.collapsed) outputSection(c, this.opts.collapsed.label, this.opts.collapsed.text);
     if (this.opts.actions && this.opts.actions.length > 0) {
       const fixes = c.createDiv({ cls: "ngb-buttons ngb-action-buttons" });
       for (const a of this.opts.actions) {
@@ -802,6 +806,7 @@ var ResultModal = class extends import_obsidian2.Modal {
   }
   fullText() {
     const parts = [this.title, ...this.lines];
+    if (this.opts.collapsed) parts.push("", `--- ${this.opts.collapsed.label} ---`, this.opts.collapsed.text);
     if (this.opts.stdout) parts.push("", "--- stdout ---", this.opts.stdout);
     if (this.opts.stderr) parts.push("", "--- stderr ---", this.opts.stderr);
     return parts.join("\n");
@@ -1516,14 +1521,14 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     });
     new import_obsidian3.Setting(containerEl).setName("Repository footprint (this device)").setHeading();
     const fp = this.plugin.footprintState();
-    const fpNote = !this.plugin.footprintAvailable() ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once." : fp === null ? "Run Status once so these toggles can show the repository's actual state." : "";
+    const fpNote = !this.plugin.footprintAvailable() ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once." : fp === null ? "The repository's state has not been read yet this session \u2014 a toggle checks it first, then asks to confirm." : "";
     if (fpNote !== "") {
       containerEl.createEl("p", { text: fpNote, cls: "setting-item-description" });
     }
     new import_obsidian3.Setting(containerEl).setName("Shallow history").setDesc(
       "Keep only the newest commits on this device; the remote and your other devices keep everything. The history panels here reach only what stays, and enabling this also clears this device's reflog \u2014 without that the old commits stay pinned and nothing is freed. Turning it off downloads the full history back. Space returns after Clean up repository storage."
     ).addToggle((t) => {
-      t.setValue(fp?.shallow ?? false).setDisabled(fp === null || !this.plugin.footprintAvailable()).onChange((v) => {
+      t.setValue(fp?.shallow ?? false).setDisabled(!this.plugin.footprintAvailable()).onChange((v) => {
         void (async () => {
           if (v) await this.plugin.cmdShallowEnable();
           else await this.plugin.cmdUnshallow();
@@ -1544,7 +1549,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
     new import_obsidian3.Setting(containerEl).setName("Partial clone (blob:none)").setDesc(
       "Fetch file content on demand instead of holding all of it. With sparse checkout the hidden files' content is never downloaded at all \u2014 but 'Show again' and old file versions then need the network. Turning it off downloads everything back first. Run Clean up repository storage after enabling to shed content that is already downloaded."
     ).addToggle((t) => {
-      t.setValue(fp?.partial ?? false).setDisabled(fp === null || !this.plugin.footprintAvailable()).onChange((v) => {
+      t.setValue(fp?.partial ?? false).setDisabled(!this.plugin.footprintAvailable()).onChange((v) => {
         void (async () => {
           if (v) await this.plugin.cmdPartialEnable();
           else await this.plugin.cmdPartialDisable();
@@ -3618,6 +3623,16 @@ function looksLikeObjectCorruption(stderr, stdout) {
 ${stdout ?? ""}`;
   return /object file .* is empty/i.test(s) || /unable to read (tree|sha1 file|object)/i.test(s) || /loose object .* is corrupt/i.test(s) || /(^|\n)error: (garbage|inflate)/i.test(s);
 }
+function needsTermuxCredentials(stderr, stdout) {
+  const s = `${stderr ?? ""}
+${stdout ?? ""}`;
+  return /terminal prompts disabled/i.test(s) || /could not read (Username|Password)/i.test(s) || /Authentication failed for/i.test(s) || /Host key verification failed/i.test(s);
+}
+function looksLikeStaleLock(stderr, stdout) {
+  const s = `${stderr ?? ""}
+${stdout ?? ""}`;
+  return /Unable to create '.*\.lock': File exists/i.test(s) || /Another git process seems to be running/i.test(s);
+}
 var PROGRESS = new RegExp(
   "^(" + [
     "Updating index flags",
@@ -3648,6 +3663,22 @@ function summarizeGitError(stderr, stdout, limit = 6) {
     if (out.length >= limit) break;
   }
   return out;
+}
+
+// src/git/cloneRoute.ts
+function manualCloneCommand(opts) {
+  const vault = opts.vaultPath.trim().replace(/\/+$/, "");
+  if (vault === "" || !vault.startsWith("/") || opts.profileId === "") return null;
+  const dir = `${vault}/${opts.configDir}/plugins/native-git-bridge/runtime/clone-tmp/repo`;
+  const extras = (opts.filter !== void 0 ? ` --filter=${opts.filter}` : "") + (opts.depth !== void 0 ? ` --depth ${opts.depth}` : "");
+  const helper = `-c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/${opts.profileId}"`;
+  return `rm -rf "${dir}" && git clone --no-checkout --progress${extras} ${helper} -- "${opts.url}" "${dir}"`;
+}
+function cloneRoute(opts) {
+  if (!opts.url.startsWith("https://")) return "companion";
+  if (!opts.replaceExisting) return "termux";
+  if (opts.credsConfigured === false) return "termux";
+  return "companion";
 }
 
 // src/git/hunks.ts
@@ -5707,11 +5738,12 @@ var REASONS = {
   "too-long": `The URL is longer than ${MAX_REMOTE_URL_LENGTH} characters.`,
   "option-like": "A URL may not start with '-': git would read it as an option, not an address.",
   "not-printable-ascii": "The URL contains a space or a character that is not plain ASCII. Copy it again from your git host.",
-  credentials: "This URL carries a password. Remove it: credentials stay in Termux (a credential helper, an SSH key, or `gh auth login`), and this plugin never handles one.",
+  credentials: "This URL carries credentials before the '@'. Use the clean https://host/\u2026 form: credentials stay in Termux (asked for once and saved there), and this plugin never handles one. A token pasted as the username is still a token \u2014 a real vault lost its working setup to exactly that shape.",
   "unsupported-scheme": "Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git, or file:///absolute/path for a local copy. Plain http and git:// are not accepted."
 };
 var PRINTABLE_ASCII = /^[!-~]+$/;
 var CREDENTIALS = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/;
+var HTTPS_USERINFO = /^https:\/\/[^/@]+@/i;
 var SCP_LIKE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^ ]+$/;
 function validateRemoteUrl(raw) {
   const url = raw.trim();
@@ -5726,6 +5758,7 @@ function validateRemoteUrl(raw) {
   if (url.startsWith("-")) return fail("option-like");
   if (!PRINTABLE_ASCII.test(url)) return fail("not-printable-ascii");
   if (CREDENTIALS.test(url)) return fail("credentials");
+  if (HTTPS_USERINFO.test(url)) return fail("credentials");
   if (url.startsWith("https://") || url.startsWith("ssh://") || url.startsWith("file:///")) {
     return { ok: true, url };
   }
@@ -6342,6 +6375,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     /** In-memory caches so the file context menu can decide add-vs-remove synchronously. */
     this.gitignoreLines = [];
     this.excludeLines = [];
+    /** Sets of no-longer-hidden protected paths already asked about this session. */
+    this.sparseReconcileOffered = /* @__PURE__ */ new Set();
     /**
      * Delete the `ngb-rescue-*` branch a rebuild left behind, after an explicit
      * confirmation. The old success window said to do this in Termux, which
@@ -6386,7 +6421,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.registerView(
       NGB_STATUS_VIEW,
       (leaf) => new StatusView(leaf, {
-        refresh: () => void this.cmdStatus(true),
+        // The panel's refresh button is a user asking; a vault with no
+        // repository answers with the setup window (create / clone) rather
+        // than a bare REPO_MISSING error.
+        refresh: () => void this.cmdStatus(true, true),
         sync: () => void this.cmdSync(),
         pull: () => void this.cmdPull(),
         push: () => void this.cmdPush(),
@@ -7591,9 +7629,149 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const args = { url };
     if (replaceExisting) args.replaceExisting = true;
     if (filter !== void 0) args.filter = filter;
+    const route = cloneRoute({
+      url,
+      replaceExisting,
+      credsConfigured: this.lastStatus?.credsConfigured ?? null
+    });
+    if (route === "termux") return this.runCloneViaTermux(args);
     const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
+    if (!result.ok) {
+      if (needsTermuxCredentials(result.error?.stderr, result.error?.stdout)) {
+        return this.offerCloneViaTermux(args, result);
+      }
+      return this.renderMutationError("Native Git: clone failed", result);
+    }
+    this.reportCloneOutcome(result);
+  }
+  /**
+   * The manual route: the DOWNLOAD half is a plain `git clone` command the
+   * user pastes into Termux — git's own prompts and git's own progress meter,
+   * because the first design (an interactive runner run) hid both behind the
+   * progress redirection and read as a hang the moment the credential prompt
+   * was answered. What the user types is saved per repository by the
+   * clone-time credential helper, in Termux. The FINISH half stays the
+   * runner's collision-safe clone-into-vault: pressing Continue queues it,
+   * and a v15 runner adopts the repository already downloaded in
+   * `runtime/clone-tmp/` instead of downloading again. Nothing is queued
+   * until Continue, so nothing can expire or be claimed while the user is
+   * still typing a token.
+   */
+  runCloneViaTermux(args) {
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < 15) {
+      new ResultModal(
+        this.app,
+        "Termux runner is too old for this",
+        [
+          `Finishing a clone downloaded in Termux needs runner v15; this device answers with v${this.lastRunnerVersion}.`,
+          RUNNER_OUTDATED_HINT
+        ],
+        {
+          isError: true,
+          actions: [
+            {
+              label: "Copy command & open Termux",
+              cta: true,
+              keepOpen: true,
+              onClick: () => this.copyCommandAndOpenTermux()
+            }
+          ]
+        }
+      ).open();
+      return;
+    }
+    const cmd = manualCloneCommand({
+      url: String(args.url),
+      vaultPath: this.deviceSettings.repoPathHint,
+      configDir: this.app.vault.configDir,
+      profileId: this.deviceSettings.profileId,
+      filter: typeof args.filter === "string" ? args.filter : void 0,
+      depth: typeof args.depth === "number" ? args.depth : void 0
+    });
+    if (cmd === null) {
+      new import_obsidian16.Notice(
+        "Set the repository path in settings first \u2014 the clone command addresses the vault by its absolute path in Termux."
+      );
+      return;
+    }
+    void navigator.clipboard.writeText(cmd);
+    new import_obsidian16.Notice("Clone command copied - long-press in Termux to paste, then Enter.");
+    new ResultModal(
+      this.app,
+      "Clone in Termux, then continue here",
+      [
+        // Two short lines; the command itself sits collapsed below. A device
+        // screenshot showed the earlier five-line version plus the inline
+        // command filling the whole screen.
+        "1. The command is copied. In Termux: paste, Enter, answer git's username/token prompts (saved and reused). Keep Termux visible until the download finishes.",
+        "2. Come back and press Continue \u2014 the repository is moved into the vault, nothing is downloaded twice, your notes are kept."
+      ],
+      {
+        collapsed: { label: "The copied command", text: cmd },
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(cmd);
+              this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+            }
+          },
+          {
+            label: "Continue \u2014 finish the clone",
+            cta: true,
+            onClick: () => void this.finishManualClone(args)
+          }
+        ]
+      }
+    ).open();
+  }
+  /**
+   * The finish half: an ordinary clone-into-vault round trip. A v15 runner
+   * finds the pre-downloaded repository and completes locally; a Continue
+   * pressed too early (download still running, or never started) comes back
+   * as an ordinary failure whose message says what to do.
+   */
+  async finishManualClone(args) {
+    const result = await this.runOperation("clone-into-vault", args);
+    if (!result) return;
+    if (!result.ok) {
+      if (needsTermuxCredentials(result.error?.stderr, result.error?.stdout)) {
+        return this.offerCloneViaTermux(args, result);
+      }
+      return this.renderMutationError("Native Git: clone failed", result);
+    }
+    this.reportCloneOutcome(result);
+  }
+  /**
+   * A companion-route clone failed because git wanted credentials it had no
+   * way to ask for. The answer is the interactive route, offered rather than
+   * taken: re-running the clone is a decision, not a retry.
+   */
+  offerCloneViaTermux(args, result) {
+    new ResultModal(
+      this.app,
+      "The clone needs credentials",
+      [
+        "The remote asked for credentials and none are saved for this repository. Credentials live only in Termux, and git can only ask for them at a terminal.",
+        "Download the repository in Termux instead: the button opens the instructions \u2014 a plain git clone command to paste, with git's own prompts and progress \u2014 and the clone is finished here afterwards without a second download.",
+        ...summarizeGitError(result.error?.stderr, result.error?.stdout, 3)
+      ],
+      {
+        isError: true,
+        actions: [
+          {
+            label: "Clone via Termux",
+            cta: true,
+            onClick: () => void this.runCloneViaTermux(args)
+          }
+        ]
+      }
+    ).open();
+  }
+  /** Render a finished clone's result window (shared by both routes). */
+  reportCloneOutcome(result) {
     this.absorbStatusData(result.data ?? {});
     const collisions = (result.data?.collisions ?? "").split("\n").filter((l) => l.trim() !== "");
     const lines = [`Branch: ${result.data?.branch || "(unborn)"}`];
@@ -7735,7 +7913,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       // Obsidian already prefixes every entry with the plugin name, so a
       // "Native Git: " here produced "Native Git Bridge: Native Git: Fetch".
       // Ids stay untouched: they are what user hotkeys are bound to.
-      { id: "status", name: "Status", cb: () => void this.cmdStatus() },
+      { id: "status", name: "Status", cb: () => void this.cmdStatus(false, true) },
       { id: "pull", name: "Pull", cb: () => void this.cmdPull() },
       { id: "push", name: "Push", cb: () => void this.cmdPush() },
       { id: "commit", name: "Commit", cb: () => void this.cmdCommit() },
@@ -7930,6 +8108,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         failureDetail(result)
       );
       this.lastVerdict = result.ok ? `${action} finished` : `${action} failed: ${result.error?.message ?? `exit ${result.exitCode}`}`;
+      if (!result.ok && result.error?.code === "REPO_MISSING" && action !== "status" && !await this.vaultHasRepository()) {
+        this.log.add("info", action, "No repository in this vault; opening the repository setup window.");
+        await this.cmdSetupRepository();
+        return null;
+      }
       return result;
     } catch (e) {
       this.log.add("error", action, `Bridge error: ${String(e)}`);
@@ -8163,10 +8346,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     ).open();
   }
   // ------------------------------------------------------------- command impls
-  async cmdStatus(silent = false) {
+  async cmdStatus(silent = false, offerSetupWhenMissing = false) {
     const result = await this.runOperation("status");
     if (!result) return;
     if (!result.ok) {
+      if (offerSetupWhenMissing && result.error?.code === "REPO_MISSING" && !await this.vaultHasRepository()) {
+        await this.cmdSetupRepository();
+        return;
+      }
       this.statusBar?.set("error");
       new ResultModal(
         this.app,
@@ -8636,6 +8823,36 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     return this.lastRunnerVersion >= 14;
   }
   /**
+   * The footprint state, read on demand. The settings toggles used to be dead
+   * until some OTHER action happened to fetch a status — on a fresh launch
+   * that read as buttons that do not press. Now the toggle itself asks: one
+   * silent status round trip when nothing has been heard yet this session,
+   * and the command proceeds from what the repository actually is. Null means
+   * handled — a repo-less vault got the setup window (the same offer every
+   * operation makes), a failure got its error window — and the caller stops.
+   */
+  async ensureFootprintState() {
+    const known = this.footprintState();
+    if (known !== null) return known;
+    const result = await this.runOperation("status");
+    if (!result) return null;
+    if (!result.ok) {
+      if (result.error?.code === "REPO_MISSING" && !await this.vaultHasRepository()) {
+        await this.cmdSetupRepository();
+        return null;
+      }
+      new ResultModal(
+        this.app,
+        "Native Git: status failed",
+        [result.error?.message ?? "Unknown error."],
+        { stdout: result.error?.stdout, stderr: result.error?.stderr, isError: true }
+      ).open();
+      return null;
+    }
+    this.absorbStatusData(result.data ?? {});
+    return this.footprintState();
+  }
+  /**
    * All four footprint changes share one shape: confirm with the consequences
    * stated, run the action, and let the ABSORBED status decide what the toggle
    * shows — a change the runner refused changes nothing on screen.
@@ -8665,6 +8882,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     });
   }
   async cmdShallowEnable() {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (fp.shallow) {
+      new import_obsidian16.Notice("History is already shallow on this device; the toggle now shows it.");
+      return;
+    }
     const depth = this.deviceSettings.shallowDepth;
     await this.footprintChange(
       "Limit history on this device?",
@@ -8683,6 +8906,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     );
   }
   async cmdUnshallow() {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (!fp.shallow) {
+      new import_obsidian16.Notice("The full history is already on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Download the full history back?",
       ["One large download over the network; the budget is generous, and the output panel shows progress."],
@@ -8695,6 +8924,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     );
   }
   async cmdPartialEnable() {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (fp.partial) {
+      new import_obsidian16.Notice("Partial clone is already enabled on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Enable partial clone on this device?",
       [
@@ -8712,6 +8947,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     );
   }
   async cmdPartialDisable() {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (!fp.partial) {
+      new import_obsidian16.Notice("Partial clone is already off on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Disable partial clone?",
       [
@@ -9198,7 +9439,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       // the missing field as `true` would put a banner on every panel.
       rebaseInProgress: d.rebaseInProgress === "true",
       shallow: d.shallow === "true",
-      partialFilter: d.partialFilter?.trim() ? d.partialFilter.trim() : void 0
+      partialFilter: d.partialFilter?.trim() ? d.partialFilter.trim() : void 0,
+      // Tri-state on purpose: a runner older than v15 does not report the
+      // field, and "unknown" must not read as "no credentials" — that would
+      // send every re-clone on an old runner to the Termux terminal.
+      credsConfigured: d.credsConfigured === void 0 ? void 0 : d.credsConfigured === "true"
     };
     this.statusStale = false;
     this.maybeOfferPartialForSparse();
@@ -9212,11 +9457,15 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
    * very first operation after a restart, before any fresh status arrives.
    */
   absorbSparsePatterns(sparse) {
-    if (!sparse.enabled) return;
-    const candidates = sparseExclusionPaths(sparse.patterns);
+    const candidates = sparse.enabled ? sparseExclusionPaths(sparse.patterns) : [];
     const validated = validateProtectedPaths(candidates);
     const derived = validated.ok ? validated.normalized : [];
     const prev = this.deviceSettings.derivedProtectedPaths;
+    const missing = prev.filter((p) => !derived.includes(p));
+    if (missing.length > 0) {
+      this.offerSparseReconcile(missing, derived);
+      return;
+    }
     if (derived.length === prev.length && derived.every((p, i) => p === prev[i])) return;
     this.deviceSettings = this.store.write({ derivedProtectedPaths: derived });
     this.log.add(
@@ -9224,6 +9473,49 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       "sparse",
       `Derived protected paths refreshed from sparse exclusions: ${derived.join(", ") || "(none)"}.`
     );
+  }
+  offerSparseReconcile(missing, remaining) {
+    const sig = missing.join("\n");
+    if (this.sparseReconcileOffered.has(sig)) return;
+    this.sparseReconcileOffered.add(sig);
+    const plural2 = missing.length === 1 ? "path" : "paths";
+    new ResultModal(
+      this.app,
+      "Protected paths are no longer hidden",
+      [
+        `${missing.length} ${plural2} this device protects ${missing.length === 1 ? "is" : "are"} no longer excluded by the repository's sparse checkout \u2014 after a re-clone, or after the rules were changed outside the plugin:`,
+        ...missing,
+        "Hide & protect again puts the sparse exclusion back (this device only; the files leave the working tree, nothing leaves the repository). Release accepts the new state: the paths stay visible and lose the protection. Until you choose, the protection stays on."
+      ],
+      {
+        actions: [
+          {
+            label: "Hide & protect again",
+            cta: true,
+            onClick: () => void this.reapplySparseExclusions(missing)
+          },
+          {
+            label: "Release protection",
+            onClick: () => {
+              this.deviceSettings = this.store.write({ derivedProtectedPaths: remaining });
+              this.log.add("info", "sparse", `Protection released for: ${missing.join(", ")}.`);
+              new import_obsidian16.Notice(`No longer protected: ${missing.join(", ")}.`);
+              this.pushStatusToView();
+            }
+          }
+        ]
+      }
+    ).open();
+  }
+  /**
+   * Re-hide the given paths one by one; each add refreshes the derived set.
+   * skipConfirm: the reconcile window the user just answered WAS the
+   * confirmation, and one question per path would ask it three more times.
+   */
+  async reapplySparseExclusions(paths) {
+    for (const p of paths) {
+      await this.cmdSparseExclude(p, true, true);
+    }
   }
   /**
    * The protected set actually enforced: manual paths plus (unless disabled)
@@ -9269,6 +9561,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.statusBar?.set("error");
     const reason = summarizeGitError(err?.stderr, err?.stdout);
     const corrupt = looksLikeObjectCorruption(err?.stderr, err?.stdout);
+    const staleLock = !corrupt && looksLikeStaleLock(err?.stderr, err?.stdout);
     const lines = [err?.message ?? "Unknown error.", ...reason];
     if (corrupt) {
       lines.push(
@@ -9277,12 +9570,51 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         "The repair removes only files that are EMPTY, which cannot contain anything, and then fetches to bring the real objects back from the remote. Nothing that holds data is touched."
       );
     }
+    if (staleLock) {
+      lines.push(
+        "",
+        "A leftover lock file is blocking git: a process the system killed mid-write leaves .git/index.lock behind, and every operation fails on it until the file is removed. The button below stops Termux's processes (so nothing can be holding the lock) and deletes it."
+      );
+    }
     new ResultModal(this.app, title, lines, {
       stdout: err?.stdout,
       stderr: err?.stderr,
       isError: true,
-      actions: corrupt ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }] : void 0
+      actions: corrupt ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }] : staleLock ? [{ label: "Delete the stale lock\u2026", cta: true, onClick: () => this.cmdRepairStaleLock() }] : void 0
     }).open();
+  }
+  /**
+   * Remove a stale `.git/index.lock`, the user's own design: stop Termux
+   * first (every process of its uid — the companion trigger that delivers
+   * the request starts a fresh Termux, which is the restart), and only then
+   * delete the lock, so a live git process can never be holding it. Behind a
+   * confirmation because it kills an open Termux session too (§4 rule 7).
+   */
+  cmdRepairStaleLock() {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Delete the stale git lock?",
+        body: [
+          ".git/index.lock guards the repository while one git process writes. A process Android killed leaves it behind, and every operation then fails with 'another git process seems to be running'.",
+          "To make the removal safe, EVERY Termux process is stopped first \u2014 including a terminal session, if one is open \u2014 and the runner arrives in a fresh Termux started by the trigger. Only then is the lock file deleted.",
+          "Do not run this while a download you started in Termux is still visibly working."
+        ],
+        confirmLabel: "Stop Termux & delete the lock",
+        icon: "lock-open",
+        danger: true
+      },
+      async (ok) => {
+        if (!ok) return;
+        const result = await this.runOperation("repair-stale-lock", {});
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: unlock failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new import_obsidian16.Notice(
+          result.data?.lockRemoved === "true" ? "Stale lock removed. Run the operation again." : "No lock file was there \u2014 it may have been released already. Run the operation again."
+        );
+      }
+    ).open();
   }
   openVaultFile(path) {
     const f = this.app.vault.getAbstractFileByPath(path);

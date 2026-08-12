@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=14
+RUNNER_VERSION=15
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -31,11 +31,29 @@ NGB_LOG_MAX_BYTES="${NGB_LOG_MAX_BYTES:-262144}"
 # the newest half is all anyone reads.
 NGB_PROG_MAX_BYTES="${NGB_PROG_MAX_BYTES:-65536}"
 
-# Never let git block on an interactive credential prompt: with a missing or
-# expired PAT the command must fail fast with a clear stderr, not hang.
-export GIT_TERMINAL_PROMPT=0
-export GCM_INTERACTIVE=never
-export SSH_ASKPASS=/bin/false
+# Invocation mode (v15). `runner.sh interactive` is pasted into a Termux
+# terminal BY THE USER — the plugin copies the command to the clipboard — when
+# an operation needs credentials git can only ask for at a terminal: a clone
+# of a private https remote in a vault that has no per-repository credential
+# file yet. The run itself is unchanged (same queue, same results, same lock);
+# the difference is that git may prompt, and what the user types is saved per
+# repository by the credential helper the clone configures
+# (see persist_clone_credentials).
+NGB_INTERACTIVE=0
+[ "${1:-}" = "interactive" ] && NGB_INTERACTIVE=1
+
+if [ "$NGB_INTERACTIVE" = 1 ]; then
+  # A person is at the terminal, so git is allowed to ask. Prompts go to
+  # /dev/tty, which the progress capture does not redirect, so they stay
+  # visible even while stderr is being written to the progress stream.
+  export GIT_TERMINAL_PROMPT=1
+else
+  # Never let git block on an interactive credential prompt: with a missing or
+  # expired PAT the command must fail fast with a clear stderr, not hang.
+  export GIT_TERMINAL_PROMPT=0
+  export GCM_INTERACTIVE=never
+  export SSH_ASKPASS=/bin/false
+fi
 
 die() { echo "native-git-bridge-runner: $*" >&2; exit 1; }
 
@@ -98,10 +116,13 @@ valid_token() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]{8,128}$'; }
 #
 # Refused on purpose:
 #   - anything starting with "-", which git would read as an option;
-#   - credentials in the URL (`https://user:pass@host/…`). They would be
-#     written into the request file inside the vault and into .git/config,
-#     and this plugin's rule is that no secret ever reaches the plugin side.
-#     Authentication belongs to a credential helper or an SSH key, in Termux.
+#   - credentials in the URL: `user:pass` in every scheme, and for https ANY
+#     userinfo at all — a personal access token is routinely pasted as the
+#     USERNAME with no password (`https://ghp_…@github.com/…`), and the
+#     colon-requiring pattern walked straight past it, so a token landed in
+#     .git/config through the clone prompt on a real device. Credentials are
+#     entered once in Termux and saved there; `ssh://git@host` keeps its
+#     userinfo (the universal ssh user is not a secret; ssh uses a key).
 #   - plain http, control characters, whitespace, anything non-ASCII.
 NGB_MAX_URL_LEN="${NGB_MAX_URL_LEN:-512}"
 valid_remote_url() {
@@ -111,6 +132,7 @@ valid_remote_url() {
   case "$u" in -*) return 1 ;; esac
   printf '%s' "$u" | LC_ALL=C grep -Eq '^[!-~]+$' || return 1
   printf '%s' "$u" | grep -Eq '^[A-Za-z][A-Za-z0-9+.-]*://[^/@]*:[^/@]*@' && return 1
+  printf '%s' "$u" | grep -Eiq '^https://[^/@]+@' && return 1
   case "$u" in
     https://*|ssh://*) return 0 ;;
     # A local repository, e.g. a copy on the SD card. It carries no protocol
@@ -631,6 +653,10 @@ progress_begin() { # $1 = request id
 progress_note() {
   [ -n "$NGB_PROG_FILE" ] || return 0
   printf '%s\n' "$*" >> "$NGB_PROG_FILE" 2>/dev/null || true
+  # A person at an interactive terminal gets the same narration the panel
+  # gets; without it the step announcements exist only in a file they are
+  # not looking at.
+  if [ "$NGB_INTERACTIVE" = 1 ]; then printf -- '-- %s\n' "$*" >&2; fi
 }
 
 # What a terminal would have shown: for each line, only the text after the last
@@ -780,11 +806,24 @@ collect_status_fields() {
   local is_shallow=false partial_filter=""
   [ -f "$(git rev-parse --git-path shallow 2>/dev/null)" ] && is_shallow=true
   partial_filter="$(git config --get remote.origin.partialclonefilter 2>/dev/null || true)"
+  # Whether TERMUX-SIDE credentials exist that a re-clone could authenticate
+  # with: the profile's own credential file with something in it, or a global
+  # helper in Termux's own gitconfig (inherited by any future clone). The
+  # vault repository's LOCAL helper deliberately does not count — it lives in
+  # the vault's .git/config, dies with the old .git on a re-clone, and
+  # credentials are never reused from inside the vault (rule 11). The plugin
+  # uses this to decide whether a re-clone can authenticate non-interactively
+  # or must be handed to a Termux terminal (v15 interactive mode). Only the
+  # FACT travels, never a helper's value: a helper line can embed a secret.
+  local creds_configured=false
+  [ -s "$NGB_CONFIG_DIR/creds/$PROFILE_ID" ] && creds_configured=true
+  [ -n "$(git config --global --get credential.helper 2>/dev/null || true)" ] && creds_configured=true
   collect_untracked_children
   DATA=$(obj_from_fields \
     branchInfo "$branch_info" \
     shallow "$is_shallow" \
     partialFilter "$partial_filter" \
+    credsConfigured "$creds_configured" \
     sparseEnabled "$sparse_enabled" \
     sparseCone "$sparse_cone" \
     sparseList "$sparse_list" \
@@ -913,8 +952,26 @@ run_git_net() {
   fi
   if [ -n "$NGB_PROG_FILE" ]; then
     before="$(progress_bytes)"
+    # An interactive run has a person at the terminal, and a clone that is
+    # silent there looks stuck (the user's report: "just silence and a
+    # timer"). Mirror what git appends to the progress stream back onto
+    # stderr as it happens — carriage returns included, so the meter renders
+    # exactly as a hand-typed clone would. The file stays the single writer's
+    # output and the single source the plugin reads; the mirror is only a
+    # reader, given one settle second and killed once git returns.
+    local mirror_pid=""
+    if [ "$NGB_INTERACTIVE" = 1 ]; then
+      tail -c +$((before + 1)) -f "$NGB_PROG_FILE" >&2 2>/dev/null &
+      mirror_pid=$!
+    fi
     timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
     GIT_EC=$?
+    if [ -n "$mirror_pid" ]; then
+      sleep 1
+      kill "$mirror_pid" 2>/dev/null
+      wait "$mirror_pid" 2>/dev/null || true
+      echo >&2
+    fi
     GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
     progress_redact
     progress_trim
@@ -929,6 +986,14 @@ run_git_net() {
   rm -f "$out_f"
   [ $GIT_EC -eq 124 ] && GIT_ERR="$GIT_ERR
 (timed out after ${NGB_NET_TIMEOUT}s)"
+  # 137 = SIGKILL, and git never kills itself: this is Android reclaiming
+  # memory or stopping a background app's processes (the "phantom process"
+  # limit of Android 12+; ChromeOS runs Android in a VM where memory is
+  # tight). Seen on a real device as `Killed` mid-clone with nothing else
+  # wrong. Without this line the result says only "git clone failed", which
+  # sends the user hunting a git problem that is not there.
+  [ $GIT_EC -eq 137 ] && GIT_ERR="$GIT_ERR
+(killed by the SYSTEM, not by git: Android reclaims memory and stops background processes. Keep Termux visible in the foreground while this runs, prefer the lightweight clone on a small device, and see troubleshooting.md about Android's phantom process killer.)"
   return $GIT_EC
 }
 
@@ -1571,7 +1636,7 @@ repair_from_mirror() {
   # Clone-sized, and defaulted here rather than read from the global alone: this
   # function is defined above where that global is assigned, and a repair should
   # not inherit a 120 s budget because of where a line sits in this file.
-  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
   local rc=0
   # The destination repository holds nothing at all, so there is no negotiation
   # to go wrong: everything reachable from the remote's branches comes down. That
@@ -1711,7 +1776,7 @@ action_repair_refetch() {
   # Clone-sized budget, deliberately: this step downloads the whole history,
   # and the one-piece repair ran it under the ordinary 120 s network cap — on a
   # vault of real size that is a timeout wearing a repair's name.
-  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
   if run_git_net fetch --refetch --prune origin; then
     how="refetch"
   elif repair_from_mirror; then
@@ -2454,10 +2519,27 @@ action_sparse_exclude_add() {
   local req_file="$1" path
   path=$(jq -r '.args.path // empty' "$req_file")
   valid_rel_path "$path" || { ERROR=$(err_json BAD_REQUEST "Invalid file path." "" ""); return 1; }
-  require_noncone_sparse || return 1
+  # Cone mode is still refused; sparse being DISABLED is not. A re-clone
+  # brings a fresh .git and the sparse configuration dies with the old one,
+  # and the refusal here sent the user to Termux to type the exact command
+  # the runner can run itself — against the standing rule that the user
+  # touches Termux only to install the runner and to enter credentials
+  # (a real device hit this the night its repository was re-cloned). When
+  # sparse is off, the pattern list is seeded with git's own
+  # include-everything base, so the first exclusion can never read as "hide
+  # everything".
+  if [ "$(git config --get core.sparseCheckoutCone 2>/dev/null || true)" = "true" ]; then
+    ERROR=$(err_json GIT_FAILED "This repository uses cone-mode sparse checkout; per-path exclusions need pattern (non-cone) mode." "" "")
+    return 1
+  fi
   local tmpf; tmpf="$(mktemp)"
-  git sparse-checkout list > "$tmpf" 2>/dev/null || true
-  ensure_trailing_newline "$tmpf"
+  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" = "true" ]; then
+    git sparse-checkout list > "$tmpf" 2>/dev/null || true
+    ensure_trailing_newline "$tmpf"
+  else
+    progress_note "sparse: enabling non-cone sparse checkout (include everything, then exclude the path)"
+    printf '/*\n' > "$tmpf"
+  fi
   if ! grep -qxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf"; then
     printf '!/%s\n' "$path" >> "$tmpf"
     if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf"; then
@@ -2689,7 +2771,7 @@ action_repo_shallow() {
   # not, and the default `timeout` killed a fetch that had already received
   # everything — "Receiving objects: 100%, done" followed by the kill.
   local saved="$NGB_NET_TIMEOUT" rc=0
-  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
   progress_note "shallow: limiting this device's history to the newest $depth commits"
   run_git_net fetch --depth="$depth" origin || rc=1
   NGB_NET_TIMEOUT="$saved"
@@ -2706,7 +2788,7 @@ action_repo_shallow() {
 # state-reflecting toggle makes unreachable in practice.
 action_repo_unshallow() {
   local saved="$NGB_NET_TIMEOUT"
-  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+  NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
   progress_note "unshallow: downloading the full history"
   local rc=0
   run_git_net fetch --unshallow origin || rc=1
@@ -2777,7 +2859,7 @@ action_repo_partial_disable() {
   missing="$(git rev-list --objects --missing=print --all 2>/dev/null | grep -c '^?' || true)"
   if [ "$missing" -gt 0 ]; then
     local saved="$NGB_NET_TIMEOUT"
-    NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+    NGB_NET_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
     progress_note "partial: fetching all promised content back (git fetch --refetch)"
     local rc=0
     run_git_net fetch --refetch origin || rc=1
@@ -2801,12 +2883,55 @@ action_repo_partial_disable() {
   collect_status_fields
 }
 
+# ---- stale lock removal (v15) --------------------------------------------------
+
+# `.git/index.lock` guards the index while one git process writes; a process
+# the system killed mid-write leaves it behind, and every later operation
+# fails with "another git process seems to be running". Removal is safe only
+# when no process CAN be holding it, so on Termux every process of this uid is
+# killed first, except this runner and its ancestors — the trigger that
+# delivered this request already started a fresh Termux, which is the
+# "restart" half of the user's design. Off Termux (the e2e sandbox), the kill
+# would take down the test run itself and no other Termux process exists to
+# hold the lock, so only the removal happens.
+action_repair_stale_lock() {
+  local lock existed=false removed=false
+  lock="$(git rev-parse --git-path index.lock 2>/dev/null || true)"
+  [ -n "$lock" ] || lock=".git/index.lock"
+  case "$lock" in /*) : ;; *) lock="$NGB_REPO_DIR/$lock" ;; esac
+  [ -e "$lock" ] && existed=true
+  if [ -d "/data/data/com.termux" ]; then
+    progress_note "unlock: stopping every other Termux process"
+    local keep=" " p=$$ pid
+    while [ "${p:-0}" -gt 1 ] 2>/dev/null; do
+      keep="$keep$p "
+      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" || break
+      [ -n "$p" ] || break
+    done
+    for pid in $(ps -o pid= -u "$(id -u)" 2>/dev/null); do
+      case "$keep" in *" $pid "*) continue ;; esac
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    sleep 1
+  fi
+  if [ "$existed" = true ]; then
+    progress_note "unlock: removing $lock"
+    rm -f "$lock" 2>/dev/null && removed=true
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields lockExisted "$existed" lockRemoved "$removed")")
+}
+
 # ---- repository bootstrap (v11) ------------------------------------------------
 # The missing beginning of the story: a vault that is not a repository yet, or
 # one without a remote. Everything interactive (a PAT, a passphrase) stays in
 # Termux — these actions only do the parts that carry no secret.
 
-NGB_CLONE_TIMEOUT="${NGB_CLONE_TIMEOUT:-900}"
+# 3600, raised from 900 at the user's instruction: a full clone of a real
+# vault over a phone connection outlives fifteen minutes, and the interactive
+# route adds the time a person takes to paste the command and answer git's
+# prompts on top of the transfer itself.
+NGB_CLONE_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
 
 # The runtime directory must be excluded from the repository the moment one
 # exists, or the request/result files show up as untracked changes.
@@ -3091,6 +3216,34 @@ action_adopt_remote() {
   fi
 }
 
+# The profile's own credential file (the same one install.sh offers), created
+# on demand: directory 700, file 600, never inside a vault. Prints the path.
+ensure_profile_creds_file() {
+  local creds_file="$NGB_CONFIG_DIR/creds/$PROFILE_ID"
+  mkdir -p "$NGB_CONFIG_DIR/creds" 2>/dev/null || true
+  chmod 700 "$NGB_CONFIG_DIR/creds" 2>/dev/null || true
+  [ -e "$creds_file" ] || : > "$creds_file"
+  chmod 600 "$creds_file" 2>/dev/null || true
+  printf '%s' "$creds_file"
+}
+
+# After a clone lands, make the repository able to authenticate on its own.
+# Per-repository auth is the design (rule 11), and a repository that just
+# arrived carries no credential configuration at all — so without this, the
+# very next fetch fails exactly where the clone, fed its credentials on the
+# command line, succeeded. https only (SSH authenticates through its key), and
+# only when no helper is configured anywhere already: a helper visible from
+# here — local or inherited global — is somebody's deliberate setup and is
+# left alone.
+persist_clone_credentials() {
+  local url="$1" creds_file
+  case "$url" in https://*) ;; *) return 0 ;; esac
+  [ -n "$(git config --get credential.helper 2>/dev/null || true)" ] && return 0
+  creds_file="$(ensure_profile_creds_file)"
+  git config --local credential.helper "store --file=$creds_file" 2>/dev/null || true
+  log "CLONE credential.helper store --file=creds/$PROFILE_ID configured for this repository"
+}
+
 # Clone INTO a directory that already holds files (every vault holds at least
 # .obsidian/). A plain `git clone` refuses that, so: clone without a checkout
 # into a temporary directory inside the runtime folder (same filesystem, so the
@@ -3115,6 +3268,33 @@ action_clone_into_vault() {
     return 1
   fi
   tmp="$NGB_RUNTIME_DIR/clone-tmp"
+  # The manual route (v15): the user may have already downloaded the
+  # repository with a plain `git clone --no-checkout` pasted into Termux —
+  # git's own prompts and progress, credentials saved by the clone-time
+  # helper. When a repository is sitting there whose origin is EXACTLY the
+  # requested URL, adopt it instead of downloading again. HEAD must resolve:
+  # `git clone` writes the remote config before the transfer and the refs only
+  # after it, so a resolvable HEAD is what separates a finished download from
+  # one still running or killed — and an unfinished one is answered with a
+  # message, not wiped, because wiping it mid-transfer would fail the very
+  # command the user is watching. (An empty remote has no HEAD either; that
+  # rare clone simply downloads again below, which for an empty remote costs
+  # nothing.) A directory holding anything else is stale and is removed.
+  local predownloaded=0 pre_url=""
+  if [ -d "$tmp/repo/.git" ]; then
+    pre_url="$(git -C "$tmp/repo" config --get remote.origin.url 2>/dev/null || true)"
+    if [ "$pre_url" = "$url" ]; then
+      if git -C "$tmp/repo" rev-parse --verify -q HEAD >/dev/null 2>&1; then
+        predownloaded=1
+        progress_note "clone: using the repository already downloaded in Termux (no second download)"
+      else
+        ERROR=$(err_json GIT_FAILED \
+          "A download for this remote is in runtime/clone-tmp but is not finished (or was interrupted). Let the command in Termux finish and press Continue again; if it was interrupted, run the copied command again — it starts clean." "" "")
+        return 1
+      fi
+    fi
+  fi
+  if [ "$predownloaded" = 0 ]; then
   rm -rf "$tmp"
   mkdir -p "$tmp" || { ERROR=$(err_json GIT_FAILED "Could not create a working directory for the clone." "" ""); return 1; }
   local -a cargs=(clone --no-checkout --origin origin)
@@ -3138,23 +3318,27 @@ action_clone_into_vault() {
   # A re-clone of a private remote must authenticate, and a fresh clone has no
   # credential configuration of its own: per-repository auth is the design
   # (rule 11), so the new repository starts with none, and the runner never
-  # permits a prompt — the 18:03 bundle of the after-0.6.3 session shows
-  # exactly this failing ("could not read Password … terminal prompts
-  # disabled"). When a repository is being REPLACED, its credential.* keys are
-  # passed on the command line, the same way and for the same reasons as the
-  # object recovery's fetch: argv only, nothing written, nothing outliving
-  # the clone. A bootstrap clone (no repository yet) still relies on a global
-  # helper or an SSH key, as documented.
+  # permits a prompt on an ordinary run — the 18:03 bundle of the after-0.6.3
+  # session shows exactly this failing ("could not read Password … terminal
+  # prompts disabled"). For an https clone the profile's own store helper is
+  # added on the command line (v15): credentials already saved for this
+  # profile are found, and credentials the user types during an INTERACTIVE
+  # run are saved rather than asked for again. Argv only, nothing written into
+  # the vault; the file lives in Termux's config dir with mode 600.
+  #
+  # Credentials are reused ONLY from Termux-side storage — the profile's creds
+  # file here, or a global helper in Termux's own gitconfig, which the
+  # temporary clone inherits by itself. v14 briefly copied the replaced
+  # repository's credential.* keys onto the command line instead; that read
+  # them out of the vault's own .git/config, a file on shared storage, which
+  # is exactly where rule 11 says credentials must not live — a setup that
+  # kept them there kept WORKING because of the copy. Removed on the user's
+  # instruction: a re-clone whose credentials exist only inside the vault now
+  # fails over to the interactive run, which saves them where they belong.
   local -a ccred=()
-  if [ "$PROFILE_STATE" = "ready" ]; then
-    local ckey cline
-    while IFS= read -r cline; do
-      [ -n "$cline" ] || continue
-      ckey="${cline%% *}"
-      [ "$ckey" = "$cline" ] && continue
-      ccred+=(-c "$ckey=${cline#* }")
-    done < <(git config --get-regexp '^credential\.' 2>/dev/null || true)
-  fi
+  case "$url" in
+    https://*) ccred+=(-c "credential.helper=store --file=$(ensure_profile_creds_file)") ;;
+  esac
   local saved_timeout="$NGB_NET_TIMEOUT"
   NGB_NET_TIMEOUT="$NGB_CLONE_TIMEOUT"
   local ok=0
@@ -3166,6 +3350,7 @@ action_clone_into_vault() {
     ERROR=$(err_json GIT_FAILED "git clone failed. Nothing was written into the vault." "$GIT_OUT" "$GIT_ERR")
     return 1
   fi
+  fi # predownloaded
   if [ ! -d "$tmp/repo/.git" ]; then
     rm -rf "$tmp"
     ERROR=$(err_json GIT_FAILED "The clone produced no repository." "" ""); return 1
@@ -3193,6 +3378,7 @@ action_clone_into_vault() {
   rm -rf "$tmp"
   run_git config core.bare false || true
   PROFILE_STATE="ready"
+  persist_clone_credentials "$url"
   write_runtime_exclude
   exclude_from_outer_profiles
   head_branch="$(git symbolic-ref --short -q HEAD || true)"
@@ -3384,6 +3570,7 @@ process_request() {
     repair-refetch)        action_repair_refetch || { ok=false; ec=1; } ;;
     repair-reset-upstream) action_repair_reset_upstream || { ok=false; ec=1; } ;;
     repair-drop-backup)    action_repair_drop_backup "$req_file" || { ok=false; ec=1; } ;;
+    repair-stale-lock)     action_repair_stale_lock || { ok=false; ec=1; } ;;
     untrack-file)          action_untrack_file "$req_file" || { ok=false; ec=1; } ;;
     maintenance-scan)      action_maintenance_scan || { ok=false; ec=1; } ;;
     maintenance-prune)     action_maintenance_prune "$req_file" || { ok=false; ec=1; } ;;
@@ -3441,7 +3628,13 @@ process_request() {
   # Inverted, the failure mode inverts with it. Forgetting to list a new
   # mutating action now costs nothing; forgetting to list a read-only one costs
   # one redundant `git status`. Neither leaves stale data on screen.
-  if [ "$ok" = false ]; then
+  # Only where a repository exists: a failed BOOTSTRAP clone has nothing to
+  # collect status from, and every git call here answered `fatal: not a git
+  # repository` — three of them, straight into the progress stream and the
+  # interactive terminal, dressing one failure up as four (the user's 22:29
+  # bundle). PROFILE_STATE is "ready" the moment a clone lands, so a failure
+  # AFTER that point still reports fresh status.
+  if [ "$ok" = false ] && [ "$PROFILE_STATE" = "ready" ]; then
     case "$action" in
       # Read-only, or already collecting status themselves.
       ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|maintenance-scan) ;;
@@ -3519,6 +3712,15 @@ acquire_lock
 # reopen it. Plugin-triggered runs have no result receiver — stdout is simply
 # discarded there.
 echo "NGB_RUNNER_VERSION=$RUNNER_VERSION"
+
+# An interactive run has a person reading the terminal, so say what is about
+# to happen and why git may ask questions. Non-interactive runs keep stdout to
+# the single probe line above.
+if [ "$NGB_INTERACTIVE" = 1 ]; then
+  echo "-- Native Git Bridge: processing pending requests interactively."
+  echo "-- git may ask for a username and a password (personal access token) below."
+  echo "-- What you enter is saved for this repository and reused without asking."
+fi
 
 shopt -s nullglob
 
@@ -3676,4 +3878,5 @@ for conf in "${HEALTHY_FILES[@]}"; do
   cleanup_old
 done
 json_cleanup
+[ "$NGB_INTERACTIVE" = 1 ] && echo "-- Done. Return to Obsidian; the result is picked up there."
 exit 0

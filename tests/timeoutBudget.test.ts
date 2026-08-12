@@ -49,8 +49,10 @@ describe("timeoutSecondsFor", () => {
   });
 
   it("keeps the clone budget, which answers to neither", () => {
-    expect(timeoutSecondsFor("clone-into-vault", 10)).toBe(900);
-    expect(timeoutSecondsFor("clone-into-vault", 3600)).toBe(900);
+    // 3600 since v15: a real clone outlives fifteen minutes on a phone, and
+    // the interactive credential route adds the person's own time on top.
+    expect(timeoutSecondsFor("clone-into-vault", 10)).toBe(3600);
+    expect(timeoutSecondsFor("clone-into-vault", 7200)).toBe(3600);
     expect(timeoutSecondsFor("adopt-remote", 10)).toBe(900);
   });
 

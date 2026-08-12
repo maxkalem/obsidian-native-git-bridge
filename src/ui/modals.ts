@@ -17,10 +17,13 @@ export function placeModalAction(
     icon: string;
     danger?: boolean;
     /**
-     * The modal has a text field. Only then does the action move to the
-     * top-left corner on mobile: with the keyboard open a button at the bottom
-     * is unreachable. A modal that is only a question keeps its action at the
-     * bottom centre, where it does not collide with the title.
+     * The modal has a text field, so the on-screen keyboard will be open.
+     * The action stays at the bottom of the WINDOW everywhere — one place to
+     * look for it on every platform — and on mobile the window itself is
+     * pinned to the top half of the screen (`ngb-modal-keyboard-safe`), so
+     * the button sits above the keyboard instead of under it. The earlier
+     * answer moved the button to the top-left corner, which put the one
+     * button of these modals in a different place than every other modal's.
      */
     hasInput?: boolean;
     onClick: () => void;
@@ -39,13 +42,10 @@ export function placeModalAction(
   b.setAttribute("aria-label", opts.label);
   b.addEventListener("click", opts.onClick);
   if (Platform.isMobile && opts.hasInput === true) {
-    modal.modalEl.addClass("ngb-modal-has-top-action");
-    b.addClass("ngb-modal-action-top");
-    modal.modalEl.insertBefore(b, modal.modalEl.firstChild);
-  } else {
-    const wrap = modal.contentEl.createDiv({ cls: "ngb-buttons ngb-modal-action-bottom" });
-    wrap.appendChild(b);
+    modal.modalEl.addClass("ngb-modal-keyboard-safe");
   }
+  const wrap = modal.contentEl.createDiv({ cls: "ngb-buttons ngb-modal-action-bottom" });
+  wrap.appendChild(b);
   return b;
 }
 
@@ -115,6 +115,14 @@ export class ResultModal extends Modal {
       stdout?: string;
       stderr?: string;
       isError?: boolean;
+      /**
+       * A long payload the reader needs available but not in the way — a
+       * pasteable command, a file list. Rendered as a collapsed section like
+       * stdout/stderr, and included in Copy details. Born from a device
+       * screenshot: a clone command printed inline as a body line filled the
+       * whole screen with wrapped path noise.
+       */
+      collapsed?: { label: string; text: string };
       /** One-tap fix buttons rendered ABOVE Copy/Close. */
       actions?: ResultModalAction[];
       /**
@@ -137,6 +145,7 @@ export class ResultModal extends Modal {
       const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
       linkifyInto(div, line);
     }
+    if (this.opts.collapsed) outputSection(c, this.opts.collapsed.label, this.opts.collapsed.text);
     if (this.opts.actions && this.opts.actions.length > 0) {
       const fixes = c.createDiv({ cls: "ngb-buttons ngb-action-buttons" });
       for (const a of this.opts.actions) {
@@ -157,6 +166,7 @@ export class ResultModal extends Modal {
 
   private fullText(): string {
     const parts = [this.title, ...this.lines];
+    if (this.opts.collapsed) parts.push("", `--- ${this.opts.collapsed.label} ---`, this.opts.collapsed.text);
     if (this.opts.stdout) parts.push("", "--- stdout ---", this.opts.stdout);
     if (this.opts.stderr) parts.push("", "--- stderr ---", this.opts.stderr);
     return parts.join("\n");

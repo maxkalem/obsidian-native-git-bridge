@@ -43,13 +43,26 @@ const REASONS: Record<RemoteUrlProblem, string> = {
   "not-printable-ascii":
     "The URL contains a space or a character that is not plain ASCII. Copy it again from your git host.",
   credentials:
-    "This URL carries a password. Remove it: credentials stay in Termux (a credential helper, an SSH key, or `gh auth login`), and this plugin never handles one.",
+    "This URL carries credentials before the '@'. Use the clean https://host/… form: credentials stay in Termux (asked for once and saved there), and this plugin never handles one. A token pasted as the username is still a token — a real vault lost its working setup to exactly that shape.",
   "unsupported-scheme":
     "Use https://host/owner/repo.git, ssh://host/path, git@host:owner/repo.git, or file:///absolute/path for a local copy. Plain http and git:// are not accepted.",
 };
 
 const PRINTABLE_ASCII = /^[!-~]+$/;
+// Two shapes of credentials-in-the-URL, and the second is the one that got
+// away. `user:password` is refused in every scheme. For https, ANY userinfo
+// is refused: a personal access token is routinely pasted as the USERNAME
+// with no password at all (`https://ghp_…@github.com/…`), and the pattern
+// that required a colon walked straight past it — the same hole redact() and
+// redact_url each had once. A real device then carried its token into
+// `.git/config` through the clone prompt, and the installer's later cleanup
+// of exactly that URL is how its working setup broke. A plain username hint
+// is refused along with the token: the two are indistinguishable, and in
+// this design credentials are entered once in Termux and saved there.
+// `ssh://git@host/…` keeps its userinfo — the universal ssh user is not a
+// secret, and ssh authenticates with a key.
 const CREDENTIALS = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/@]*:[^/@]*@/;
+const HTTPS_USERINFO = /^https:\/\/[^/@]+@/i;
 const SCP_LIKE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^ ]+$/;
 
 export function validateRemoteUrl(raw: string): RemoteUrlVerdict {
@@ -65,6 +78,7 @@ export function validateRemoteUrl(raw: string): RemoteUrlVerdict {
   if (url.startsWith("-")) return fail("option-like");
   if (!PRINTABLE_ASCII.test(url)) return fail("not-printable-ascii");
   if (CREDENTIALS.test(url)) return fail("credentials");
+  if (HTTPS_USERINFO.test(url)) return fail("credentials");
   if (url.startsWith("https://") || url.startsWith("ssh://") || url.startsWith("file:///")) {
     return { ok: true, url };
   }

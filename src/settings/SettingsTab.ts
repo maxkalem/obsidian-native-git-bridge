@@ -502,11 +502,16 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     // runner with every status; they move only after a change is confirmed and
     // the runner answers ok. A decline, a refusal or an unreachable runner
     // re-renders the tab and the toggle simply shows what is still true.
+    // Before the first status of the session the state is simply unknown —
+    // the toggles still press, and the command reads the state itself before
+    // asking anything (ensureFootprintState). They used to be disabled until
+    // some other action happened to fetch a status, which on a fresh launch
+    // read as buttons that do not work.
     const fp = this.plugin.footprintState();
     const fpNote = !this.plugin.footprintAvailable()
       ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once."
       : fp === null
-        ? "Run Status once so these toggles can show the repository's actual state."
+        ? "The repository's state has not been read yet this session — a toggle checks it first, then asks to confirm."
         : "";
     if (fpNote !== "") {
       containerEl.createEl("p", { text: fpNote, cls: "setting-item-description" });
@@ -524,7 +529,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       )
       .addToggle((t) => {
         t.setValue(fp?.shallow ?? false)
-          .setDisabled(fp === null || !this.plugin.footprintAvailable())
+          .setDisabled(!this.plugin.footprintAvailable())
           .onChange((v) => { void (async () => {
             if (v) await this.plugin.cmdShallowEnable();
             else await this.plugin.cmdUnshallow();
@@ -557,7 +562,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       )
       .addToggle((t) => {
         t.setValue(fp?.partial ?? false)
-          .setDisabled(fp === null || !this.plugin.footprintAvailable())
+          .setDisabled(!this.plugin.footprintAvailable())
           .onChange((v) => { void (async () => {
             if (v) await this.plugin.cmdPartialEnable();
             else await this.plugin.cmdPartialDisable();

@@ -64,7 +64,8 @@ import {
 } from "./git/historyParsers";
 import { NGB_STATUS_VIEW, StatusView, summaryToViewData, type Group } from "./ui/StatusView";
 import { buildMenuEntries, menuHeader, type MenuAction, type MenuScope } from "./ui/gitMenu";
-import { looksLikeObjectCorruption, summarizeGitError } from "./git/gitErrors";
+import { looksLikeObjectCorruption, looksLikeStaleLock, needsTermuxCredentials, summarizeGitError } from "./git/gitErrors";
+import { cloneRoute, manualCloneCommand } from "./git/cloneRoute";
 import { describeRestore, restoreBlockInFile } from "./git/restoreBlock";
 import { ignoreEntryMatches, parseIgnoreEntries, trackedPathsAmong } from "./git/ignoreFile";
 import {
@@ -355,6 +356,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     /** Repository footprint (runner v14): what the settings toggles reflect. */
     shallow?: boolean;
     partialFilter?: string;
+    /**
+     * Whether TERMUX-SIDE credentials exist that a re-clone could use: the
+     * profile's credential file or a global helper in Termux's own gitconfig
+     * (runner v15). Credentials are never reused from inside the vault, so a
+     * vault-local helper does not count. Undefined on older runners —
+     * unknown, not "no".
+     */
+    credsConfigured?: boolean;
   } | null = null;
 
   async onload(): Promise<void> {
@@ -392,7 +401,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       NGB_STATUS_VIEW,
       (leaf: WorkspaceLeaf) =>
         new StatusView(leaf, {
-          refresh: () => void this.cmdStatus(true),
+          // The panel's refresh button is a user asking; a vault with no
+          // repository answers with the setup window (create / clone) rather
+          // than a bare REPO_MISSING error.
+          refresh: () => void this.cmdStatus(true, true),
           sync: () => void this.cmdSync(),
           pull: () => void this.cmdPull(),
           push: () => void this.cmdPush(),
@@ -1743,9 +1755,159 @@ export default class NativeGitBridgePlugin extends Plugin {
     const args: Record<string, unknown> = { url };
     if (replaceExisting) args.replaceExisting = true;
     if (filter !== undefined) args.filter = filter;
+    // Credentials only ever exist in Termux, so a clone that is KNOWN to have
+    // nothing saved (a fresh https clone; a re-clone whose status reports no
+    // helper) is handed to the terminal up front instead of failing the round
+    // trip first. Everything else goes through the companion as before, and
+    // the failure handler below still offers the terminal when git turns out
+    // to have wanted credentials after all.
+    const route = cloneRoute({
+      url,
+      replaceExisting,
+      credsConfigured: this.lastStatus?.credsConfigured ?? null,
+    });
+    if (route === "termux") return this.runCloneViaTermux(args);
     const result = await this.runOperation("clone-into-vault", args);
     if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: clone failed", result);
+    if (!result.ok) {
+      if (needsTermuxCredentials(result.error?.stderr, result.error?.stdout)) {
+        return this.offerCloneViaTermux(args, result);
+      }
+      return this.renderMutationError("Native Git: clone failed", result);
+    }
+    this.reportCloneOutcome(result);
+  }
+
+  /**
+   * The manual route: the DOWNLOAD half is a plain `git clone` command the
+   * user pastes into Termux — git's own prompts and git's own progress meter,
+   * because the first design (an interactive runner run) hid both behind the
+   * progress redirection and read as a hang the moment the credential prompt
+   * was answered. What the user types is saved per repository by the
+   * clone-time credential helper, in Termux. The FINISH half stays the
+   * runner's collision-safe clone-into-vault: pressing Continue queues it,
+   * and a v15 runner adopts the repository already downloaded in
+   * `runtime/clone-tmp/` instead of downloading again. Nothing is queued
+   * until Continue, so nothing can expire or be claimed while the user is
+   * still typing a token.
+   */
+  private runCloneViaTermux(args: Record<string, unknown>): void {
+    if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < 15) {
+      new ResultModal(
+        this.app,
+        "Termux runner is too old for this",
+        [
+          `Finishing a clone downloaded in Termux needs runner v15; this device answers with v${this.lastRunnerVersion}.`,
+          RUNNER_OUTDATED_HINT,
+        ],
+        {
+          isError: true,
+          actions: [
+            {
+              label: "Copy command & open Termux",
+              cta: true,
+              keepOpen: true,
+              onClick: () => this.copyCommandAndOpenTermux(),
+            },
+          ],
+        }
+      ).open();
+      return;
+    }
+    const cmd = manualCloneCommand({
+      url: String(args.url),
+      vaultPath: this.deviceSettings.repoPathHint,
+      configDir: this.app.vault.configDir,
+      profileId: this.deviceSettings.profileId,
+      filter: typeof args.filter === "string" ? args.filter : undefined,
+      depth: typeof args.depth === "number" ? args.depth : undefined,
+    });
+    if (cmd === null) {
+      new Notice(
+        "Set the repository path in settings first — the clone command addresses the vault by its absolute path in Termux."
+      );
+      return;
+    }
+    void navigator.clipboard.writeText(cmd);
+    new Notice("Clone command copied - long-press in Termux to paste, then Enter.");
+    new ResultModal(
+      this.app,
+      "Clone in Termux, then continue here",
+      [
+        // Two short lines; the command itself sits collapsed below. A device
+        // screenshot showed the earlier five-line version plus the inline
+        // command filling the whole screen.
+        "1. The command is copied. In Termux: paste, Enter, answer git's username/token prompts (saved and reused). Keep Termux visible until the download finishes.",
+        "2. Come back and press Continue — the repository is moved into the vault, nothing is downloaded twice, your notes are kept.",
+      ],
+      {
+        collapsed: { label: "The copied command", text: cmd },
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(cmd);
+              this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+            },
+          },
+          {
+            label: "Continue — finish the clone",
+            cta: true,
+            onClick: () => void this.finishManualClone(args),
+          },
+        ],
+      }
+    ).open();
+  }
+
+  /**
+   * The finish half: an ordinary clone-into-vault round trip. A v15 runner
+   * finds the pre-downloaded repository and completes locally; a Continue
+   * pressed too early (download still running, or never started) comes back
+   * as an ordinary failure whose message says what to do.
+   */
+  private async finishManualClone(args: Record<string, unknown>): Promise<void> {
+    const result = await this.runOperation("clone-into-vault", args);
+    if (!result) return;
+    if (!result.ok) {
+      if (needsTermuxCredentials(result.error?.stderr, result.error?.stdout)) {
+        return this.offerCloneViaTermux(args, result);
+      }
+      return this.renderMutationError("Native Git: clone failed", result);
+    }
+    this.reportCloneOutcome(result);
+  }
+
+  /**
+   * A companion-route clone failed because git wanted credentials it had no
+   * way to ask for. The answer is the interactive route, offered rather than
+   * taken: re-running the clone is a decision, not a retry.
+   */
+  private offerCloneViaTermux(args: Record<string, unknown>, result: BridgeResult): void {
+    new ResultModal(
+      this.app,
+      "The clone needs credentials",
+      [
+        "The remote asked for credentials and none are saved for this repository. Credentials live only in Termux, and git can only ask for them at a terminal.",
+        "Download the repository in Termux instead: the button opens the instructions — a plain git clone command to paste, with git's own prompts and progress — and the clone is finished here afterwards without a second download.",
+        ...summarizeGitError(result.error?.stderr, result.error?.stdout, 3),
+      ],
+      {
+        isError: true,
+        actions: [
+          {
+            label: "Clone via Termux",
+            cta: true,
+            onClick: () => void this.runCloneViaTermux(args),
+          },
+        ],
+      }
+    ).open();
+  }
+
+  /** Render a finished clone's result window (shared by both routes). */
+  private reportCloneOutcome(result: BridgeResult): void {
     this.absorbStatusData(result.data ?? {});
     const collisions = (result.data?.collisions ?? "").split("\n").filter((l) => l.trim() !== "");
     const lines = [`Branch: ${result.data?.branch || "(unborn)"}`];
@@ -1915,7 +2077,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       // Obsidian already prefixes every entry with the plugin name, so a
       // "Native Git: " here produced "Native Git Bridge: Native Git: Fetch".
       // Ids stay untouched: they are what user hotkeys are bound to.
-      { id: "status", name: "Status", cb: () => void this.cmdStatus() },
+      { id: "status", name: "Status", cb: () => void this.cmdStatus(false, true) },
       { id: "pull", name: "Pull", cb: () => void this.cmdPull() },
       { id: "push", name: "Push", cb: () => void this.cmdPush() },
       { id: "commit", name: "Commit", cb: () => void this.cmdCommit() },
@@ -2194,6 +2356,28 @@ export default class NativeGitBridgePlugin extends Plugin {
       this.lastVerdict = result.ok
         ? `${action} finished`
         : `${action} failed: ${result.error?.message ?? `exit ${result.exitCode}`}`;
+      // The one failure whose answer is a window, not a message: the runner
+      // says there is no repository here, and the vault agrees (no .git).
+      // Every operation lands in this seam — pull, push, sync, commit, a
+      // diff, a history page — so the catch lives here once, opens the
+      // repository setup window (Create / Clone), and hands the caller null:
+      // already handled, nothing further to render. `status` is the
+      // exception, because it is also sent automatically in the background;
+      // its user-initiated paths make the same offer through the flag in
+      // cmdStatus, and a background refresh must never pop a window. A vault
+      // that HAS a .git the runner cannot use keeps its ordinary error
+      // window — offering to create a repository over one that exists would
+      // be worse than the honest failure.
+      if (
+        !result.ok &&
+        result.error?.code === "REPO_MISSING" &&
+        action !== "status" &&
+        !(await this.vaultHasRepository())
+      ) {
+        this.log.add("info", action, "No repository in this vault; opening the repository setup window.");
+        await this.cmdSetupRepository();
+        return null;
+      }
       return result;
     } catch (e) {
       this.log.add("error", action, `Bridge error: ${String(e)}`);
@@ -2487,10 +2671,26 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   // ------------------------------------------------------------- command impls
 
-  async cmdStatus(silent = false): Promise<void> {
+  async cmdStatus(silent = false, offerSetupWhenMissing = false): Promise<void> {
     const result = await this.runOperation("status");
     if (!result) return;
     if (!result.ok) {
+      // A refresh pressed in a vault that simply has no repository yet is not
+      // a fault to report, it is a question to answer: the runner says
+      // REPO_MISSING, the vault agrees (no .git), and the actionable window is
+      // the repository setup with its Create / Clone buttons. Only for a
+      // USER-initiated status (the panel's refresh button, the palette
+      // command): an automatic background refresh must never pop a modal.
+      // A vault that HAS a .git the runner cannot use keeps the error window —
+      // offering to create a repository over one that exists would be worse.
+      if (
+        offerSetupWhenMissing &&
+        result.error?.code === "REPO_MISSING" &&
+        !(await this.vaultHasRepository())
+      ) {
+        await this.cmdSetupRepository();
+        return;
+      }
       this.statusBar?.set("error");
       new ResultModal(
         this.app,
@@ -3036,6 +3236,37 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /**
+   * The footprint state, read on demand. The settings toggles used to be dead
+   * until some OTHER action happened to fetch a status — on a fresh launch
+   * that read as buttons that do not press. Now the toggle itself asks: one
+   * silent status round trip when nothing has been heard yet this session,
+   * and the command proceeds from what the repository actually is. Null means
+   * handled — a repo-less vault got the setup window (the same offer every
+   * operation makes), a failure got its error window — and the caller stops.
+   */
+  private async ensureFootprintState(): Promise<{ shallow: boolean; partial: boolean } | null> {
+    const known = this.footprintState();
+    if (known !== null) return known;
+    const result = await this.runOperation("status");
+    if (!result) return null;
+    if (!result.ok) {
+      if (result.error?.code === "REPO_MISSING" && !(await this.vaultHasRepository())) {
+        await this.cmdSetupRepository();
+        return null;
+      }
+      new ResultModal(
+        this.app,
+        "Native Git: status failed",
+        [result.error?.message ?? "Unknown error."],
+        { stdout: result.error?.stdout, stderr: result.error?.stderr, isError: true }
+      ).open();
+      return null;
+    }
+    this.absorbStatusData(result.data ?? {});
+    return this.footprintState();
+  }
+
+  /**
    * All four footprint changes share one shape: confirm with the consequences
    * stated, run the action, and let the ABSORBED status decide what the toggle
    * shows — a change the runner refused changes nothing on screen.
@@ -3077,6 +3308,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdShallowEnable(): Promise<void> {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (fp.shallow) {
+      new Notice("History is already shallow on this device; the toggle now shows it.");
+      return;
+    }
     const depth = this.deviceSettings.shallowDepth;
     await this.footprintChange(
       "Limit history on this device?",
@@ -3096,6 +3333,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdUnshallow(): Promise<void> {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (!fp.shallow) {
+      new Notice("The full history is already on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Download the full history back?",
       ["One large download over the network; the budget is generous, and the output panel shows progress."],
@@ -3109,6 +3352,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdPartialEnable(): Promise<void> {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (fp.partial) {
+      new Notice("Partial clone is already enabled on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Enable partial clone on this device?",
       [
@@ -3127,6 +3376,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   async cmdPartialDisable(): Promise<void> {
+    const fp = await this.ensureFootprintState();
+    if (fp === null) return;
+    if (!fp.partial) {
+      new Notice("Partial clone is already off on this device; the toggle now shows it.");
+      return;
+    }
     await this.footprintChange(
       "Disable partial clone?",
       [
@@ -3706,6 +3961,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       rebaseInProgress: d.rebaseInProgress === "true",
       shallow: d.shallow === "true",
       partialFilter: d.partialFilter?.trim() ? d.partialFilter.trim() : undefined,
+      // Tri-state on purpose: a runner older than v15 does not report the
+      // field, and "unknown" must not read as "no credentials" — that would
+      // send every re-clone on an old runner to the Termux terminal.
+      credsConfigured: d.credsConfigured === undefined ? undefined : d.credsConfigured === "true",
     };
     this.statusStale = false;
     this.maybeOfferPartialForSparse();
@@ -3720,11 +3979,23 @@ export default class NativeGitBridgePlugin extends Plugin {
    * very first operation after a restart, before any fresh status arrives.
    */
   private absorbSparsePatterns(sparse: SparseStateSummary): void {
-    if (!sparse.enabled) return;
-    const candidates = sparseExclusionPaths(sparse.patterns);
+    // Derived from what git itself reports; disabled sparse derives an empty
+    // set, because after a re-clone the sparse configuration is simply gone.
+    const candidates = sparse.enabled ? sparseExclusionPaths(sparse.patterns) : [];
     const validated = validateProtectedPaths(candidates);
     const derived = validated.ok ? validated.normalized : [];
     const prev = this.deviceSettings.derivedProtectedPaths;
+    const missing = prev.filter((p) => !derived.includes(p));
+    if (missing.length > 0) {
+      // Paths this device protects are no longer sparse-hidden — a re-clone,
+      // or rules changed outside the plugin. Neither silent answer is right:
+      // dropping the protection unguards what the gate exists for, keeping it
+      // SAFETY_BLOCKs sync over paths that are now plainly visible. So the
+      // protection STAYS until the user decides, and the window asks which
+      // way — hide-and-protect again, or release. Once per set per session.
+      this.offerSparseReconcile(missing, derived);
+      return;
+    }
     if (derived.length === prev.length && derived.every((p, i) => p === prev[i])) return;
     this.deviceSettings = this.store.write({ derivedProtectedPaths: derived });
     this.log.add(
@@ -3732,6 +4003,53 @@ export default class NativeGitBridgePlugin extends Plugin {
       "sparse",
       `Derived protected paths refreshed from sparse exclusions: ${derived.join(", ") || "(none)"}.`
     );
+  }
+
+  /** Sets of no-longer-hidden protected paths already asked about this session. */
+  private sparseReconcileOffered = new Set<string>();
+  private offerSparseReconcile(missing: string[], remaining: string[]): void {
+    const sig = missing.join("\n");
+    if (this.sparseReconcileOffered.has(sig)) return;
+    this.sparseReconcileOffered.add(sig);
+    const plural = missing.length === 1 ? "path" : "paths";
+    new ResultModal(
+      this.app,
+      "Protected paths are no longer hidden",
+      [
+        `${missing.length} ${plural} this device protects ${missing.length === 1 ? "is" : "are"} no longer excluded by the repository's sparse checkout — after a re-clone, or after the rules were changed outside the plugin:`,
+        ...missing,
+        "Hide & protect again puts the sparse exclusion back (this device only; the files leave the working tree, nothing leaves the repository). Release accepts the new state: the paths stay visible and lose the protection. Until you choose, the protection stays on.",
+      ],
+      {
+        actions: [
+          {
+            label: "Hide & protect again",
+            cta: true,
+            onClick: () => void this.reapplySparseExclusions(missing),
+          },
+          {
+            label: "Release protection",
+            onClick: () => {
+              this.deviceSettings = this.store.write({ derivedProtectedPaths: remaining });
+              this.log.add("info", "sparse", `Protection released for: ${missing.join(", ")}.`);
+              new Notice(`No longer protected: ${missing.join(", ")}.`);
+              this.pushStatusToView();
+            },
+          },
+        ],
+      }
+    ).open();
+  }
+
+  /**
+   * Re-hide the given paths one by one; each add refreshes the derived set.
+   * skipConfirm: the reconcile window the user just answered WAS the
+   * confirmation, and one question per path would ask it three more times.
+   */
+  private async reapplySparseExclusions(paths: string[]): Promise<void> {
+    for (const p of paths) {
+      await this.cmdSparseExclude(p, true, true);
+    }
   }
 
   /**
@@ -3794,6 +4112,11 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Name it, and offer the repair instead of leaving the user to find out
     // that `git fsck` exists.
     const corrupt = looksLikeObjectCorruption(err?.stderr, err?.stdout);
+    // A stale index.lock announces itself the same way through any operation:
+    // "Unable to create … index.lock: File exists". The message alone leaves
+    // the user hunting a phantom git process, so every window carrying it
+    // also carries the way out.
+    const staleLock = !corrupt && looksLikeStaleLock(err?.stderr, err?.stdout);
     const lines = [err?.message ?? "Unknown error.", ...reason];
     if (corrupt) {
       lines.push(
@@ -3805,14 +4128,60 @@ export default class NativeGitBridgePlugin extends Plugin {
           "fetches to bring the real objects back from the remote. Nothing that holds data is touched."
       );
     }
+    if (staleLock) {
+      lines.push(
+        "",
+        "A leftover lock file is blocking git: a process the system killed mid-write leaves " +
+          ".git/index.lock behind, and every operation fails on it until the file is removed. " +
+          "The button below stops Termux's processes (so nothing can be holding the lock) and deletes it."
+      );
+    }
     new ResultModal(this.app, title, lines, {
       stdout: err?.stdout,
       stderr: err?.stderr,
       isError: true,
       actions: corrupt
         ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }]
-        : undefined,
+        : staleLock
+          ? [{ label: "Delete the stale lock…", cta: true, onClick: () => this.cmdRepairStaleLock() }]
+          : undefined,
     }).open();
+  }
+
+  /**
+   * Remove a stale `.git/index.lock`, the user's own design: stop Termux
+   * first (every process of its uid — the companion trigger that delivers
+   * the request starts a fresh Termux, which is the restart), and only then
+   * delete the lock, so a live git process can never be holding it. Behind a
+   * confirmation because it kills an open Termux session too (§4 rule 7).
+   */
+  cmdRepairStaleLock(): void {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Delete the stale git lock?",
+        body: [
+          ".git/index.lock guards the repository while one git process writes. A process Android killed leaves it behind, and every operation then fails with 'another git process seems to be running'.",
+          "To make the removal safe, EVERY Termux process is stopped first — including a terminal session, if one is open — and the runner arrives in a fresh Termux started by the trigger. Only then is the lock file deleted.",
+          "Do not run this while a download you started in Termux is still visibly working.",
+        ],
+        confirmLabel: "Stop Termux & delete the lock",
+        icon: "lock-open",
+        danger: true,
+      },
+      async (ok) => {
+        if (!ok) return;
+        const result = await this.runOperation("repair-stale-lock", {});
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: unlock failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new Notice(
+          result.data?.lockRemoved === "true"
+            ? "Stale lock removed. Run the operation again."
+            : "No lock file was there — it may have been released already. Run the operation again."
+        );
+      }
+    ).open();
   }
 
   private openVaultFile(path: string): void {

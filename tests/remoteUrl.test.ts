@@ -36,9 +36,16 @@ describe("validateRemoteUrl", () => {
     expect(v.reason).toMatch(/credentials stay in Termux/i);
   });
 
-  it("still accepts a username without a password (ssh's normal form)", () => {
+  it("keeps ssh's userinfo but refuses ANY userinfo on https", () => {
+    // ssh://git@host is the universal ssh user, not a secret. On https a
+    // "username" is routinely a personal access token with no password at
+    // all (https://ghp_…@github.com/…), which the colon-requiring rule used
+    // to wave through — a real vault carried its token into .git/config that
+    // way, and cleaning it up is what broke the device's working auth.
     expect(validateRemoteUrl("ssh://git@github.com/me/vault.git").ok).toBe(true);
-    expect(validateRemoteUrl("https://token@github.com/me/vault.git").ok).toBe(true);
+    const v = validateRemoteUrl("https://ghp_token123@github.com/me/vault.git");
+    expect(v.ok).toBe(false);
+    expect(v.problem).toBe("credentials");
   });
 
   it("refuses anything git would read as an option", () => {

@@ -1079,7 +1079,7 @@ check '[ "$(git -C "$BOOT/Fresh" remote get-url origin)" = "file://$ROOT/remote.
 breq "$F_RT" "r-20260806T102001Z-rem02" "$F_TOKEN" set-remote "$F_PID" "{\"url\":\"https://example.com/changed.git\"}"
 brun >/dev/null
 check '[ "$(git -C "$BOOT/Fresh" remote get-url origin)" = "https://example.com/changed.git" ]' "set-remote changes an existing origin"
-for BAD in '"https://user:hunter2@example.com/x.git"' '"-oProxyCommand=id"' '"http://example.com/x.git"' '"ext::sh -c id"' '"https://exa mple.com/x.git"'; do
+for BAD in '"https://user:hunter2@example.com/x.git"' '"https://ghp_hunter2token@example.com/x.git"' '"-oProxyCommand=id"' '"http://example.com/x.git"' '"ext::sh -c id"' '"https://exa mple.com/x.git"'; do
   breq "$F_RT" "r-20260806T1030$(printf %02d $RANDOM | tail -c 3)Z-bad$$" "$F_TOKEN" set-remote "$F_PID" "{\"url\":$BAD}"
 done
 brun >/dev/null
@@ -1138,6 +1138,180 @@ check 'jq -e ".error.code == \"REPO_EXISTS\"" "$CC_RT/results/r-20260806T106001Z
 breq "$CC_RT" "r-20260806T106002Z-cln06" "$CC_TOKEN" clone-into-vault "$CC_PID" '{"url":"file:///nonexistent/nope.git"}'
 brun >/dev/null
 check 'jq -e ".error.code == \"REPO_EXISTS\"" "$CC_RT/results/r-20260806T106002Z-cln06.json" >/dev/null' "…before the URL is even used"
+
+echo "# phase 7: an interactive run (v15) is the same run, and says so"
+# `runner.sh interactive` is what the plugin copies to the clipboard when a
+# clone needs credentials git can only ask for at a terminal. The queue, the
+# results and the lock are all the same; only prompting is allowed. No prompt
+# happens here (file:// remotes never ask), so this proves the argument does
+# not change what a run does — the prompting itself needs a tty and a device.
+breq "$CC_RT" "r-20260806T106500Z-int01" "$CC_TOKEN" status "$CC_PID"
+INT_OUT="$(brun interactive)"
+check 'jq -e ".ok == true" "$CC_RT/results/r-20260806T106500Z-int01.json" >/dev/null' "a queued request is served by an interactive run"
+check 'printf "%s" "$INT_OUT" | grep -q "interactively"' "the interactive run announces itself on stdout (a person is reading it)"
+check 'printf "%s" "$INT_OUT" | grep -q "NGB_RUNNER_VERSION="' "…and keeps the version probe line"
+
+echo "# phase 7: an interactive clone narrates to the terminal (the mirror)"
+# The user's report: pasting the command gave "just silence and a timer" while
+# a hand-typed clone shows a live meter. The interactive run now mirrors what
+# it appends to the progress stream back onto stderr; the file the panel
+# reads stays the single source and is still written.
+newvault "$BOOT/CloneT"
+CT_RT="$BOOT/CloneT/.obsidian/plugins/native-git-bridge/runtime"
+brun >/dev/null
+CT_TOKEN="$(jq -r .token "$CT_RT/pairing.json")"; CT_PID="$(jq -r .profileId "$CT_RT/pairing.json")"
+breq "$CT_RT" "r-20260806T106600Z-int02" "$CT_TOKEN" clone-into-vault "$CT_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+INT_ERR="$( { brun interactive >/dev/null; } 2>&1 )"
+check 'jq -e ".ok == true" "$CT_RT/results/r-20260806T106600Z-int02.json" >/dev/null' "the interactive clone lands"
+check 'printf "%s" "$INT_ERR" | grep -q -- "-- clone: downloading"' "…and the step narration reaches the terminal"
+check '[ -s "$CT_RT/progress/r-20260806T106600Z-int02.txt" ]' "…while the progress file the panel reads is still written"
+
+echo "# phase 7: a repository pre-downloaded in Termux is adopted, not re-downloaded (v15)"
+# The manual clone route: the user runs a plain `git clone --no-checkout` into
+# runtime/clone-tmp/repo (git's own prompts and progress), then the queued
+# clone-into-vault finishes locally. Adoption requires the origin to match the
+# requested URL exactly and HEAD to resolve (a finished transfer).
+newvault "$BOOT/CloneP"
+CP_RT="$BOOT/CloneP/.obsidian/plugins/native-git-bridge/runtime"
+echo "mine here" > "$BOOT/CloneP/pre-existing.md"
+brun >/dev/null
+CP_TOKEN="$(jq -r .token "$CP_RT/pairing.json")"; CP_PID="$(jq -r .profileId "$CP_RT/pairing.json")"
+git clone -q --no-checkout "file://$ROOT/remote.git" "$CP_RT/clone-tmp/repo" 2>/dev/null
+breq "$CP_RT" "r-20260806T106700Z-pre01" "$CP_TOKEN" clone-into-vault "$CP_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+RES="$CP_RT/results/r-20260806T106700Z-pre01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the pre-downloaded repository finishes the clone"
+check 'grep -q "already downloaded in Termux" "$CP_RT/progress/r-20260806T106700Z-pre01.txt"' "…and says it downloaded nothing"
+check '[ -f "$BOOT/CloneP/Notes/note.md" ]' "…with the working tree materialised"
+check '[ -f "$BOOT/CloneP/pre-existing.md" ]' "…and the vault's own file untouched"
+check '[ ! -e "$CP_RT/clone-tmp" ]' "…and the scratch directory gone"
+
+# An UNFINISHED download (origin matches, HEAD does not resolve — exactly what
+# a transfer still running or killed looks like) is refused with instructions,
+# and deliberately NOT wiped: wiping it mid-transfer would fail the command
+# the user is watching in Termux.
+newvault "$BOOT/CloneQ"
+CQ_RT="$BOOT/CloneQ/.obsidian/plugins/native-git-bridge/runtime"
+brun >/dev/null
+CQ_TOKEN="$(jq -r .token "$CQ_RT/pairing.json")"; CQ_PID="$(jq -r .profileId "$CQ_RT/pairing.json")"
+mkdir -p "$CQ_RT/clone-tmp"
+git init -q "$CQ_RT/clone-tmp/repo"
+git -C "$CQ_RT/clone-tmp/repo" remote add origin "file://$ROOT/remote.git"
+breq "$CQ_RT" "r-20260806T106701Z-pre02" "$CQ_TOKEN" clone-into-vault "$CQ_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+RES="$CQ_RT/results/r-20260806T106701Z-pre02.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "an unfinished download is refused, not adopted"
+check 'jq -er ".error.message" "$RES" | grep -qi "not finished"' "…with a message that says what to do"
+check '[ -d "$CQ_RT/clone-tmp/repo/.git" ]' "…and the directory is left for the running transfer"
+check '[ ! -d "$BOOT/CloneQ/.git" ]' "…and the vault stays untouched"
+
+# A leftover pointing at a DIFFERENT remote is stale: removed, downloaded fresh.
+git -C "$CQ_RT/clone-tmp/repo" remote set-url origin "file:///somewhere/else.git"
+breq "$CQ_RT" "r-20260806T106702Z-pre03" "$CQ_TOKEN" clone-into-vault "$CQ_PID" "{\"url\":\"file://$ROOT/remote.git\"}"
+brun >/dev/null
+check 'jq -e ".ok == true" "$CQ_RT/results/r-20260806T106702Z-pre03.json" >/dev/null' "a stale leftover for another remote is replaced by a fresh download"
+check '[ -f "$BOOT/CloneQ/Notes/note.md" ]' "…which lands normally"
+
+echo "# phase 7: the first sparse exclusion ENABLES non-cone sparse on a fresh clone (v15)"
+# A re-clone brings a fresh .git, and the sparse configuration dies with the
+# old one; sparse-exclude-add used to refuse then, telling the user to run a
+# git command in Termux by hand. Now it seeds git's include-everything base
+# and enables sparse itself — and the first exclusion must never read as
+# "hide everything".
+check '[ "$(git -C "$BOOT/CloneQ" config --get core.sparseCheckout 2>/dev/null || echo false)" != "true" ]' "the freshly cloned repository has sparse DISABLED"
+breq "$CQ_RT" "r-20260806T106703Z-spe01" "$CQ_TOKEN" sparse-exclude-add "$CQ_PID" '{"path":"Projects/Archive"}'
+brun >/dev/null
+RES="$CQ_RT/results/r-20260806T106703Z-spe01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the first exclusion is accepted, not refused"
+check '[ "$(git -C "$BOOT/CloneQ" config --get core.sparseCheckout)" = "true" ]' "…and sparse is now enabled"
+check '[ "$(git -C "$BOOT/CloneQ" config --get core.sparseCheckoutCone 2>/dev/null || echo false)" != "true" ]' "…in pattern (non-cone) mode"
+check 'git -C "$BOOT/CloneQ" sparse-checkout list | grep -qx "/\*"' "…seeded with the include-everything base"
+check 'git -C "$BOOT/CloneQ" sparse-checkout list | grep -qx "!/Projects/Archive"' "…plus the requested exclusion"
+check '[ ! -e "$BOOT/CloneQ/Projects/Archive/spec.md" ]' "…and the excluded path left the working tree"
+check '[ -f "$BOOT/CloneQ/Notes/note.md" ]' "…while everything else stayed (the base did its job)"
+
+echo "# phase 7: repair-stale-lock removes a leftover index.lock (v15)"
+# A process the system kills mid-write leaves .git/index.lock behind and every
+# later operation fails on it. On Termux the action first kills every other
+# process of its uid (nothing can then hold the lock); off Termux there is no
+# other Termux process to kill and the kill would take the test run down, so
+# only the removal runs — which is the half provable here.
+touch "$BOOT/CloneQ/.git/index.lock"
+breq "$CQ_RT" "r-20260806T106704Z-lck01" "$CQ_TOKEN" repair-stale-lock "$CQ_PID"
+brun >/dev/null
+RES="$CQ_RT/results/r-20260806T106704Z-lck01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-stale-lock ok"
+check '[ "$(jq -r .data.lockExisted "$RES")" = "true" ]' "…it saw the lock"
+check '[ "$(jq -r .data.lockRemoved "$RES")" = "true" ]' "…and reports removing it"
+check '[ ! -e "$BOOT/CloneQ/.git/index.lock" ]' "…and the lock is gone"
+breq "$CQ_RT" "r-20260806T106705Z-lck02" "$CQ_TOKEN" repair-stale-lock "$CQ_PID"
+brun >/dev/null
+RES="$CQ_RT/results/r-20260806T106705Z-lck02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "with no lock present it still answers ok"
+check '[ "$(jq -r .data.lockRemoved "$RES")" = "false" ]' "…and says honestly that nothing was removed"
+
+echo "# phase 7: status reports whether TERMUX-SIDE credentials exist (v15)"
+# The vault repository's LOCAL helper deliberately does not count: it lives in
+# the vault's .git/config, dies with the old .git on a re-clone, and rule 11
+# says credentials are never reused from inside the vault.
+git -C "$BOOT/CloneC" config credential.helper "store --file=$ROOT/nowhere-creds"
+breq "$CC_RT" "r-20260806T106501Z-crd01" "$CC_TOKEN" status "$CC_PID"
+brun >/dev/null
+check '[ "$(jq -r .data.credsConfigured "$CC_RT/results/r-20260806T106501Z-crd01.json")" = "false" ]' "a vault-local helper does NOT count as credentials (rule 11)"
+check '! grep -q "nowhere-creds" "$CC_RT/results/r-20260806T106501Z-crd01.json"' "…and its value never travels"
+git -C "$BOOT/CloneC" config --unset credential.helper
+mkdir -p "$BCONF/creds"
+printf 'https://user:tok@example.com\n' > "$BCONF/creds/$CC_PID"
+breq "$CC_RT" "r-20260806T106502Z-crd02" "$CC_TOKEN" status "$CC_PID"
+brun >/dev/null
+check '[ "$(jq -r .data.credsConfigured "$CC_RT/results/r-20260806T106502Z-crd02.json")" = "true" ]' "a non-empty profile credential file -> credsConfigured=true"
+check '! grep -rq "user:tok" "$CC_RT/results/r-20260806T106502Z-crd02.json"' "…and its content never travels"
+rm -rf "$BCONF/creds" "$BCONF/creds-probe"
+git config --global credential.helper cache
+breq "$CC_RT" "r-20260806T106503Z-crd03" "$CC_TOKEN" status "$CC_PID"
+brun >/dev/null
+check '[ "$(jq -r .data.credsConfigured "$CC_RT/results/r-20260806T106503Z-crd03.json")" = "true" ]' "a global helper in Termux's own gitconfig -> credsConfigured=true"
+git config --global --unset credential.helper
+breq "$CC_RT" "r-20260806T106504Z-crd04" "$CC_TOKEN" status "$CC_PID"
+brun >/dev/null
+check '[ "$(jq -r .data.credsConfigured "$CC_RT/results/r-20260806T106504Z-crd04.json")" = "false" ]' "nothing Termux-side -> credsConfigured=false"
+
+echo "# phase 7: clone credential persistence is https-only"
+check '[ -z "$(git -C "$BOOT/CloneC" config --local --get credential.helper 2>/dev/null)" ]' "a file:// clone configures no credential helper"
+check '[ ! -d "$BCONF/creds" ]' "…and creates no credential file"
+
+echo "# phase 7: persist_clone_credentials (the real function, lifted) for https"
+# The https path cannot be exercised end to end here (no https remote can be
+# served locally, and http:// is refused by URL validation), so the function
+# the clone calls after landing is lifted verbatim — same pattern as the
+# installer's list_profiles probe.
+PL="$ROOT/persist-lab"
+mkdir -p "$PL/one" "$PL/two"
+git init -q "$PL/one"; git init -q "$PL/two"
+check 'grep -q "^persist_clone_credentials() {" "$RUNNER"' "the runner defines persist_clone_credentials (the probe below lifts the real one)"
+(
+  cd "$PL/one"
+  NGB_CONFIG_DIR="$PL/conf"; PROFILE_ID="p-0123456789abcdef"
+  log() { :; }
+  eval "$(sed -n '/^ensure_profile_creds_file() {/,/^}$/p' "$RUNNER")"
+  eval "$(sed -n '/^persist_clone_credentials() {/,/^}$/p' "$RUNNER")"
+  persist_clone_credentials "https://example.com/v.git"
+)
+check 'git -C "$PL/one" config --local --get credential.helper | grep -q "store --file="' "an https clone leaves the repository able to authenticate on its own"
+check '[ -f "$PL/conf/creds/p-0123456789abcdef" ]' "…with the profile credential file created"
+check '[ "$(stat -c %a "$PL/conf/creds/p-0123456789abcdef")" = "600" ]' "…mode 600"
+check '[ "$(stat -c %a "$PL/conf/creds")" = "700" ]' "…in a directory of mode 700"
+(
+  cd "$PL/two"
+  git config --local credential.helper cache
+  NGB_CONFIG_DIR="$PL/conf"; PROFILE_ID="p-fedcba9876543210"
+  log() { :; }
+  eval "$(sed -n '/^ensure_profile_creds_file() {/,/^}$/p' "$RUNNER")"
+  eval "$(sed -n '/^persist_clone_credentials() {/,/^}$/p' "$RUNNER")"
+  persist_clone_credentials "https://example.com/v.git"
+)
+check '[ "$(git -C "$PL/two" config --local --get-all credential.helper)" = "cache" ]' "a helper configured already is left exactly alone"
+check '[ ! -f "$PL/conf/creds/p-fedcba9876543210" ]' "…and no second credential file appears"
 
 echo "# phase 7: init + set-remote ends up exactly where a clone would"
 # The question a user actually asks: if I create a repository here and then
@@ -1409,6 +1583,25 @@ check 'printf %s "$OUT" | grep -q "p-0000000c.*MISSING (directory is gone)"' "a 
 check 'printf %s "$OUT" | grep -q "p-0000000b.*NOT A REPOSITORY"' "a directory that is no longer a work tree is called out"
 check 'printf %s "$OUT" | grep -q "rm $PROBE_DIR/profiles/<profile-id>.conf"' "…and the listing says how to remove one, without removing anything itself"
 check '[ "$(ls -1 "$PROBE_DIR"/profiles/*.conf | wc -l)" = "3" ]' "listing the profiles deletes none of them"
+
+echo "# installer: normalize_cred_file gives a token-as-username line its colon (lifted)"
+# git's credential-store format is https://username:password@host. The
+# installer's token move once copied a colon-less userinfo verbatim, and the
+# store then served a username with no password — every non-interactive fetch
+# died asking for it (a real device lost its working auth to this). The
+# normalizer runs on every install, so RE-RUNNING the installer heals it.
+CREDLAB="$ROOT/cred-lab"
+mkdir -p "$CREDLAB"
+printf 'https://ghp_sometoken123@github.com\nhttps://user:pass@example.com\nhttps://git:tok@host.tld\n' > "$CREDLAB/creds"
+check 'grep -q "^normalize_cred_file() {" "$SCRIPT_DIR/native-git-bridge/termux/install.sh"' "the installer defines normalize_cred_file (the probe below lifts the real one)"
+(
+  PROFILE_CREDS="$CREDLAB/creds"
+  eval "$(sed -n '/^normalize_cred_file() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+  normalize_cred_file
+)
+check 'grep -qx "https://ghp_sometoken123:@github.com" "$CREDLAB/creds"' "a colon-less token line gains its empty password"
+check 'grep -qx "https://user:pass@example.com" "$CREDLAB/creds"' "a user:password line is left exactly alone"
+check 'grep -qx "https://git:tok@host.tld" "$CREDLAB/creds"' "…and so is every other well-formed line"
 
 # ---------------------------------------------------------------------------
 # phase 9: getting OUT of states the plugin used to be unable to leave.

@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   __findByClass,
+  __modalTitles,
   __notices,
   __openedModals,
   __protocolHandlers,
@@ -175,6 +176,8 @@ interface FakeRunner {
   uris: string[];
   /** When set, called with the request id; may write a result file. */
   onTrigger: ((id: string) => void) | null;
+  /** Texts copied to the clipboard (the interactive-clone handoff copies one). */
+  copied: string[];
 }
 
 function okStatusResult(
@@ -191,7 +194,6 @@ function okStatusResult(
     exitCode: 0,
     runnerVersion,
     data: {
-      ...extraData,
       branchInfo: "# branch.oid abc123\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0",
       sparseEnabled: "true",
       sparseCone: "false",
@@ -199,6 +201,9 @@ function okStatusResult(
       skipWorktreeCount: "3900",
       lastCommit: "0123abc4567890def\t2026-08-01T10:00:00Z\tlast subject",
       remoteUrl: "https://***@example.com/vault.git",
+      // LAST, so a test can override the fixture's fields, not only add new
+      // ones (the sparse-reconcile tests answer with sparse DISABLED).
+      ...extraData,
     },
   });
 }
@@ -218,6 +223,14 @@ function installGlobals(runner: FakeRunner): void {
       return {}; // truthy: the anchor-click fallback is not needed
     },
   };
+  // The interactive-clone handoff copies a command before opening Termux;
+  // node has no clipboard, so record what production code would have copied.
+  // defineProperty, not assignment: node 21+ ships `navigator` as a global
+  // with only a getter, and a plain assignment throws.
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: { clipboard: { writeText: async (t: string) => void runner.copied.push(t) } },
+  });
   const visListeners = new Set<() => void>();
   (globalThis as Any).document = {
     visibilityState: "visible",
@@ -249,7 +262,7 @@ interface Harness {
 async function loadPlugin(): Promise<Harness> {
   const adapter = memAdapter();
   const app = makeApp(adapter);
-  const runner: FakeRunner = { uris: [], onTrigger: null };
+  const runner: FakeRunner = { uris: [], onTrigger: null, copied: [] };
   installGlobals(runner);
   const plugin = new (NativeGitBridgePlugin as Any)(app, {
     id: "native-git-bridge",
@@ -750,6 +763,80 @@ describe("repository bootstrap", () => {
     expect(claim.bootstrap).toBe(false);
   });
 
+  it("answers a refresh in a repo-less vault with the setup window, not an error", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "This vault is not a git repository yet. Clone one or create one." },
+    }));
+    // The panel's refresh button and the palette Status command pass the flag.
+    await h.plugin.cmdStatus(true, true);
+    expect(__modalTitles).toContain("Set up the repository");
+    expect(__modalTitles).not.toContain("Native Git: status failed");
+  });
+
+  it("keeps the error window when a .git exists but the runner cannot use it", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.adapter.dirs.add(".git"); // the repository is there; the profile is what is broken
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "Repository unusable (dubious ownership)." },
+    }));
+    await h.plugin.cmdStatus(true, true);
+    // Offering to create a repository over one that exists would be worse
+    // than the honest failure.
+    expect(__modalTitles).toContain("Native Git: status failed");
+    expect(__modalTitles).not.toContain("Set up the repository");
+  });
+
+  it("never pops the setup window from an automatic background refresh", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "This vault is not a git repository yet." },
+    }));
+    await h.plugin.cmdStatus(true); // no flag: the automatic callers' shape
+    expect(__modalTitles).not.toContain("Set up the repository");
+  });
+
+  it("catches REPO_MISSING from EVERY operation: a pull in a repo-less vault opens the setup window", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "This vault is not a git repository yet. Clone one or create one." },
+    }));
+    await (h.plugin as Any).cmdPull();
+    expect(__modalTitles).toContain("Set up the repository");
+    expect(__modalTitles).not.toContain("Native Git: pull failed");
+  });
+
+  it("a pull against a .git the runner cannot use keeps the honest error window", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.adapter.dirs.add(".git");
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "Repository unusable (dubious ownership)." },
+    }));
+    await (h.plugin as Any).cmdPull();
+    expect(__modalTitles).toContain("Native Git: pull failed");
+    expect(__modalTitles).not.toContain("Set up the repository");
+  });
+
   it("gives a clone the network's budget, not the ordinary one", async () => {
     const h = await loadPlugin();
     await enableBridge(h);
@@ -759,9 +846,11 @@ describe("repository bootstrap", () => {
       sent = req;
       return { ok: true, exitCode: 0, data: { cloned: "true", branch: "main" } };
     });
-    await (h.plugin as Any).runClone("https://example.com/v.git");
+    // ssh: keys never prompt, so this stays on the companion route (a fresh
+    // https clone goes to the Termux terminal since v15 — tested below).
+    await (h.plugin as Any).runClone("git@example.com:v.git");
     expect(sent.action).toBe("clone-into-vault");
-    expect(sent.timeoutSeconds).toBe(900);
+    expect(sent.timeoutSeconds).toBe(3600);
     // A normal action keeps the ordinary budget.
     await h.plugin.cmdStatus(true);
     expect(sent.timeoutSeconds).toBe(h.plugin.deviceSettings.opTimeoutSeconds);
@@ -772,7 +861,12 @@ describe("repository bootstrap", () => {
     await enableBridge(h);
     h.useFastClient();
     // The prompt is a modal; go through the same validation the prompt uses.
-    const bad = ["https://user:pw@example.com/v.git", "-oProxyCommand=id", "ext::sh -c id"];
+    const bad = [
+      "https://user:pw@example.com/v.git",
+      "https://ghp_token123@example.com/v.git", // token as username, no colon
+      "-oProxyCommand=id",
+      "ext::sh -c id",
+    ];
     for (const url of bad) {
       expect(validateRemoteUrl(url).ok, url).toBe(false);
     }
@@ -792,12 +886,76 @@ describe("repository bootstrap", () => {
         data: { cloned: "true", branch: "main", collisions: "Notes/a.md\n.obsidian/app.json\n" },
       };
     });
-    await (h.plugin as Any).runClone("https://example.com/v.git");
+    await (h.plugin as Any).runClone("git@example.com:v.git");
     // One request, no onCollision argument, no second attempt: the vault's own
     // versions are kept and become ordinary local changes to review.
     expect(sent).toHaveLength(1);
-    expect(sent[0].args).toEqual({ url: "https://example.com/v.git" });
+    expect(sent[0].args).toEqual({ url: "git@example.com:v.git" });
     expect(__openedModals).toContain("ResultModal");
+  });
+
+  it("hands a fresh https clone to Termux as a PLAIN git command, and finishes on Continue", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    // The command addresses the vault by its Termux path and the credential
+    // file by the profile id, so both must be known.
+    await h.plugin.updateDeviceSettings({
+      repoPathHint: "/storage/emulated/0/Vault",
+      profileId: "p-0123456789abcdef",
+    });
+    await (h.plugin as Any).runClone("https://example.com/v.git", false, "blob:none");
+    // Nothing queued and no trigger fired: nothing can expire or be claimed
+    // while the user is still typing a token in Termux.
+    expect(requestFiles(h.adapter)).toHaveLength(0);
+    expect(h.runner.uris).toHaveLength(0);
+    expect(__modalTitles).toContain("Clone in Termux, then continue here");
+    const copied = h.runner.copied.join("\n");
+    expect(copied).toContain("git clone --no-checkout --progress --filter=blob:none");
+    expect(copied).toContain('-- "https://example.com/v.git"');
+    expect(copied).toContain("creds/p-0123456789abcdef");
+    expect(copied).toContain("/storage/emulated/0/Vault/.obsidian/plugins/native-git-bridge/runtime/clone-tmp/repo");
+    // Continue: an ordinary companion round trip that finishes locally.
+    answerWith(h, () => ({ ok: true, exitCode: 0, data: { cloned: "true", branch: "main" } }));
+    await (h.plugin as Any).finishManualClone({ url: "https://example.com/v.git", filter: "blob:none" });
+    expect(h.runner.uris).toHaveLength(1);
+    expect(__modalTitles).toContain("Repository cloned");
+  });
+
+  it("offers the Termux route when a companion-route clone turns out to need credentials", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      runnerVersion: 15,
+      error: {
+        code: "GIT_FAILED",
+        message: "git clone failed. Nothing was written into the vault.",
+        stderr:
+          "fatal: could not read Password for 'https://example.com': terminal prompts disabled",
+      },
+    }));
+    // A re-clone with nothing known about credentials tries the companion
+    // first (unknown is not "no"), and the failure names the way out.
+    await (h.plugin as Any).runClone("https://example.com/v.git", true);
+    expect(h.runner.uris).toHaveLength(1);
+    expect(__modalTitles).toContain("The clone needs credentials");
+    expect(__modalTitles).not.toContain("Native Git: clone failed");
+  });
+
+  it("refuses to build the clone command without the vault's Termux path", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    // No repoPathHint: the command addresses the vault by absolute path, so
+    // there is nothing honest to build — a Notice says what to set, nothing
+    // is queued and nothing is copied.
+    await (h.plugin as Any).runClone("https://example.com/v.git");
+    expect(requestFiles(h.adapter)).toHaveLength(0);
+    expect(h.runner.copied).toHaveLength(0);
+    expect(__notices.join(" ")).toContain("repository path");
   });
 
   it("reports an init that created the repository but could not commit", async () => {
@@ -1643,6 +1801,68 @@ describe("repository footprint (runner v14)", () => {
     expect(h.plugin.footprintAvailable()).toBe(true);
   });
 
+  it("asks protect-or-release when protected paths vanish from the sparse list", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await h.plugin.updateDeviceSettings({
+      derivedProtectedPaths: ["Private/Hidden", "Projects/Archive"],
+    });
+    // A re-cloned repository: sparse simply disabled, list empty.
+    answeringStatus(h, 15, { sparseEnabled: "false", sparseList: "", skipWorktreeCount: "0" });
+    await h.plugin.cmdStatus(true);
+    expect(__modalTitles).toContain("Protected paths are no longer hidden");
+    // The protection STAYS until the user decides.
+    expect(h.plugin.deviceSettings.derivedProtectedPaths).toEqual(["Private/Hidden", "Projects/Archive"]);
+    // …and the same set is not asked about twice in one session.
+    __modalTitles.length = 0;
+    await h.plugin.cmdStatus(true);
+    expect(__modalTitles).not.toContain("Protected paths are no longer hidden");
+  });
+
+  it("keeps quiet while the sparse list still carries every protected path", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    // The fixture's sparse list is /* + !Private/Hidden/ — derive from it once…
+    answeringStatus(h, 15, {});
+    await h.plugin.cmdStatus(true);
+    const derived = h.plugin.deviceSettings.derivedProtectedPaths;
+    expect(derived.length).toBeGreaterThan(0);
+    // …and an identical second status changes nothing and asks nothing.
+    await h.plugin.cmdStatus(true);
+    expect(__modalTitles).not.toContain("Protected paths are no longer hidden");
+    expect(h.plugin.deviceSettings.derivedProtectedPaths).toEqual(derived);
+  });
+
+  it("a footprint toggle pressed before any status fetches one itself, then asks", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    // partialFilter present keeps the one-time sparse offer out of the count.
+    answeringStatus(h, 14, { partialFilter: "blob:none" });
+    expect(h.plugin.footprintState()).toBeNull(); // nothing heard yet — the old code disabled the toggle here
+    // Not awaited: the confirmation window the flow ends in only resolves when
+    // a human answers it, and the mock's modals never do.
+    void h.plugin.cmdShallowEnable();
+    for (let i = 0; i < 200 && confirmModals() === 0; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    // One status round trip, then the ordinary confirmation.
+    expect(h.plugin.footprintState()).toEqual({ shallow: false, partial: true });
+    expect(confirmModals()).toBe(1);
+  });
+
+  it("a toggle asking for the state the repository is already in just says so", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answeringStatus(h, 14, { shallow: "true", partialFilter: "blob:none" });
+    await h.plugin.cmdShallowEnable();
+    expect(confirmModals()).toBe(0);
+    expect(__notices.join(" ")).toContain("already shallow");
+  });
+
   it("offers partial clone ONCE when sparse is on and the runner can serve it", async () => {
     // okStatusResult's fixture repository has sparse enabled and no filter,
     // which is exactly the state the offer exists for.
@@ -1692,6 +1912,7 @@ describe("runner version advice", () => {
     expect(await adviceFor(12)).toEqual([]);
     expect(await adviceFor(13)).toEqual([]);
     expect(await adviceFor(14)).toEqual([]);
+    expect(await adviceFor(15)).toEqual([]);
   });
 
   it("flags a runner below the floor as outdated, with the reinstall route", async () => {
@@ -1701,7 +1922,7 @@ describe("runner version advice", () => {
   });
 
   it("flags a runner above the shipped version as the plugin being behind", async () => {
-    const advice = await adviceFor(15);
+    const advice = await adviceFor(16);
     expect(advice).toHaveLength(1);
     expect(advice[0]!.text).toContain("NEWER than this plugin knows");
   });

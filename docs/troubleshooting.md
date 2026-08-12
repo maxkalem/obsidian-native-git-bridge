@@ -39,15 +39,37 @@ The runner knows a profile for this vault, but the directory it points at no lon
 - **The repository was created, but the first commit failed** — usually `user.name` / `user.email` are not configured in Termux. The message carries the two commands; run them, then commit from the panel. The repository itself is there and needs no repair.
 - **"refusing to merge unrelated histories"** — the vault was made a repository here *and* committed, and the remote it was later pointed at has its own history. They share no commit, so git will not join them. The clean way out is a new empty vault with the repository cloned into it; the deliberate ways (`git pull --allow-unrelated-histories`, or resetting onto the remote branch) are yours to run in Termux. To avoid it entirely: create the repository without the first commit, set the remote, then *Get the repository's content*.
 - **"A previous repository is still taking up space"** — a re-clone set the old repository aside instead of deleting it, and it is still there. Delete it from that window (or Settings → *Previous repository copies* → Review) once you are sure nothing in it is needed; "stop reminding" keeps it silently. To look inside first, attach it to the current repository as a remote — the window shows the two commands. Your notes are not involved either way: only history lives in that copy.
-- **A clone that seems to hang** — the plugin gives a clone 15 minutes, not the ordinary 90 seconds. Cancelling does not stop the clone inside Termux, but because the repository is only moved into place on success, the vault is either untouched or complete; run *Status* afterwards to see which.
+- **A clone that seems to hang** — the plugin gives a clone an hour, not the ordinary 90 seconds. Cancelling does not stop the clone inside Termux, but because the repository is only moved into place on success, the vault is either untouched or complete; run *Status* afterwards to see which.
 
 ## AUTH after pairing a second vault
 
 Each vault has its own token. A request file copied from one vault into another's runtime folder is rejected (`AUTH`), and a request naming another vault's profile is rejected (`BAD_REQUEST`). If a vault genuinely lost its token, re-pair it (*Pair this vault*) or re-run the installer for it.
 
+## A clone asks for credentials
+
+A private https remote needs a username and a token, credentials live only in Termux, and the runner never answers a prompt — so the download happens in a terminal, as a plain `git clone`. The plugin copies a ready command to the clipboard and opens Termux: paste it (long-press → Paste), press Enter, and answer git's questions. It is ordinary git, so the progress meter and the prompts are the ones you know; the password prompt shows nothing while you type, which is normal. What you enter is saved for this repository, so fetch, pull and push work without asking afterwards.
+
+When the download finishes, come back to Obsidian and press **Continue** in the same window: the downloaded repository is moved into the vault without a second download, and your existing notes are treated exactly as in an ordinary clone — nothing is overwritten. Pressing Continue too early is safe: the plugin says the download has not finished and you simply try again. If the download was interrupted, run the copied command again — it starts clean.
+
+This needs runner v15; on an older runner the plugin says so and offers the runner update command instead. SSH remotes never take this route (a key does not prompt), and a re-clone of a repository whose credentials are already set up runs through the companion as always.
+
+## "Another git process seems to be running" (a stale index.lock)
+
+`.git/index.lock` guards the repository while one git process writes. A process the system kills mid-write leaves it behind, and every later operation then fails with `Unable to create '….git/index.lock': File exists`. No git process is actually running — the lock is a leftover.
+
+Every failure window carrying that message offers **Delete the stale lock…**. To make the removal safe, it first stops every Termux process (including a terminal session, if you have one open — the runner arrives in a fresh Termux started by the trigger) and only then deletes the file, so nothing can be holding the lock when it goes. Do not use it while a download you started in Termux is still visibly working; let that finish first.
+
+## A long clone or fetch dies with `Killed`
+
+`Killed` in the terminal (or a result saying the command was killed by the system) is not git failing — it is Android. Two mechanisms produce it: the out-of-memory killer, and the "phantom process" limit Android 12+ applies to background apps' child processes, both delivered as SIGKILL with no further explanation. ChromeOS runs Android apps in a VM where memory is tighter still.
+
+What helps, in order of effort: keep Termux visible in the foreground for the whole transfer (a backgrounded app's processes are the first to go); choose the lightweight clone (`blob:none`), which transfers a fraction of the data; and, as the permanent fix for the phantom-process half, disable the limit once via adb — `adb shell settings put global settings_enable_monitor_phantom_procs false` — as described in Termux's own documentation.
+
+A killed clone changes nothing in the vault (the repository is only moved into place on success); run it again.
+
 ## GIT_FAILED on fetch/push: authentication
 
-The runner never answers a prompt (`GIT_TERMINAL_PROMPT=0`), so a credential problem fails fast instead of hanging. Check it in Termux, where the credentials live:
+The runner never answers a prompt on an ordinary run (`GIT_TERMINAL_PROMPT=0`), so a credential problem fails fast instead of hanging. Check it in Termux, where the credentials live:
 
 ```
 GIT_TERMINAL_PROMPT=0 git -C /path/to/vault ls-remote --heads origin
@@ -189,7 +211,7 @@ An unfinished rebase gets the same banner with *Continue rebase* and *Abort reba
 
 The result carries git's stdout/stderr (Copy button in the modal). Common cases and their meaning:
 
-- `Authentication failed` / `could not read Username`: expired or missing PAT. Fix credentials in Termux (e.g. `git pull` once interactively to re-enter the PAT into the credential store). The runner never prompts; it fails fast.
+- `Authentication failed` / `could not read Username`: expired or missing PAT. Fix credentials in Termux (e.g. `git pull` once interactively to re-enter the PAT into the credential store, or `bash ~/.config/native-git-bridge/runner.sh interactive` to let a queued operation ask for them — see "A clone asks for credentials" above). The runner never prompts on its own; it fails fast.
 - `[rejected] ... fetch first` / `non-fast-forward`: the remote moved ahead. Run *Sync* (fetch + merge + push) instead of a bare push. Force push does not exist in this bridge.
 - `Detached HEAD; refusing to push`: check out a branch in Termux. The bridge never guesses which branch you meant.
 - `user.name / user.email are not configured`: run the two `git config --global` commands shown in the message, in Termux.

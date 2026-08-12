@@ -9,7 +9,7 @@ export const RUNNER_MIN_VERSION = 12;
  * the floor branded every up-to-date runner "newer than expected" — the
  * released 0.6.3 showed that warning to every correctly installed device.
  */
-export const RUNNER_SHIPPED_VERSION = 14;
+export const RUNNER_SHIPPED_VERSION = 15;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).
@@ -47,7 +47,11 @@ export const DEFAULT_TIMEOUT_SECONDS = 90;
  * at an error while Termux is still working.
  */
 export const ACTION_TIMEOUT_SECONDS: Readonly<Record<string, number>> = {
-  "clone-into-vault": 900,
+  // 3600, raised from 900 at the user's instruction: a full clone of a real
+  // vault outlives fifteen minutes on a phone connection, and the interactive
+  // credential route adds the time a person takes to paste the command and
+  // answer git's prompts. The runner's own NGB_CLONE_TIMEOUT matches.
+  "clone-into-vault": 3600,
   "adopt-remote": 900,
   // The repair steps. Each ends with `git fsck --connectivity-only`, which is
   // minutes on a vault of real size, so none of them fits the ordinary 90 s.

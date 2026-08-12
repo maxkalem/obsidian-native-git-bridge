@@ -36,6 +36,45 @@ export function looksLikeObjectCorruption(stderr?: string, stdout?: string): boo
 }
 
 /**
+ * Does this output say git needed credentials it had no way to ask for?
+ *
+ * The runner never permits a prompt (`GIT_TERMINAL_PROMPT=0`), so a remote
+ * that wants authentication fails with one of these instead of hanging. The
+ * answer to every one of them is the same: run the runner interactively in a
+ * Termux terminal (v15), where git can ask and the answer is saved. Patterns
+ * that an interactive prompt would NOT fix — a missing SSH key, a revoked
+ * account — are deliberately not matched: offering the terminal there would
+ * send the user somewhere the fix is not.
+ */
+export function needsTermuxCredentials(stderr?: string, stdout?: string): boolean {
+  const s = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return (
+    /terminal prompts disabled/i.test(s) ||
+    /could not read (Username|Password)/i.test(s) ||
+    /Authentication failed for/i.test(s) ||
+    /Host key verification failed/i.test(s)
+  );
+}
+
+/**
+ * Does this output say a leftover lock file is blocking git?
+ *
+ * The shape from a real device: `fatal: Unable to create '….git/index.lock':
+ * File exists.` plus git's own "Another git process seems to be running in
+ * this repository". A process the system killed mid-write leaves the lock
+ * behind, and every later operation fails on it until the file is removed —
+ * which the plugin offers (`repair-stale-lock`, runner v15) instead of
+ * leaving the user to find the file by hand.
+ */
+export function looksLikeStaleLock(stderr?: string, stdout?: string): boolean {
+  const s = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return (
+    /Unable to create '.*\.lock': File exists/i.test(s) ||
+    /Another git process seems to be running/i.test(s)
+  );
+}
+
+/**
  * Lines git writes to describe how far along it is. They are noise in a report
  * and they are the bulk of it: every one of these is emitted once per percent.
  */

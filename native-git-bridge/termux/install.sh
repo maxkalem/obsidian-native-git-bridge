@@ -409,6 +409,22 @@ fi
 # the plugin, a result file or any log.
 CREDS_DIR="$CONF_DIR/creds"
 PROFILE_CREDS="$CREDS_DIR/$PROFILE_ID"
+
+# git's credential-store format is `https://username:password@host`. A line
+# whose userinfo has NO colon serves a username and no password, so every
+# non-interactive fetch dies asking for the password the file was supposed to
+# hold. That is exactly what a token-as-username remote URL produces when its
+# userinfo is copied verbatim (a real device lost its working auth to this:
+# `https://TOKEN@github.com/...` worked as a URL, because basic auth sends
+# "TOKEN:" with an empty password — the file line needs that colon spelled
+# out). Adding `:` preserves exactly the authentication the URL performed.
+# Runs on every install, so re-running the installer heals an affected file.
+normalize_cred_file() {
+  [ -f "$PROFILE_CREDS" ] || return 0
+  sed -i 's#^\(https://[^:@/]*\)@#\1:@#' "$PROFILE_CREDS" 2>/dev/null || true
+}
+normalize_cred_file
+
 REMOTE_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
 case "$REMOTE_URL" in
   https://*@*)
@@ -416,6 +432,9 @@ case "$REMOTE_URL" in
     say "   This works, but the token then appears in .git/config."
     if confirm "Move the token into this repository's own credential file (chmod 600) and clean the URL?"; then
       CREDS="${REMOTE_URL#https://}"; CREDS="${CREDS%%@*}"
+      # Token-as-username (no colon): the URL authenticated with an empty
+      # password, so the stored line must say so — see normalize_cred_file.
+      case "$CREDS" in *:*) : ;; *) CREDS="$CREDS:" ;; esac
       HOSTPATH="${REMOTE_URL#https://*@}"
       HOSTONLY="${HOSTPATH%%/*}"
       mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"

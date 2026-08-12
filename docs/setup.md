@@ -113,6 +113,8 @@ Because a deleted vault leaves its profile behind, profiles can outnumber the re
 
 A URL that carries a password is refused with a message rather than accepted: credentials belong in Termux (credential helper, SSH key, or `gh auth login`), never in a request file inside the vault. Accepted forms are `https://…`, `ssh://…`, `git@host:owner/repo.git` and `file:///absolute/path` for a local copy.
 
+A clone of a private https remote asks for those credentials once, in Termux: the plugin copies a plain `git clone` command to the clipboard and opens Termux, you paste it and answer git's username/token prompts at the terminal — with git's own progress meter — and then press Continue back in Obsidian, which moves the downloaded repository into the vault without a second download. What you enter is saved for this repository, so everything after the clone runs without asking. SSH remotes skip this — a key never prompts — and a re-clone of a repository whose credentials are already configured runs entirely through the companion, as before.
+
 ## Step 4: the plugin
 
 1. Copy the `native-git-bridge` folder to `<YourVault>/.obsidian/plugins/native-git-bridge/` (it must contain `main.js`, `manifest.json`, `styles.css`).

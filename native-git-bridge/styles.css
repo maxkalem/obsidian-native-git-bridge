@@ -1145,12 +1145,42 @@
 .ngb-modal-action { display: inline-flex; align-items: center; gap: var(--size-2-2); }
 .ngb-modal-action-icon { display: inline-flex; align-items: center; }
 .ngb-modal-action-icon svg { width: var(--icon-s, 16px); height: var(--icon-s, 16px); }
-.ngb-modal-action-top {
-  position: absolute; top: var(--size-4-2); left: var(--size-4-2); z-index: 2;
+/* Centred, with air above: `justify-content` alone did nothing — .ngb-buttons
+   carries no rule, so the wrap was a plain block and the inline-flex button
+   sat at its left edge (device screenshot: Commit glued left under the
+   textarea). */
+.ngb-modal-action-bottom {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--size-4-3);
 }
-/* Keep the title clear of the top-left action on mobile. */
-.ngb-modal-has-top-action .modal-title { padding-left: var(--size-4-16, 4em); }
-.ngb-modal-action-bottom { justify-content: center; }
+/* A modal with a text input on a phone: the on-screen keyboard takes the
+   bottom half of the screen, so the WINDOW is anchored by its BOTTOM edge
+   just above the vertical middle - it occupies the lower part of the top
+   half, growing upward when the content needs room, and the action button at
+   its bottom stays above the keyboard. Anchoring the top instead glued the
+   window to the status bar with dead space under it (device screenshot).
+   Fixed positioning on purpose - it holds whatever layout the app gives
+   modals on that platform. The content scrolls inside if it must; the button
+   never moves. (This replaced a top-left corner button, which put the one
+   button of these modals in a different place than every other modal's.) */
+.is-phone .modal.ngb-modal-keyboard-safe {
+  position: fixed;
+  top: auto;
+  bottom: calc(50vh + var(--size-4-2));
+  left: var(--size-4-3);
+  right: var(--size-4-3);
+  width: auto;
+  margin: 0;
+  max-height: 44vh;
+  display: flex;
+  flex-direction: column;
+}
+.is-phone .modal.ngb-modal-keyboard-safe .modal-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
 
 /* ------------------------------------------------ file history view */
 

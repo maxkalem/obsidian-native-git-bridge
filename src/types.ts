@@ -81,7 +81,13 @@ export type BridgeAction =
   | "repo-shallow"
   | "repo-unshallow"
   | "repo-partial-enable"
-  | "repo-partial-disable";
+  | "repo-partial-disable"
+  /**
+   * Remove a stale `.git/index.lock` (v15). On Termux the runner first kills
+   * every other process of its uid, so nothing CAN be holding the lock; the
+   * companion trigger that delivers the request is the fresh Termux start.
+   */
+  | "repair-stale-lock";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -122,6 +128,7 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["repo-unshallow", 14],
   ["repo-partial-enable", 14],
   ["repo-partial-disable", 14],
+  ["repair-stale-lock", 15],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -161,6 +168,7 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "repo-unshallow",
   "repo-partial-enable",
   "repo-partial-disable",
+  "repair-stale-lock",
 ]);
 
 export interface BridgeRequest {
