@@ -87,7 +87,34 @@ export type BridgeAction =
    * every other process of its uid, so nothing CAN be holding the lock; the
    * companion trigger that delivers the request is the fresh Termux start.
    */
-  | "repair-stale-lock";
+  | "repair-stale-lock"
+  // Re-seed the include-everything base of a non-cone sparse definition and
+  // drop git's own emptying default pattern, "!" + "/*" + "/" (v16) — the exit
+  // for a pattern file that hides everything below the top level, a state the
+  // verified write refuses to create but cannot fix once a repository arrives
+  // in it. (Line comments on purpose: the pattern itself would close a block
+  // comment.)
+  | "repair-sparse-definition"
+  /**
+   * Remove the GLOBAL git identity, value-free (v16). Refused — on both
+   * sides — while the repository has no local identity: with no local one the
+   * global identity is the only thing letting commits happen anywhere.
+   */
+  | "identity-drop-global"
+  /**
+   * Make the profile's credential file authoritative for this repository
+   * (v16): an empty local `credential.helper` resets the inherited list, so a
+   * global helper stops shadowing the profile's own store file.
+   */
+  | "cred-helper-local-reset"
+  /**
+   * Read-only triage for the unified repair (v16): the stale-lock facts (the
+   * lock's existence and age, live processes with their names), the set-aside
+   * previous repositories, and the ordinary status fields, in one round trip.
+   * The kill stays in repair-stale-lock; this only reads, so the plugin can
+   * show what would be killed and ask first.
+   */
+  | "repair-triage";
 
 /**
  * Runner version each late-added action first appeared in. The pre-flight gate
@@ -129,6 +156,10 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["repo-partial-enable", 14],
   ["repo-partial-disable", 14],
   ["repair-stale-lock", 15],
+  ["repair-sparse-definition", 16],
+  ["identity-drop-global", 16],
+  ["cred-helper-local-reset", 16],
+  ["repair-triage", 16],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -169,6 +200,9 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "repo-partial-enable",
   "repo-partial-disable",
   "repair-stale-lock",
+  "repair-sparse-definition",
+  "identity-drop-global",
+  "cred-helper-local-reset",
 ]);
 
 export interface BridgeRequest {

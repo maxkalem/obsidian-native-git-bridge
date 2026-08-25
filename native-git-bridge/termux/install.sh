@@ -425,6 +425,18 @@ normalize_cred_file() {
 }
 normalize_cred_file
 
+# credential.helper is multi-valued and ACCUMULATES across scopes: helpers are
+# asked system, then global, then local, and the FIRST that answers wins, so a
+# global helper silently shadows this repository's own file (a real device
+# could not commit until the global credentials were deleted). An empty value
+# in the local config resets the inherited list, which makes the profile's
+# file authoritative. Idempotent: both lines are rewritten from scratch.
+set_local_cred_helper() {
+  git -C "$REPO_DIR" config --local --unset-all credential.helper 2>/dev/null || true
+  git -C "$REPO_DIR" config --local --add credential.helper ''
+  git -C "$REPO_DIR" config --local --add credential.helper "store --file=$PROFILE_CREDS"
+}
+
 REMOTE_URL="$(git -C "$REPO_DIR" remote get-url origin 2>/dev/null || true)"
 case "$REMOTE_URL" in
   https://*@*)
@@ -440,7 +452,7 @@ case "$REMOTE_URL" in
       mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"
       printf 'https://%s@%s\n' "$CREDS" "$HOSTONLY" >> "$PROFILE_CREDS"
       chmod 600 "$PROFILE_CREDS"
-      git -C "$REPO_DIR" config --local credential.helper "store --file=$PROFILE_CREDS"
+      set_local_cred_helper
       git -C "$REPO_DIR" remote set-url origin "https://$HOSTPATH"
       say "-- Token moved to $PROFILE_CREDS (this repository only); remote URL cleaned."
     else
@@ -455,8 +467,8 @@ case "$REMOTE_URL" in
       if confirm "Give this repository its own credential file ($PROFILE_CREDS)?"; then
         mkdir -p "$CREDS_DIR"; chmod 700 "$CREDS_DIR"
         : >> "$PROFILE_CREDS"; chmod 600 "$PROFILE_CREDS"
-        git -C "$REPO_DIR" config --local credential.helper "store --file=$PROFILE_CREDS"
-        say "-- credential.helper set for this repository only. Run this once in Termux and enter your PAT as the password; it is reused non-interactively after that:"
+        set_local_cred_helper
+        say "-- credential.helper set for this repository only (with the empty first value that stops a global helper answering ahead of it). Run this once in Termux and enter your PAT as the password; it is reused non-interactively after that:"
         sayr "     git -C \"$REPO_DIR\" pull"
       elif [ -n "$GLOBAL_HELPER" ]; then
         say "-- Falling back to the global credential helper '$GLOBAL_HELPER'."

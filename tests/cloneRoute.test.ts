@@ -58,8 +58,14 @@ describe("manualCloneCommand", () => {
   const dir = "/storage/emulated/0/Documents/Kalem/.obsidian/plugins/native-git-bridge/runtime/clone-tmp/repo";
 
   it("builds the full command, quoted, wiping the scratch dir first", () => {
+    // The EMPTY helper before the store one is load-bearing: credential.helper
+    // accumulates across scopes and the first helper that answers wins, so
+    // without the reset a global helper in Termux's gitconfig answers ahead of
+    // the profile's file — and, persisted into the cloned config, keeps
+    // shadowing it on every later operation.
     expect(manualCloneCommand(base)).toBe(
       `rm -rf "${dir}" && git clone --no-checkout --progress ` +
+        `-c credential.helper= ` +
         `-c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/p-0123456789abcdef" ` +
         `-- "https://github.com/u/v.git" "${dir}"`
     );

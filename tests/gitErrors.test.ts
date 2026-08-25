@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  looksLikeDubiousOwnership,
   looksLikeObjectCorruption,
   looksLikeStaleLock,
+  needsGitIdentity,
   needsTermuxCredentials,
   summarizeGitError,
 } from "../src/git/gitErrors";
@@ -147,6 +149,54 @@ describe("needsTermuxCredentials", () => {
 
   it("looks at stdout too", () => {
     expect(needsTermuxCredentials("", "fatal: Authentication failed for 'https://h/r.git/'")).toBe(true);
+  });
+});
+
+describe("needsGitIdentity", () => {
+  it("recognises the runner's own refusal and git's two shapes", () => {
+    for (const s of [
+      // The runner's require_identity, v16 wording and the pre-v16 one.
+      "git user.name / user.email are not configured for this repository. Nothing was committed.",
+      "git user.name / user.email are not configured in Termux.",
+      // git itself, reached without the guard.
+      "*** Please tell me who you are.\n\nRun\n\n  git config --global user.email ...",
+      "fatal: unable to auto-detect email address (got 'u0_a123@localhost.(none)')",
+    ]) {
+      expect(needsGitIdentity(s), s).toBe(true);
+    }
+  });
+
+  it("stays quiet on ordinary failures", () => {
+    for (const s of [
+      "error: Your local changes to the following files would be overwritten by merge:",
+      "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+      "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+      "",
+    ]) {
+      expect(needsGitIdentity(s), s).toBe(false);
+    }
+  });
+});
+
+describe("looksLikeDubiousOwnership", () => {
+  it("recognises git's refusal and the runner's REPO_MISSING reason", () => {
+    for (const s of [
+      "fatal: detected dubious ownership in repository at '/storage/emulated/0/Documents/Kalem'",
+      'Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory "/storage/emulated/0/Documents/Kalem"',
+    ]) {
+      expect(looksLikeDubiousOwnership(s), s).toBe(true);
+    }
+  });
+
+  it("stays quiet on ordinary failures", () => {
+    for (const s of [
+      "error: Your local changes to the following files would be overwritten by merge:",
+      "fatal: not a git repository (or any of the parent directories): .git",
+      "fatal: unable to read tree (2d9ebf5bcd0b5beda5a893c098db9075884b6af7)",
+      "",
+    ]) {
+      expect(looksLikeDubiousOwnership(s), s).toBe(false);
+    }
   });
 });
 

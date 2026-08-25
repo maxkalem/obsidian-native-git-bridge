@@ -9,7 +9,7 @@ export const RUNNER_MIN_VERSION = 12;
  * the floor branded every up-to-date runner "newer than expected" — the
  * released 0.6.3 showed that warning to every correctly installed device.
  */
-export const RUNNER_SHIPPED_VERSION = 15;
+export const RUNNER_SHIPPED_VERSION = 16;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).

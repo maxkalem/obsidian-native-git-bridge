@@ -665,6 +665,7 @@ check 'jq -e ".ok == true" "$RES" >/dev/null' "exclude-add ok"
 check 'grep -qxF "/scratch-local.md" .git/info/exclude' "line written to .git/info/exclude"
 check '! git status --porcelain=v1 | grep -q "scratch-local.md"' "excluded file no longer shows as untracked"
 check 'jq -er ".data.excludeList" "$RES" | grep -qxF "/scratch-local.md"' "exclude list returned to the plugin"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch"' "fresh status rides on the exclude change, no follow-up round trip (v16)"
 req "r-20260804T151004Z-exc002" exclude-list "$TOKEN"
 bash "$RUNNER"
 check 'jq -er ".data.excludeList" "$RUNTIME/results/r-20260804T151004Z-exc002.json" | grep -qxF "/scratch-local.md"' "exclude-list reports the entry"
@@ -704,6 +705,126 @@ check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T15100
 req "r-20260804T151007Z-exc005" exclude-add "$TOKEN" '{"path":".git/config"}'
 bash "$RUNNER"
 check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260804T151007Z-exc005.json" >/dev/null' ".git path rejected in exclude-add"
+
+echo "# config: sparse-exclude-add refuses a path that already holds staged content (v16)"
+# The ordering hazard behind the 0.6.1 stranded-index bug: excluding a path
+# after something under it is staged leaves an index entry with no file on
+# disk, and only unstage-protected can clear it. The refusal stops it arising.
+mkdir -p StagedGuard && echo "staged content" > StagedGuard/s.md
+git add StagedGuard/s.md
+req "r-20260825T100000Z-spg001" sparse-exclude-add "$TOKEN" '{"path":"StagedGuard"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100000Z-spg001.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "staged content under the path refuses the exclusion"
+check 'jq -er ".error.stdout" "$RES" | grep -q "StagedGuard/s.md"' "the refusal names the staged paths"
+check '! git sparse-checkout list | grep -q "StagedGuard"' "no pattern was written by the refusal"
+check '[ -f StagedGuard/s.md ]' "the staged file is untouched"
+git reset -q -- StagedGuard && rm -rf StagedGuard
+
+echo "# config: the verified write rolls back git's emptying default (v16)"
+# The device report behind 0.6.6 item 1: the pattern file holding '/*' plus
+# '!/*/', git's own default, which empties the working tree of everything
+# below the top level. The write guard cannot know how the file got there;
+# it asserts what LEAVES the write and restores the previous state otherwise.
+printf '/*\n!/*/\n' > .git/info/sparse-checkout
+req "r-20260825T100001Z-spg002" sparse-exclude-add "$TOKEN" '{"path":"RollbackProbe"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100001Z-spg002.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "a write that keeps !/*/ is refused"
+check 'jq -er ".error.stdout" "$RES" | grep -qF "!/*/"' "the refusal quotes what git wrote"
+check '! git sparse-checkout list | grep -q "RollbackProbe"' "the new pattern did not survive the rollback"
+check 'grep -qxF "!/*/" .git/info/sparse-checkout' "the previous definition is back"
+
+echo "# config: repair-sparse-definition re-seeds the base and drops !/*/ (v16)"
+req "r-20260825T100002Z-spg003" repair-sparse-definition "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100002Z-spg003.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-sparse-definition ok"
+check 'jq -e ".data.sparseRepaired == \"true\"" "$RES" >/dev/null' "the repair reports what it did"
+check 'git sparse-checkout list | grep -qxF "/*"' "the include-everything base is back"
+check '! git sparse-checkout list | grep -qxF "!/*/"' "the emptying default is gone"
+check '[ -f Private/Hidden/mem.md ]' "the repair materialized what the default had hidden"
+# The repair cannot know which exclusions the user meant (the broken write lost
+# them); the plugin re-adds them through the reconcile flow. Restore the
+# fixture's canonical set here so later phases see what they expect.
+git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2>/dev/null
+check '[ ! -e Private/Hidden/mem.md ]' "fixture exclusions restored"
+
+echo "# config: cone mode is refused before anything is written (v16)"
+git config core.sparseCheckoutCone true
+req "r-20260825T100003Z-spg004" sparse-exclude-add "$TOKEN" '{"path":"ConeProbe"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100003Z-spg004.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "cone-mode add refused"
+check 'jq -er ".error.message" "$RES" | grep -qi "cone" ' "the refusal names cone mode"
+req "r-20260825T100004Z-spg005" repair-sparse-definition "$TOKEN"
+bash "$RUNNER"
+check 'jq -e ".ok == false" "$RUNTIME/results/r-20260825T100004Z-spg005.json" >/dev/null' "the repair refuses cone mode rather than converting it"
+git config --unset core.sparseCheckoutCone
+check '! git sparse-checkout list | grep -q "ConeProbe"' "nothing was written for the cone refusal"
+
+echo "# config: status reports identity and helper SCOPES, never values (v16)"
+# The fixture has a local identity (test@example.com) and a global one
+# (e2e@example.com), so both scopes must appear — and neither value may.
+req "r-20260825T100100Z-idn001" status "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100100Z-idn001.json"
+check 'jq -er ".data.userNameScopes" "$RES" | grep -qx "local"' "user.name local scope reported"
+check 'jq -er ".data.userNameScopes" "$RES" | grep -qx "global"' "user.name global scope reported"
+check 'jq -er ".data.userEmailScopes" "$RES" | grep -qx "local"' "user.email local scope reported"
+check '! grep -q "test@example.com" "$RES"' "the local identity VALUE never travels"
+check '! grep -q "e2e@example.com" "$RES"' "the global identity VALUE never travels"
+
+echo "# config: identity-drop-global refuses while the repository has no local identity (v16)"
+git config --unset user.name
+git config --unset user.email
+req "r-20260825T100101Z-idn002" identity-drop-global "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100101Z-idn002.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "no local identity -> the removal is refused"
+check 'jq -er ".error.message" "$RES" | grep -qi "local identity"' "the refusal explains the ordering rule"
+check '[ "$(git config --global --get user.name)" = "E2E" ]' "the global identity survived the refusal"
+
+echo "# config: a commit with no identity anywhere is refused up front, value-free (v16)"
+git config --global --unset user.name
+git config --global --unset user.email
+HEAD_BEFORE_IDN="$(git rev-parse HEAD)"
+req "r-20260825T100102Z-idn003" commit "$TOKEN" '{"message":"identity probe","protectedPaths":[]}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100102Z-idn003.json"
+check 'jq -e ".ok == false" "$RES" >/dev/null' "commit refused with no identity"
+check 'jq -er ".error.message" "$RES" | grep -q "user.name / user.email are not configured"' "the refusal names the missing keys"
+check '[ "$(git rev-parse HEAD)" = "$HEAD_BEFORE_IDN" ]' "nothing was committed"
+git config --global user.email e2e@example.com
+git config --global user.name "E2E"
+git config user.email test@example.com
+git config user.name Test
+
+echo "# config: identity-drop-global removes the global identity once a local one exists (v16)"
+req "r-20260825T100103Z-idn004" identity-drop-global "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100103Z-idn004.json"
+check 'jq -e ".ok == true and .data.identityDroppedGlobal == \"true\"" "$RES" >/dev/null' "identity-drop-global ok"
+check '! git config --global --get user.name >/dev/null 2>&1' "global user.name removed"
+check '! git config --global --get user.email >/dev/null 2>&1' "global user.email removed"
+check '[ "$(git config --get user.name)" = "Test" ]' "the local identity is untouched"
+# Later phases assume the global identity from the suite's own setup.
+git config --global user.email e2e@example.com
+git config --global user.name "E2E"
+
+echo "# config: cred-helper-local-reset makes the profile's file authoritative (v16)"
+git config --global credential.helper "store --file=$HOME/global-creds"
+req "r-20260825T100104Z-idn005" cred-helper-local-reset "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260825T100104Z-idn005.json"
+check 'jq -e ".ok == true and .data.credHelperReset == \"true\"" "$RES" >/dev/null' "cred-helper-local-reset ok"
+check '[ "$(git config --local --get-all credential.helper | wc -l)" = "2" ]' "exactly two local helper lines"
+check '[ -z "$(git config --local --get-all credential.helper | head -1)" ]' "the first is the EMPTY value that resets the inherited list"
+check 'git config --local --get-all credential.helper | tail -1 | grep -q "store --file=.*creds/"' "the second is the profile store helper"
+check 'jq -er ".data.credHelperScopes" "$RES" | grep -qx "local"' "the fresh status reports the local scope"
+check '! grep -q "global-creds" "$RES"' "no helper VALUE travels in the result"
+git config --global --unset credential.helper
+git config --local --unset-all credential.helper
 
 echo "# phase 5: detached HEAD - status works, push refuses (no force, no guessing)"
 MAIN_BRANCH="$(git symbolic-ref --short HEAD)"
@@ -1249,6 +1370,30 @@ brun >/dev/null
 RES="$CQ_RT/results/r-20260806T106705Z-lck02.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "with no lock present it still answers ok"
 check '[ "$(jq -r .data.lockRemoved "$RES")" = "false" ]' "…and says honestly that nothing was removed"
+
+echo "# phase 7: repair-triage reads the lock facts without touching anything (v16)"
+# The v16 split: the triage READS (lock, age, live processes), the kill stays
+# in repair-stale-lock behind the plugin's confirmation. Off Termux the
+# process listing shows this sandbox's own processes, which is fine — the
+# assertion is that the fields exist and the lock is untouched.
+touch "$BOOT/CloneQ/.git/index.lock"
+breq "$CQ_RT" "r-20260825T106706Z-trg01" "$CQ_TOKEN" repair-triage "$CQ_PID"
+brun >/dev/null
+RES="$CQ_RT/results/r-20260825T106706Z-trg01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-triage ok"
+check '[ "$(jq -r .data.lockExists "$RES")" = "true" ]' "…it reports the lock"
+check 'jq -er ".data.lockAgeSeconds" "$RES" | grep -qE "^[0-9]+$"' "…with a numeric age"
+check '[ -e "$BOOT/CloneQ/.git/index.lock" ]' "…and did NOT remove it: triage only reads"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch"' "…and the status fields ride along"
+
+echo "# phase 7: repair-stale-lock with skipKill removes the corpse and stops nothing (v16)"
+breq "$CQ_RT" "r-20260825T106707Z-trg02" "$CQ_TOKEN" repair-stale-lock "$CQ_PID" '{"skipKill":true}'
+brun >/dev/null
+RES="$CQ_RT/results/r-20260825T106707Z-trg02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "skipKill removal ok"
+check '[ "$(jq -r .data.lockRemoved "$RES")" = "true" ]' "…the corpse is gone"
+check '[ "$(jq -r .data.killedProcesses "$RES")" = "" ]' "…and nothing was stopped"
+check '[ ! -e "$BOOT/CloneQ/.git/index.lock" ]' "…the lock file really is removed"
 
 echo "# phase 7: status reports whether TERMUX-SIDE credentials exist (v15)"
 # The vault repository's LOCAL helper deliberately does not count: it lives in

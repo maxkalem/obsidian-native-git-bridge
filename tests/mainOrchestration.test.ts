@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   __findByClass,
+  __modalActionLabels,
   __modalTitles,
   __notices,
   __openedModals,
@@ -138,6 +139,11 @@ function makeApp(adapter: MemAdapter): Any {
       adapter,
       getName: () => "TestVault",
       getAbstractFileByPath: () => null,
+      // guardPathLimits walks the vault's own file index before a commit; an
+      // empty vault means no long paths, so the guard passes and cmdSync runs.
+      // Missing until the first cmdSync orchestration test called it (§10: a
+      // stub hides a missing member until something calls it).
+      getFiles: () => [] as Any[],
     },
     workspace: {
       onLayoutReady: (cb: () => void) => {
@@ -835,6 +841,305 @@ describe("repository bootstrap", () => {
     await (h.plugin as Any).cmdPull();
     expect(__modalTitles).toContain("Native Git: pull failed");
     expect(__modalTitles).not.toContain("Set up the repository");
+  });
+
+  // ---- the 0.6.6 buttons: the two Termux fixes stop being sentences --------
+
+  it("a sync refused for a missing identity carries the set-identity button", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: {
+        code: "GIT_FAILED",
+        message:
+          "git user.name / user.email are not configured for this repository. Nothing was committed.",
+      },
+    }));
+    await (h.plugin as Any).cmdSync();
+    expect(__modalTitles).toContain("Native Git: sync failed");
+    expect(__modalActionLabels).toContain("Set the git identity…");
+  });
+
+  it("a status failed over dubious ownership carries the safe.directory button", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.adapter.dirs.add(".git"); // the repository exists; git refuses it
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: {
+        code: "REPO_MISSING",
+        message:
+          'Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory "/storage/emulated/0/Documents/Kalem"',
+      },
+    }));
+    await h.plugin.cmdStatus(true, true);
+    expect(__modalTitles).toContain("Native Git: status failed");
+    expect(__modalActionLabels).toContain("Copy the safe.directory fix…");
+  });
+
+  it("the identity check reports scopes and never offers the global removal without a local identity", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 16,
+      data: {
+        branchInfo: "# branch.head main",
+        userNameScopes: "global",
+        userEmailScopes: "global",
+        credHelperScopes: "global\nlocal",
+      },
+    }));
+    await (h.plugin as Any).cmdCheckIdentity();
+    expect(__modalTitles).toContain("Git identity check");
+    // The ordering rule is absolute: no local identity, no removal offer —
+    // the global one is the only thing letting commits happen.
+    expect(__modalActionLabels).toContain("Set the git identity…");
+    expect(__modalActionLabels).not.toContain("Remove the global identity…");
+    // A global helper shadows the profile's file; the reset is offered.
+    expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
+  });
+
+  it("the identity check offers the global removal once a local identity exists", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 16,
+      data: {
+        branchInfo: "# branch.head main",
+        userNameScopes: "global\nlocal",
+        userEmailScopes: "global\nlocal",
+        credHelperScopes: "local",
+      },
+    }));
+    await (h.plugin as Any).cmdCheckIdentity();
+    expect(__modalActionLabels).toContain("Remove the global identity…");
+    expect(__modalActionLabels).not.toContain("Set the git identity…");
+    expect(__modalActionLabels).not.toContain("Prefer this repository's credentials…");
+  });
+
+  it("the stale-lock triage removes a corpse without stopping anything", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "true",
+            lockAgeSeconds: "9999",
+            liveGit: "false",
+            liveProcesses: "",
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          lockExisted: "true",
+          lockRemoved: "true",
+          killedProcesses: "",
+        },
+      };
+    });
+    await (h.plugin as Any).runStaleLockTriage();
+    // A corpse needs no kill and therefore no kill confirmation: the triage
+    // proved nothing could be holding the lock, and the removal says so.
+    expect(sent).toEqual(["repair-triage", "repair-stale-lock"]);
+    expect(__openedModals).not.toContain("ConfirmModal");
+    expect(__notices.some((n) => n.includes("nothing was stopped"))).toBe(true);
+  });
+
+  it("a fresh lock with a live git advises waiting instead of killing", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          lockExists: "true",
+          lockAgeSeconds: "10",
+          liveGit: "true",
+          liveProcesses: "123 git",
+        },
+      };
+    });
+    await (h.plugin as Any).runStaleLockTriage();
+    // A running command is not a corpse: nothing is removed, nothing is
+    // killed, and the window says waiting is the safe choice — with the kill
+    // still reachable behind its own confirmation.
+    expect(sent).toEqual(["repair-triage"]);
+    expect(__modalTitles).toContain("A git command seems to be running");
+    expect(__modalActionLabels).toContain("Stop Termux & delete anyway…");
+  });
+
+  it("the unified repair walks triage, fixes the sparse definition, and lists the rest with buttons", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 16;
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "global",
+            userEmailScopes: "global",
+            credHelperScopes: "global",
+            sparseEnabled: "true",
+            sparseCone: "false",
+            sparseList: "/*\n!/*/",
+            rescueBranches: "ngb-rescue-20260810T235946Z",
+            previousGitDirs: "",
+          },
+        };
+      }
+      if (req.action === "repair-sparse-definition") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: { branchInfo: "# branch.head main", sparseRepaired: "true", sparseList: "/*" },
+        };
+      }
+      // repair-scan: nothing missing, nothing damaged.
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    // The safe fix ran by itself; the object steps followed; nothing else
+    // became a modal mid-walk (decision 4: seven steps, not seven taps).
+    expect(sent).toEqual(["repair-triage", "repair-sparse-definition", "repair-scan"]);
+    expect(__modalTitles).toContain("Repository repaired");
+    // What remains rides the final window as buttons, ordering rule included:
+    // no local identity, so SET is offered and the global removal is not.
+    expect(__modalActionLabels).toContain("Set the git identity…");
+    expect(__modalActionLabels).not.toContain("Remove the global identity…");
+    expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
+    expect(__modalActionLabels).toContain("Delete repair backup branch…");
+  });
+
+  it("the unified repair stops at ownership: nothing else can run, the fix is the clipboard", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 16;
+    h.adapter.dirs.add(".git"); // the repository exists; git refuses it
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      return {
+        ok: false,
+        exitCode: 1,
+        runnerVersion: 16,
+        error: {
+          code: "REPO_MISSING",
+          message:
+            'Git refuses the repository (dubious ownership). In Termux run: git config --global --add safe.directory "/x"',
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(sent).toEqual(["repair-triage"]);
+    expect(__modalTitles).toContain("Repository blocked: ownership");
+    expect(__modalActionLabels).toContain("Copy the safe.directory fix…");
+  });
+
+  it("the previous-git delete offer is suppressed while unmaterialized deletions stand", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    h.adapter.files.set(
+      `${paths.root}/previous-git-20260807T101500Z.json`,
+      JSON.stringify({
+        dir: "previous-git-20260807T101500Z",
+        createdAt: "2026-08-07T10:15:00Z",
+        sizeKb: 4404224,
+        commits: 36,
+        branch: "main",
+        lastCommit: "abc1234 2026-08-01 fix typo",
+      })
+    );
+    // The phone's own state (2026-08-11 bundle): a filtered re-clone whose
+    // materialize failed lists its unmaterialized files as deletions, and the
+    // set-aside previous-git is the one full local copy. The reminder offered
+    // to delete it in exactly this state, and the user took the offer.
+    (h.plugin as Any).absorbStatusData({
+      branchInfo:
+        "# branch.head main\n1 .D N... 100644 100644 100644 abc1234 abc1234 Notes/a.md",
+      partialFilter: "blob:none",
+    });
+    await (h.plugin as Any).remindAboutPreviousRepos();
+    expect(__modalTitles).not.toContain("A previous repository is still taking up space");
+    // Once nothing is listed as deleted the reminder returns.
+    (h.plugin as Any).absorbStatusData({
+      branchInfo: "# branch.head main",
+      partialFilter: "blob:none",
+    });
+    await (h.plugin as Any).remindAboutPreviousRepos();
+    expect(__modalTitles).toContain("A previous repository is still taking up space");
+  });
+
+  it("the identity check on a runner without the fields says the runner is too old", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 15,
+      data: { branchInfo: "# branch.head main" },
+    }));
+    await (h.plugin as Any).cmdCheckIdentity();
+    expect(__modalTitles).toContain("Termux runner is too old for this");
+    expect(__modalTitles).not.toContain("Git identity check");
   });
 
   it("gives a clone the network's budget, not the ordinary one", async () => {
@@ -1922,7 +2227,7 @@ describe("runner version advice", () => {
   });
 
   it("flags a runner above the shipped version as the plugin being behind", async () => {
-    const advice = await adviceFor(16);
+    const advice = await adviceFor(17);
     expect(advice).toHaveLength(1);
     expect(advice[0]!.text).toContain("NEWER than this plugin knows");
   });

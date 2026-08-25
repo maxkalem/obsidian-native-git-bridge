@@ -69,6 +69,123 @@ export function missingOids(fsckMissing: string, cap = 64): string[] {
   return [...seen];
 }
 
+/** The stale-lock facts, from `repair-triage` (runner v16). */
+export interface LockFacts {
+  lockExists: boolean;
+  /** Seconds since the lock file's mtime; null when the runner could not say. */
+  lockAgeSeconds: number | null;
+  /** A live process whose command name is git. */
+  liveGit: boolean;
+  /** Every other live process of the uid, "pid comm" per line. */
+  liveProcesses: string[];
+}
+
+export type LockPlan =
+  /** No lock file: nothing to do, and nothing to kill over it. */
+  | { kind: "no-lock" }
+  /**
+   * A live git plus a fresh lock is a RUNNING command, not a corpse: the
+   * right choice is to wait, and interrupting a write is how object files
+   * end up empty. The kill stays available behind its own confirmation.
+   */
+  | { kind: "running" }
+  /**
+   * A lock with no process that could be holding it is a corpse from Android
+   * stopping Termux: it is simply removed, no kill needed, nothing closes.
+   */
+  | { kind: "corpse" }
+  /** Something is alive; removing safely needs the kill, and the kill needs a yes. */
+  | { kind: "ask-kill" };
+
+/**
+ * v15 killed blind: every uid process, no questions, and it had never said it
+ * closes Termux sessions. The distinction the user asked for falls out of two
+ * facts the triage now reads — is a git alive, and how old is the lock.
+ */
+export function decideStaleLock(f: LockFacts, freshSeconds = 120): LockPlan {
+  if (!f.lockExists) return { kind: "no-lock" };
+  if (f.liveGit && f.lockAgeSeconds !== null && f.lockAgeSeconds <= freshSeconds) {
+    return { kind: "running" };
+  }
+  if (f.liveProcesses.length === 0) return { kind: "corpse" };
+  return { kind: "ask-kill" };
+}
+
+/** What `repair-triage` (v16) reports, digested for the step planner. */
+export interface RepairTriageFacts {
+  lock: LockFacts;
+  identity: {
+    /** Both user.name and user.email exist in the LOCAL scope. */
+    local: boolean;
+    /** Either key exists in the GLOBAL scope. */
+    global: boolean;
+    /** Both keys resolve in SOME scope: a commit would succeed. */
+    any: boolean;
+  };
+  /** A credential.helper in the global or system scope (shadows the profile's file). */
+  globalCredHelper: boolean;
+  sparse: {
+    enabled: boolean;
+    cone: boolean;
+    /** The include-everything base `/*` is present in the pattern list. */
+    hasBase: boolean;
+    /** git's own emptying default (the `!` + `/*` + `/` line) is present. */
+    hasEmptyingDefault: boolean;
+  };
+  rescueBranches: string[];
+  previousGitDirs: string[];
+}
+
+export type RepairPlanItem =
+  /** A lock nothing can be holding: removed without killing anything. */
+  | { step: "lock"; act: "remove-corpse" }
+  /** A live git with a fresh lock: the whole repair waits, by design. */
+  | { step: "lock"; act: "wait-running" }
+  /** Something is alive; the removal needs the kill and the kill needs a yes. */
+  | { step: "lock"; act: "ask-kill" }
+  /** No usable identity for a commit, or none local: offer the Termux command. */
+  | { step: "identity"; act: "offer-set" }
+  /** A local identity exists AND a global one does: offer the value-free removal. */
+  | { step: "identity"; act: "offer-drop-global" }
+  /** A global helper answers before the profile's file: offer the local reset. */
+  | { step: "cred-helper"; act: "offer-reset" }
+  /** Non-cone sparse missing its base or carrying the emptying default: fixable. */
+  | { step: "sparse"; act: "repair-definition" }
+  /** Cone mode is somebody's setup; switching modes is the user's decision. */
+  | { step: "sparse"; act: "cone-needs-decision" }
+  | { step: "leftovers"; act: "rescue-branches" }
+  | { step: "leftovers"; act: "previous-git" };
+
+/**
+ * The unified repair's step list, in the user's order: blockers first, cheap
+ * before expensive. Ownership is handled BEFORE this (a refused repository
+ * answers the triage itself with REPO_MISSING), and the object-database steps
+ * run AFTER it (they have their own decision table above). Pure, so a unit
+ * test can replay a device's triage verbatim.
+ */
+export function planRepair(f: RepairTriageFacts): RepairPlanItem[] {
+  const plan: RepairPlanItem[] = [];
+  const lock = decideStaleLock(f.lock);
+  if (lock.kind === "corpse") plan.push({ step: "lock", act: "remove-corpse" });
+  else if (lock.kind === "running") plan.push({ step: "lock", act: "wait-running" });
+  else if (lock.kind === "ask-kill") plan.push({ step: "lock", act: "ask-kill" });
+  if (!f.identity.any || !f.identity.local) {
+    plan.push({ step: "identity", act: "offer-set" });
+  } else if (f.identity.global) {
+    plan.push({ step: "identity", act: "offer-drop-global" });
+  }
+  if (f.globalCredHelper) plan.push({ step: "cred-helper", act: "offer-reset" });
+  if (f.sparse.enabled) {
+    if (f.sparse.cone) plan.push({ step: "sparse", act: "cone-needs-decision" });
+    else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
+      plan.push({ step: "sparse", act: "repair-definition" });
+    }
+  }
+  if (f.rescueBranches.length > 0) plan.push({ step: "leftovers", act: "rescue-branches" });
+  if (f.previousGitDirs.length > 0) plan.push({ step: "leftovers", act: "previous-git" });
+  return plan;
+}
+
 /** One decision table for the whole job; `stage` says which step just answered. */
 export function decideRepair(
   stage: RepairStage,

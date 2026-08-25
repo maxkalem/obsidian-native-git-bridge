@@ -36,7 +36,7 @@ var import_obsidian16 = require("obsidian");
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
 var RUNNER_MIN_VERSION = 12;
-var RUNNER_SHIPPED_VERSION = 15;
+var RUNNER_SHIPPED_VERSION = 16;
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -148,7 +148,11 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repo-unshallow", 14],
   ["repo-partial-enable", 14],
   ["repo-partial-disable", 14],
-  ["repair-stale-lock", 15]
+  ["repair-stale-lock", 15],
+  ["repair-sparse-definition", 16],
+  ["identity-drop-global", 16],
+  ["cred-helper-local-reset", 16],
+  ["repair-triage", 16]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -186,7 +190,10 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "repo-unshallow",
   "repo-partial-enable",
   "repo-partial-disable",
-  "repair-stale-lock"
+  "repair-stale-lock",
+  "repair-sparse-definition",
+  "identity-drop-global",
+  "cred-helper-local-reset"
 ]);
 
 // src/settings/DeviceLocalSettingsStore.ts
@@ -3633,6 +3640,16 @@ function looksLikeStaleLock(stderr, stdout) {
 ${stdout ?? ""}`;
   return /Unable to create '.*\.lock': File exists/i.test(s) || /Another git process seems to be running/i.test(s);
 }
+function needsGitIdentity(stderr, stdout) {
+  const s = `${stderr ?? ""}
+${stdout ?? ""}`;
+  return /user\.(name|email)[^\n]*not configured/i.test(s) || /Please tell me who you are/i.test(s) || /unable to auto-detect email address/i.test(s);
+}
+function looksLikeDubiousOwnership(stderr, stdout) {
+  const s = `${stderr ?? ""}
+${stdout ?? ""}`;
+  return /dubious ownership/i.test(s) || /safe\.directory/i.test(s);
+}
 var PROGRESS = new RegExp(
   "^(" + [
     "Updating index flags",
@@ -3665,13 +3682,30 @@ function summarizeGitError(stderr, stdout, limit = 6) {
   return out;
 }
 
+// src/git/termuxCommands.ts
+function termuxRepoPath(repoPathHint) {
+  const repo = repoPathHint.trim().replace(/\/+$/, "");
+  if (repo === "" || !repo.startsWith("/")) return null;
+  return repo;
+}
+function identitySetupCommand(repoPathHint) {
+  const repo = termuxRepoPath(repoPathHint);
+  if (repo === null) return null;
+  return `cd "${repo}" && read -p "user.name: " n && git config --local user.name "$n" && read -p "user.email: " e && git config --local user.email "$e" && git config --local --name-only --get-regexp '^user\\.'`;
+}
+function safeDirectoryCommand(repoPathHint) {
+  const repo = termuxRepoPath(repoPathHint);
+  if (repo === null) return null;
+  return `git config --global --add safe.directory "${repo}"`;
+}
+
 // src/git/cloneRoute.ts
 function manualCloneCommand(opts) {
   const vault = opts.vaultPath.trim().replace(/\/+$/, "");
   if (vault === "" || !vault.startsWith("/") || opts.profileId === "") return null;
   const dir = `${vault}/${opts.configDir}/plugins/native-git-bridge/runtime/clone-tmp/repo`;
   const extras = (opts.filter !== void 0 ? ` --filter=${opts.filter}` : "") + (opts.depth !== void 0 ? ` --depth ${opts.depth}` : "");
-  const helper = `-c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/${opts.profileId}"`;
+  const helper = `-c credential.helper= -c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/${opts.profileId}"`;
   return `rm -rf "${dir}" && git clone --no-checkout --progress${extras} ${helper} -- "${opts.url}" "${dir}"`;
 }
 function cloneRoute(opts) {
@@ -5927,6 +5961,36 @@ function missingOids(fsckMissing, cap = 64) {
   }
   return [...seen];
 }
+function decideStaleLock(f, freshSeconds = 120) {
+  if (!f.lockExists) return { kind: "no-lock" };
+  if (f.liveGit && f.lockAgeSeconds !== null && f.lockAgeSeconds <= freshSeconds) {
+    return { kind: "running" };
+  }
+  if (f.liveProcesses.length === 0) return { kind: "corpse" };
+  return { kind: "ask-kill" };
+}
+function planRepair(f) {
+  const plan = [];
+  const lock = decideStaleLock(f.lock);
+  if (lock.kind === "corpse") plan.push({ step: "lock", act: "remove-corpse" });
+  else if (lock.kind === "running") plan.push({ step: "lock", act: "wait-running" });
+  else if (lock.kind === "ask-kill") plan.push({ step: "lock", act: "ask-kill" });
+  if (!f.identity.any || !f.identity.local) {
+    plan.push({ step: "identity", act: "offer-set" });
+  } else if (f.identity.global) {
+    plan.push({ step: "identity", act: "offer-drop-global" });
+  }
+  if (f.globalCredHelper) plan.push({ step: "cred-helper", act: "offer-reset" });
+  if (f.sparse.enabled) {
+    if (f.sparse.cone) plan.push({ step: "sparse", act: "cone-needs-decision" });
+    else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
+      plan.push({ step: "sparse", act: "repair-definition" });
+    }
+  }
+  if (f.rescueBranches.length > 0) plan.push({ step: "leftovers", act: "rescue-branches" });
+  if (f.previousGitDirs.length > 0) plan.push({ step: "leftovers", act: "previous-git" });
+  return plan;
+}
 function decideRepair(stage, findings, ctx) {
   const oids = missingOids(findings.fsckMissing);
   if (oids.length === 0) {
@@ -7151,6 +7215,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   async remindAboutPreviousRepos() {
     const repos = await this.listPreviousRepos();
     if (repos.length === 0) return;
+    if (this.footprintState()?.partial === true && (this.lastStatus?.status.unstaged.some((e) => e.worktree === "D") ?? false)) {
+      return;
+    }
     const s = this.deviceSettings;
     const due = reposToRemindAbout(repos, {
       lastRemindedAt: s.previousRepoRemindedAt,
@@ -7953,7 +8020,13 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       { id: "clone-repository", name: "Clone an existing remote into this vault", cb: () => void this.cmdCloneRepository() },
       { id: "cancel-operation", name: "Cancel current operation when possible", cb: () => void this.cmdCancel() },
       { id: "maintenance-cleanup", name: "Clean up repository storage (.git/objects)", cb: () => void this.cmdMaintenance() },
-      { id: "drop-rescue-backup", name: "Delete repair backup branch (ngb-rescue)", cb: () => this.cmdRescueCleanup() }
+      { id: "drop-rescue-backup", name: "Delete repair backup branch (ngb-rescue)", cb: () => this.cmdRescueCleanup() },
+      { id: "check-git-identity", name: "Check git identity (scopes only, no values)", cb: () => void this.cmdCheckIdentity() },
+      // The unified repair (0.6.6): one command walks every known problem in
+      // sequence. The routes that start from an error window stay where they
+      // are — a window that caught a specific failure is the shortest path to
+      // its fix — but this is the one place to start from nothing.
+      { id: "repair-repository", name: "Repair the repository (walk every problem)", cb: () => void this.cmdRepairObjects() }
     ];
     for (const c of cmds) this.addCommand({ id: c.id, name: c.name, callback: c.cb });
     this.registerObsidianProtocolHandler("native-git-bridge-ack", (params) => {
@@ -8354,13 +8427,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         await this.cmdSetupRepository();
         return;
       }
-      this.statusBar?.set("error");
-      new ResultModal(
-        this.app,
-        "Native Git: status failed",
-        [result.error?.message ?? "Unknown error."],
-        { stdout: result.error?.stdout, stderr: result.error?.stderr, isError: true }
-      ).open();
+      this.renderStatusFailure(result);
       return;
     }
     this.absorbStatusData(result.data ?? {});
@@ -8678,10 +8745,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   /**
    * Bring the panel in step after an ignore-rule change (.gitignore, sparse,
    * .git/info/exclude). A result that carried fresh status fields is absorbed
-   * for free; one that did not (exclude-add/remove return only the exclude
-   * list, and .gitignore is written by the plugin itself) costs one status
-   * round trip. That cost is deliberate: every route that changes a rule must
-   * leave the panel agreeing with git, or the rule looks like it did nothing.
+   * for free — since runner v16 that includes exclude-add/remove; one that
+   * did not (an older runner's exclude change, and .gitignore, which the
+   * plugin writes itself) costs one status round trip. That cost is
+   * deliberate: every route that changes a rule must leave the panel
+   * agreeing with git, or the rule looks like it did nothing.
    */
   async refreshAfterRuleChange(data) {
     if (data?.branchInfo) {
@@ -8841,12 +8909,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         await this.cmdSetupRepository();
         return null;
       }
-      new ResultModal(
-        this.app,
-        "Native Git: status failed",
-        [result.error?.message ?? "Unknown error."],
-        { stdout: result.error?.stdout, stderr: result.error?.stderr, isError: true }
-      ).open();
+      this.renderStatusFailure(result);
       return null;
     }
     this.absorbStatusData(result.data ?? {});
@@ -9530,6 +9593,36 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     }
     return merged;
   }
+  /**
+   * The status-failed window, shared by every path that asks for one (the
+   * status command and the footprint toggles both used to build their own).
+   * The dubious-ownership offer rides here because a refused repository
+   * announces itself first through a failed status — the most common
+   * first-run failure on shared storage — and this window used to carry
+   * nothing but Copy details.
+   */
+  renderStatusFailure(result) {
+    const err = result.error;
+    const ownership = looksLikeDubiousOwnership(
+      `${err?.message ?? ""}
+${err?.stderr ?? ""}`,
+      err?.stdout
+    );
+    this.statusBar?.set("error");
+    new ResultModal(this.app, "Native Git: status failed", [err?.message ?? "Unknown error."], {
+      stdout: err?.stdout,
+      stderr: err?.stderr,
+      isError: true,
+      actions: ownership ? [
+        {
+          label: "Copy the safe.directory fix\u2026",
+          cta: true,
+          keepOpen: true,
+          onClick: () => this.cmdFixSafeDirectory()
+        }
+      ] : void 0
+    }).open();
+  }
   /** Shared error rendering for mutating operations. Never a bare "failed". */
   renderMutationError(title, result) {
     const err = result.error;
@@ -9562,6 +9655,10 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const reason = summarizeGitError(err?.stderr, err?.stdout);
     const corrupt = looksLikeObjectCorruption(err?.stderr, err?.stdout);
     const staleLock = !corrupt && looksLikeStaleLock(err?.stderr, err?.stdout);
+    const identity = !corrupt && !staleLock && needsGitIdentity(`${err?.message ?? ""}
+${err?.stderr ?? ""}`, err?.stdout);
+    const ownership = !corrupt && !staleLock && !identity && looksLikeDubiousOwnership(`${err?.message ?? ""}
+${err?.stderr ?? ""}`, err?.stdout);
     const lines = [err?.message ?? "Unknown error.", ...reason];
     if (corrupt) {
       lines.push(
@@ -9576,21 +9673,97 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         "A leftover lock file is blocking git: a process the system killed mid-write leaves .git/index.lock behind, and every operation fails on it until the file is removed. The button below stops Termux's processes (so nothing can be holding the lock) and deletes it."
       );
     }
+    if (identity) {
+      lines.push(
+        "",
+        "git has no name and email to sign this repository's commits with \u2014 a re-clone brings a fresh .git, and the local identity dies with the old one. The button copies the command that sets a LOCAL identity at the Termux terminal; what you type there never reaches the plugin."
+      );
+    }
+    if (ownership) {
+      lines.push(
+        "",
+        "git refuses to touch this repository because its files belong to another uid \u2014 the normal state of Android shared storage. The one-line fix tells git to trust exactly this directory; the button copies it and opens Termux."
+      );
+    }
     new ResultModal(this.app, title, lines, {
       stdout: err?.stdout,
       stderr: err?.stderr,
       isError: true,
-      actions: corrupt ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }] : staleLock ? [{ label: "Delete the stale lock\u2026", cta: true, onClick: () => this.cmdRepairStaleLock() }] : void 0
+      actions: corrupt ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }] : staleLock ? [{ label: "Delete the stale lock\u2026", cta: true, onClick: () => this.cmdRepairStaleLock() }] : identity ? [{ label: "Set the git identity\u2026", cta: true, keepOpen: true, onClick: () => this.cmdSetGitIdentity() }] : ownership ? [{ label: "Copy the safe.directory fix\u2026", cta: true, keepOpen: true, onClick: () => this.cmdFixSafeDirectory() }] : void 0
     }).open();
   }
   /**
-   * Remove a stale `.git/index.lock`, the user's own design: stop Termux
-   * first (every process of its uid — the companion trigger that delivers
-   * the request starts a fresh Termux, which is the restart), and only then
-   * delete the lock, so a live git process can never be holding it. Behind a
-   * confirmation because it kills an open Termux session too (§4 rule 7).
+   * Remove a stale `.git/index.lock`. On a v16 runner the reading is split
+   * from the killing: `repair-triage` says whether the lock exists, how old
+   * it is and what is alive, and the plan follows the user's distinction — a
+   * live git plus a fresh lock is a RUNNING command (wait), a lock with no
+   * process behind it is a corpse (simply removed, nothing killed), and
+   * anything else asks before stopping Termux. A v15 runner keeps the old
+   * confirm-then-kill flow, which was the only tool it has.
    */
   cmdRepairStaleLock() {
+    if (this.lastRunnerVersion >= 16) {
+      void this.runStaleLockTriage();
+      return;
+    }
+    this.confirmStaleLockKill([]);
+  }
+  async runStaleLockTriage() {
+    const t = await this.runOperation("repair-triage", {});
+    if (!t) return;
+    if (!t.ok) return this.renderMutationError("Native Git: triage failed", t);
+    this.absorbStatusData(t.data ?? {});
+    const d = t.data ?? {};
+    const procs = (d.liveProcesses ?? "").split("\n").map((s) => s.trim()).filter((s) => s !== "");
+    const plan = decideStaleLock({
+      lockExists: d.lockExists === "true",
+      lockAgeSeconds: d.lockAgeSeconds === void 0 || d.lockAgeSeconds === "" ? null : Number(d.lockAgeSeconds),
+      liveGit: d.liveGit === "true",
+      liveProcesses: procs
+    });
+    if (plan.kind === "no-lock") {
+      new import_obsidian16.Notice("No lock file is there \u2014 it may have been released already.");
+      return;
+    }
+    if (plan.kind === "corpse") {
+      const result = await this.runOperation("repair-stale-lock", { skipKill: true });
+      if (!result) return;
+      if (!result.ok) return this.renderMutationError("Native Git: unlock failed", result);
+      this.absorbStatusData(result.data ?? {});
+      new import_obsidian16.Notice(
+        result.data?.lockRemoved === "true" ? "Stale lock removed \u2014 nothing was holding it, so nothing was stopped. Run the operation again." : "No lock file was there \u2014 it may have been released already. Run the operation again."
+      );
+      return;
+    }
+    if (plan.kind === "running") {
+      new ResultModal(
+        this.app,
+        "A git command seems to be running",
+        [
+          `The lock was written ${d.lockAgeSeconds ?? "?"} seconds ago and a live git process exists \u2014 that reads as a command still working, not a leftover. Waiting is the safe choice: interrupting a write is how object files end up empty.`,
+          `Running now:
+${procs.join("\n")}`
+        ],
+        {
+          isError: true,
+          actions: [
+            {
+              label: "Stop Termux & delete anyway\u2026",
+              onClick: () => this.confirmStaleLockKill(procs)
+            }
+          ]
+        }
+      ).open();
+      return;
+    }
+    this.confirmStaleLockKill(procs);
+  }
+  /**
+   * The kill half, always behind this confirmation (§4 rule 7): it stops
+   * every Termux process — an open terminal session included — and the
+   * window has to say so, every time.
+   */
+  confirmStaleLockKill(procs) {
     new ConfirmModal(
       this.app,
       {
@@ -9598,7 +9771,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         body: [
           ".git/index.lock guards the repository while one git process writes. A process Android killed leaves it behind, and every operation then fails with 'another git process seems to be running'.",
           "To make the removal safe, EVERY Termux process is stopped first \u2014 including a terminal session, if one is open \u2014 and the runner arrives in a fresh Termux started by the trigger. Only then is the lock file deleted.",
-          "Do not run this while a download you started in Termux is still visibly working."
+          procs.length > 0 ? `What stops now: ${procs.join(", ")}.` : "Do not run this while a download you started in Termux is still visibly working."
         ],
         confirmLabel: "Stop Termux & delete the lock",
         icon: "lock-open",
@@ -9610,9 +9783,204 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         if (!result) return;
         if (!result.ok) return this.renderMutationError("Native Git: unlock failed", result);
         this.absorbStatusData(result.data ?? {});
+        const killed = (result.data?.killedProcesses ?? "").split("\n").filter((s) => s.trim() !== "").length;
         new import_obsidian16.Notice(
-          result.data?.lockRemoved === "true" ? "Stale lock removed. Run the operation again." : "No lock file was there \u2014 it may have been released already. Run the operation again."
+          result.data?.lockRemoved === "true" ? `Stale lock removed${killed > 0 ? ` (${killed} process${killed === 1 ? "" : "es"} stopped)` : ""}. Run the operation again.` : "No lock file was there \u2014 it may have been released already. Run the operation again."
         );
+      }
+    ).open();
+  }
+  /**
+   * One shape for every "copy this command and run it in Termux" window:
+   * copy, notice, a two-line body with the command collapsed under the fold,
+   * and a re-copy button that also brings Termux forward. The command builders
+   * refuse an unknown repository path, and the Notice says what to set.
+   */
+  openTermuxCommandModal(opts) {
+    if (opts.command === null) {
+      new import_obsidian16.Notice(
+        "Set the repository path in settings first \u2014 the command addresses the vault by its absolute path in Termux."
+      );
+      return;
+    }
+    const cmd = opts.command;
+    void navigator.clipboard.writeText(cmd);
+    new import_obsidian16.Notice("Command copied - long-press in Termux to paste, then Enter.");
+    new ResultModal(this.app, opts.title, opts.body, {
+      collapsed: { label: "The copied command", text: cmd },
+      actions: [
+        {
+          label: "Copy command & open Termux",
+          cta: true,
+          keepOpen: true,
+          onClick: () => {
+            void navigator.clipboard.writeText(cmd);
+            this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+          }
+        }
+      ]
+    }).open();
+  }
+  /**
+   * The identity fix as a button. The values are TYPED at the terminal and
+   * stay in Termux (the user's rule: neither the plugin nor the runner may
+   * learn the git name or email); the command ends by listing the two key
+   * NAMES back, so git itself confirms visibly that both now exist.
+   */
+  cmdSetGitIdentity() {
+    this.openTermuxCommandModal({
+      command: identitySetupCommand(this.deviceSettings.repoPathHint),
+      title: "Set the git identity in Termux",
+      body: [
+        "1. The command is copied. In Termux: paste, Enter, then type the name and the email git should sign this repository's commits with. git answers with the two keys it now has \u2014 the values stay in Termux.",
+        "2. Come back and run the operation again. The identity is LOCAL to this repository, so a global one is no longer needed for it."
+      ]
+    });
+  }
+  /**
+   * The `safe.directory` fix as a button. A repository git refuses cannot be
+   * repaired through an ordinary action — the runner rejects the profile
+   * before the dispatcher — so this stays a clipboard command by the user's
+   * decision (0.6.6 spec): the safer path over a new dispatch state in the
+   * runner's gating.
+   */
+  cmdFixSafeDirectory() {
+    this.openTermuxCommandModal({
+      command: safeDirectoryCommand(this.deviceSettings.repoPathHint),
+      title: "Allow git to use this repository",
+      body: [
+        "1. The command is copied. In Termux: paste, Enter. It tells git to trust exactly this directory \u2014 the files on shared storage belong to another uid, which is why git refuses them.",
+        "2. Come back and run the operation again."
+      ]
+    });
+  }
+  /**
+   * Presence and scope, never a value: which scopes hold user.name,
+   * user.email and credential.helper, read from the status fields a v16
+   * runner reports, with the two one-tap exits where they apply. The ordering
+   * rule is absolute: the global identity is never offered for removal while
+   * this repository has no local one.
+   */
+  async cmdCheckIdentity() {
+    const result = await this.runOperation("status", {});
+    if (!result) return;
+    if (!result.ok) return this.renderStatusFailure(result);
+    this.absorbStatusData(result.data ?? {});
+    const d = result.data ?? {};
+    if (d.userNameScopes === void 0 && d.userEmailScopes === void 0) {
+      new ResultModal(
+        this.app,
+        "Termux runner is too old for this",
+        [
+          `The identity check needs runner v16; this device answers with v${this.lastRunnerVersion}.`,
+          RUNNER_OUTDATED_HINT
+        ],
+        { isError: true }
+      ).open();
+      return;
+    }
+    const scopesOf = (v) => (v ?? "").split("\n").map((s) => s.trim()).filter((s) => s !== "");
+    const nameScopes = scopesOf(d.userNameScopes);
+    const emailScopes = scopesOf(d.userEmailScopes);
+    const helperScopes = scopesOf(d.credHelperScopes);
+    const hasLocal = nameScopes.includes("local") && emailScopes.includes("local");
+    const hasGlobal = nameScopes.includes("global") || emailScopes.includes("global");
+    const hasAny = nameScopes.length > 0 && emailScopes.length > 0;
+    const globalHelper = helperScopes.includes("global") || helperScopes.includes("system");
+    const lines = [
+      hasAny ? "git has an identity to commit with. Where each key is set (values are never read):" : "git has NO identity to commit with \u2014 the next commit or sync will fail. Where each key is set:",
+      `user.name: ${nameScopes.join(", ") || "not set in any scope"}`,
+      `user.email: ${emailScopes.join(", ") || "not set in any scope"}`,
+      `credential.helper: ${helperScopes.join(", ") || "not set in any scope"}`
+    ];
+    if (!hasLocal) {
+      lines.push(
+        "",
+        hasGlobal ? "This repository has no LOCAL identity, so commits fall back to the global one \u2014 silently, and again after every re-clone. Set a local identity first; only then is removing the global one safe." : "This repository has no LOCAL identity. Set one with the button below; the values are typed in Termux and stay there."
+      );
+    } else if (hasGlobal) {
+      lines.push(
+        "",
+        "A global identity also exists. Any repository on this device WITHOUT a local identity commits under it; now that this repository carries its own, the global one can be removed."
+      );
+    }
+    if (globalHelper) {
+      lines.push(
+        "",
+        "A global credential helper exists, and helpers are asked global-first: it answers BEFORE this repository's own credential file. The reset makes the local file authoritative; the global configuration is not touched."
+      );
+    }
+    const actions = [];
+    if (!hasLocal) {
+      actions.push({
+        label: "Set the git identity\u2026",
+        cta: true,
+        keepOpen: true,
+        onClick: () => this.cmdSetGitIdentity()
+      });
+    } else if (hasGlobal) {
+      actions.push({
+        label: "Remove the global identity\u2026",
+        onClick: () => this.cmdDropGlobalIdentity()
+      });
+    }
+    if (globalHelper) {
+      actions.push({
+        label: "Prefer this repository's credentials\u2026",
+        onClick: () => this.cmdResetCredHelper()
+      });
+    }
+    new ResultModal(this.app, "Git identity check", lines, {
+      actions: actions.length > 0 ? actions : void 0
+    }).open();
+  }
+  /**
+   * Value-free removal (`--unset-all` reads nothing). Reached only from the
+   * identity check, which offers it only while a local identity exists; the
+   * runner enforces the same rule again, defense in depth.
+   */
+  cmdDropGlobalIdentity() {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Remove the global git identity?",
+        body: [
+          "Removes user.name and user.email from Termux's global git configuration. The values are not read or shown anywhere.",
+          "This repository keeps its own local identity. Any OTHER repository on this device without a local identity will refuse to commit until it gets one \u2014 that is the point: no more commits signed by accident."
+        ],
+        confirmLabel: "Remove global identity",
+        danger: true
+      },
+      async (ok) => {
+        if (!ok) return;
+        const result = await this.runOperation("identity-drop-global", {});
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: identity removal failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new import_obsidian16.Notice("Global git identity removed.");
+      }
+    ).open();
+  }
+  /** The empty-value reset that stops a global helper answering first. */
+  cmdResetCredHelper() {
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Prefer this repository's credentials?",
+        body: [
+          "A global credential helper currently answers before this repository's own credential file, so operations here can use another account's saved credentials.",
+          "This writes two lines into the repository's LOCAL git config: an empty helper that stops the inherited list, then the profile's own credential file. The global configuration is not touched, and no credential is read or shown.",
+          "If the profile's file is empty, the next network operation asks for credentials once, in Termux, and saves them there."
+        ],
+        confirmLabel: "Make the local file win"
+      },
+      async (ok) => {
+        if (!ok) return;
+        const result = await this.runOperation("cred-helper-local-reset", {});
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: credential reset failed", result);
+        this.absorbStatusData(result.data ?? {});
+        new import_obsidian16.Notice("This repository's own credential file now answers first.");
       }
     ).open();
   }
@@ -9813,8 +10181,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       {
         title: "Repair the repository?",
         body: [
-          "Runs as short steps, so a repair Android interrupts loses one step and not the whole run. First it removes object files that are empty \u2014 git leaves those when it is stopped mid-write, and an empty file cannot contain anything \u2014 then it asks the remote for exactly the missing objects, which is usually kilobytes.",
-          "Downloading the whole history is a separate step and it always asks first. Tap the state line while it runs to watch what it is doing.",
+          "One repair walks every known problem in order: a leftover lock, the git identity and credential scopes, the sparse definition, then the object database \u2014 short steps, so a repair Android interrupts loses one step and not the whole run.",
+          "Safe fixes happen by themselves and are narrated in the output panel; anything irreversible, expensive or needing Termux is asked about or listed at the end with its exact fix.",
           "Nothing that holds data is deleted. Objects that are damaged but not empty are reported instead, because they may still be recoverable.",
           "Your files, your commits and your remote are untouched by the repair itself; if a step needs anything more it asks before doing it."
         ],
@@ -9824,6 +10192,189 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         if (confirmed) start();
       }
     ).open();
+  }
+  /**
+   * Steps 1–5 and 7 of the unified repair (v16): triage once, fix what is
+   * safe to fix, and carry everything that needs the user into the final
+   * window as a note plus a button. Returns null when the repair must stop —
+   * a refused repository (nothing else can run), a running git command (the
+   * choice is to wait), or a failed step. The object-database steps follow in
+   * the caller; they have their own decision table.
+   */
+  async runRepairPreSteps() {
+    const summary = [];
+    const actions = [];
+    const triage = await this.repairStep("repair-triage", {}, "repair 1/7: triage");
+    if (triage === null) return null;
+    if (!triage.ok) {
+      const err = triage.error;
+      if (looksLikeDubiousOwnership(`${err?.message ?? ""}
+${err?.stderr ?? ""}`, err?.stdout)) {
+        new ResultModal(
+          this.app,
+          "Repository blocked: ownership",
+          [
+            "git refuses this repository because its files belong to another uid \u2014 the normal state of Android shared storage \u2014 and every other repair step is blocked behind it.",
+            "The one-line fix tells git to trust exactly this directory. Run it in Termux, then start the repair again."
+          ],
+          {
+            isError: true,
+            actions: [
+              {
+                label: "Copy the safe.directory fix\u2026",
+                cta: true,
+                keepOpen: true,
+                onClick: () => this.cmdFixSafeDirectory()
+              }
+            ]
+          }
+        ).open();
+        return null;
+      }
+      this.renderMutationError("Native Git: repair could not start", triage);
+      return null;
+    }
+    const d = triage.data ?? {};
+    const list = (v) => (v ?? "").split("\n").map((s) => s.trim()).filter((s) => s !== "");
+    const nameScopes = list(d.userNameScopes);
+    const emailScopes = list(d.userEmailScopes);
+    const helperScopes = list(d.credHelperScopes);
+    const sparsePatterns = list(d.sparseList);
+    const procs = list(d.liveProcesses);
+    const facts = {
+      lock: {
+        lockExists: d.lockExists === "true",
+        lockAgeSeconds: d.lockAgeSeconds === void 0 || d.lockAgeSeconds === "" ? null : Number(d.lockAgeSeconds),
+        liveGit: d.liveGit === "true",
+        liveProcesses: procs
+      },
+      identity: {
+        local: nameScopes.includes("local") && emailScopes.includes("local"),
+        global: nameScopes.includes("global") || emailScopes.includes("global"),
+        any: nameScopes.length > 0 && emailScopes.length > 0
+      },
+      globalCredHelper: helperScopes.includes("global") || helperScopes.includes("system"),
+      sparse: {
+        enabled: d.sparseEnabled === "true",
+        cone: d.sparseCone === "true",
+        hasBase: sparsePatterns.includes("/*"),
+        hasEmptyingDefault: sparsePatterns.includes("!/*/")
+      },
+      rescueBranches: list(d.rescueBranches),
+      previousGitDirs: list(d.previousGitDirs)
+    };
+    for (const item of planRepair(facts)) {
+      if (item.step === "lock" && item.act === "remove-corpse") {
+        const r = await this.repairStep(
+          "repair-stale-lock",
+          { skipKill: true },
+          "repair 2/7: stale lock"
+        );
+        if (r === null || !r.ok) {
+          if (r !== null) this.renderMutationError("Native Git: unlock failed", r);
+          return null;
+        }
+        summary.push("Removed a leftover index.lock \u2014 nothing was holding it, nothing was stopped.");
+        continue;
+      }
+      if (item.step === "lock" && item.act === "wait-running") {
+        new ResultModal(
+          this.app,
+          "A git command seems to be running",
+          [
+            `The lock was written ${d.lockAgeSeconds ?? "?"} seconds ago and a live git process exists \u2014 that reads as a command still working. The repair stops here: waiting is the safe choice, and interrupting a write is how object files end up empty.`,
+            `Running now:
+${procs.join("\n")}`,
+            "Run the repair again once it finishes."
+          ],
+          { isError: true }
+        ).open();
+        return null;
+      }
+      if (item.step === "lock" && item.act === "ask-kill") {
+        summary.push(
+          "A leftover index.lock is there and live processes exist; deleting it stops every Termux process first, so it stays behind its own button."
+        );
+        actions.push({
+          label: "Delete the stale lock\u2026",
+          keepOpen: true,
+          onClick: () => this.confirmStaleLockKill(procs)
+        });
+        continue;
+      }
+      if (item.step === "identity" && item.act === "offer-set") {
+        summary.push(
+          facts.identity.any ? "This repository has no LOCAL git identity: commits fall back to the global one, silently, and again after every re-clone." : "git has NO identity to commit with \u2014 the next commit or sync will fail."
+        );
+        actions.push({
+          label: "Set the git identity\u2026",
+          keepOpen: true,
+          onClick: () => this.cmdSetGitIdentity()
+        });
+        continue;
+      }
+      if (item.step === "identity" && item.act === "offer-drop-global") {
+        summary.push(
+          "A global git identity exists beside this repository's local one; any repository without a local identity commits under it."
+        );
+        actions.push({
+          label: "Remove the global identity\u2026",
+          keepOpen: true,
+          onClick: () => this.cmdDropGlobalIdentity()
+        });
+        continue;
+      }
+      if (item.step === "cred-helper") {
+        summary.push(
+          "A global credential helper answers before this repository's own credential file."
+        );
+        actions.push({
+          label: "Prefer this repository's credentials\u2026",
+          keepOpen: true,
+          onClick: () => this.cmdResetCredHelper()
+        });
+        continue;
+      }
+      if (item.step === "sparse" && item.act === "repair-definition") {
+        const r = await this.repairStep(
+          "repair-sparse-definition",
+          {},
+          "repair 3/7: sparse definition"
+        );
+        if (r === null || !r.ok) {
+          if (r !== null) this.renderMutationError("Native Git: sparse repair failed", r);
+          return null;
+        }
+        summary.push(
+          "Repaired the sparse definition: the include-everything base is back and git's emptying default is gone. Re-add any exclusions through the reconcile window if it asks."
+        );
+        continue;
+      }
+      if (item.step === "sparse" && item.act === "cone-needs-decision") {
+        summary.push(
+          "This repository uses cone-mode sparse checkout; per-path protection needs pattern (non-cone) mode, and switching modes is a decision, not a repair. In Termux: git sparse-checkout init --no-cone (then re-add exclusions here)."
+        );
+        continue;
+      }
+      if (item.step === "leftovers" && item.act === "rescue-branches") {
+        summary.push(
+          `Repair backup branch${facts.rescueBranches.length === 1 ? "" : "es"} still there: ${facts.rescueBranches.join(", ")} \u2014 holding disk until deleted.`
+        );
+        actions.push({
+          label: "Delete repair backup branch\u2026",
+          keepOpen: true,
+          onClick: () => this.cmdRescueCleanup()
+        });
+        continue;
+      }
+      if (item.step === "leftovers" && item.act === "previous-git") {
+        summary.push(
+          `A previous repository is still set aside (${facts.previousGitDirs.join(", ")}); the daily reminder offers to delete it once you are sure nothing is lost.`
+        );
+        continue;
+      }
+    }
+    return { summary, actions };
   }
   /** One repair step: request, log, absorb. Returns null when the job must stop. */
   async repairStep(action, args, stepLabel) {
@@ -9858,7 +10409,16 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
       return;
     }
     try {
-      const scan = await this.repairStep("repair-scan", {}, "repair 1/3: scan");
+      let summary = [];
+      let finalActions = [];
+      if (this.lastRunnerVersion >= 16) {
+        if (this.sharedPrefs.openOutputForLongOps) void this.openOutputPanel();
+        const pre = await this.runRepairPreSteps();
+        if (pre === null) return;
+        summary = pre.summary;
+        finalActions = pre.actions;
+      }
+      const scan = await this.repairStep("repair-scan", {}, "repair 4/7: object scan");
       if (scan === null || !scan.ok) {
         if (scan !== null) this.renderMutationError("Native Git: repair could not scan", scan);
         return;
@@ -9883,7 +10443,7 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           const fetch = await this.repairStep(
             "repair-fetch-missing",
             { oids: decision.oids },
-            "repair 2/3: fetch missing objects"
+            "repair 5/7: fetch missing objects"
           );
           if (fetch === null || !fetch.ok) {
             if (fetch !== null) this.renderMutationError("Native Git: repair could not fetch", fetch);
@@ -9905,15 +10465,20 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
               this.app,
               "Repository still incomplete",
               [
+                ...summary.length > 0 ? [...summary, ""] : [],
                 removedLine,
                 "The targeted fetch did not bring everything back. The remaining step downloads the whole history again; run the repair again when you are ready for that.",
                 findings.fsckMissing
               ],
-              { isError: true, stderr: findings.fsckRemaining }
+              {
+                isError: true,
+                stderr: findings.fsckRemaining,
+                actions: finalActions.length > 0 ? finalActions : void 0
+              }
             ).open();
             return;
           }
-          const re = await this.repairStep("repair-refetch", {}, "repair 3/3: refetch history");
+          const re = await this.repairStep("repair-refetch", {}, "repair 6/7: refetch history");
           if (re === null || !re.ok) {
             if (re !== null) this.renderMutationError("Native Git: repair could not refetch", re);
             return;
@@ -9928,10 +10493,17 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           continue;
         }
         const howLine = recoveredBy === "targeted" ? "Asked the remote for the missing objects themselves, so nothing else was downloaded." : recoveredBy === "recovery copy" ? "This git has no --refetch, so the history was downloaded into a temporary copy and the missing objects taken from it." : recoveredBy === "refetch" ? "Refetched the whole history from the remote, so anything it still has is back." : "";
-        const lines = [removedLine, ...howLine !== "" ? [howLine] : []];
+        const lines = [
+          ...summary.length > 0 ? [...summary, ""] : [],
+          removedLine,
+          ...howLine !== "" ? [howLine] : []
+        ];
         if (decision.kind === "clean") {
           lines.push("", "The object store is complete: git can read everything it references.");
-          new ResultModal(this.app, "Repository repaired", lines, { stdout: sd.removedObjects }).open();
+          new ResultModal(this.app, "Repository repaired", lines, {
+            stdout: sd.removedObjects,
+            actions: finalActions.length > 0 ? finalActions : void 0
+          }).open();
           return;
         }
         if (decision.kind === "damaged") {
@@ -9942,7 +10514,8 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           );
           new ResultModal(this.app, "Damaged objects left alone", lines, {
             stderr: findings.fsckRemaining,
-            isError: true
+            isError: true,
+            actions: finalActions.length > 0 ? finalActions : void 0
           }).open();
           return;
         }
@@ -9961,7 +10534,8 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
                 label: "Rebuild on the remote state",
                 cta: true,
                 onClick: () => void this.cmdRepairResetUpstream(ctx.ahead)
-              }
+              },
+              ...finalActions
             ]
           }).open();
           return;
@@ -9973,7 +10547,8 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         );
         new ResultModal(this.app, "Repository still incomplete", lines, {
           stderr: findings.fsckRemaining,
-          isError: true
+          isError: true,
+          actions: finalActions.length > 0 ? finalActions : void 0
         }).open();
         return;
       }

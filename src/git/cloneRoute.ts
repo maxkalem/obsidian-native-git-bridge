@@ -68,7 +68,16 @@ export function manualCloneCommand(opts: {
   const extras =
     (opts.filter !== undefined ? ` --filter=${opts.filter}` : "") +
     (opts.depth !== undefined ? ` --depth ${opts.depth}` : "");
-  const helper = `-c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/${opts.profileId}"`;
+  // The EMPTY helper first: credential.helper accumulates across scopes and
+  // the first helper that answers wins, so without the reset a global helper
+  // in Termux's gitconfig would answer ahead of the profile's file — and,
+  // persisted into the cloned config, keep shadowing it on every later
+  // operation (a real device could not commit until the global credentials
+  // were deleted). An empty value resets the inherited list; both -c values
+  // persist into the cloned config in this order.
+  const helper =
+    `-c credential.helper= ` +
+    `-c credential.helper="store --file=$HOME/.config/native-git-bridge/creds/${opts.profileId}"`;
   return `rm -rf "${dir}" && git clone --no-checkout --progress${extras} ${helper} -- "${opts.url}" "${dir}"`;
 }
 

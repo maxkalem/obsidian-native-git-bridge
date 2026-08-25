@@ -75,6 +75,39 @@ export function looksLikeStaleLock(stderr?: string, stdout?: string): boolean {
 }
 
 /**
+ * Does this output say git has no identity to commit with?
+ *
+ * Two sources, one meaning. The runner's own `require_identity` refuses a
+ * commit or sync up front with "user.name / user.email are not configured";
+ * git itself, reached without that guard, says "Please tell me who you are"
+ * or "unable to auto-detect email address". The answer everywhere is the
+ * same: set a LOCAL identity, at a Termux terminal, where the values stay —
+ * the plugin offers the command instead of a sentence to retype.
+ */
+export function needsGitIdentity(stderr?: string, stdout?: string): boolean {
+  const s = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return (
+    /user\.(name|email)[^\n]*not configured/i.test(s) ||
+    /Please tell me who you are/i.test(s) ||
+    /unable to auto-detect email address/i.test(s)
+  );
+}
+
+/**
+ * Does this output say git refuses the repository over dubious ownership?
+ *
+ * The shape on Android shared storage, where the files belong to another uid:
+ * git's own "detected dubious ownership in repository at …" (which names
+ * `safe.directory` in its advice), and the runner's `REPO_MISSING` reason for
+ * an unusable profile, which quotes the same fix. It is the most common
+ * first-run failure on shared storage, and the fix is one clipboard command.
+ */
+export function looksLikeDubiousOwnership(stderr?: string, stdout?: string): boolean {
+  const s = `${stderr ?? ""}\n${stdout ?? ""}`;
+  return /dubious ownership/i.test(s) || /safe\.directory/i.test(s);
+}
+
+/**
  * Lines git writes to describe how far along it is. They are noise in a report
  * and they are the bulk of it: every one of these is emitted once per percent.
  */

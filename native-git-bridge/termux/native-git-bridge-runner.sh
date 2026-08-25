@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=15
+RUNNER_VERSION=16
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -712,18 +712,24 @@ run_git() {
   #
   # Every path this runner prints is now the real bytes. The `-z` output used in
   # a few places was already immune; this makes the rest agree with it.
+  #
+  # `-c core.pager=cat` guards the INTERACTIVE runs (v15+): git pages only on a
+  # tty, so an ordinary run was always immune, but a real device carries
+  # core.pager pointing at a program that does not exist, and an interactive
+  # queue run has the tty that would engage it. `cat` rather than unsetting:
+  # a command-line -c overrides every scope, deterministically.
   local out_f err_f before
   out_f="$(mktemp)"
   if [ -n "$NGB_PROG_FILE" ]; then
     before="$(progress_bytes)"
-    git -c core.quotePath=false "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
+    git -c core.quotePath=false -c core.pager=cat "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
     GIT_EC=$?
     GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
     progress_redact
     progress_trim
   else
     err_f="$(mktemp)"
-    git -c core.quotePath=false "$@" > "$out_f" 2> "$err_f"
+    git -c core.quotePath=false -c core.pager=cat "$@" > "$out_f" 2> "$err_f"
     GIT_EC=$?
     GIT_ERR="$(cat "$err_f" | redact_url)"
     rm -f "$err_f"
@@ -818,6 +824,28 @@ collect_status_fields() {
   local creds_configured=false
   [ -s "$NGB_CONFIG_DIR/creds/$PROFILE_ID" ] && creds_configured=true
   [ -n "$(git config --global --get credential.helper 2>/dev/null || true)" ] && creds_configured=true
+  # Which scopes hold an identity and a credential helper — presence and scope
+  # ONLY, never a value (the user's rule; --name-only is what guarantees it).
+  # One process answers every scope. `--show-scope` needs git 2.26+; on an
+  # older git the probe below asks scope by scope instead, and if even that
+  # yields nothing the fields are empty, which the plugin reads as unknown.
+  local scoped_keys="" sc key
+  scoped_keys="$(git config --list --show-scope --name-only 2>/dev/null |
+    grep -E '(user\.(name|email)|credential\.helper)$' || true)"
+  if [ -z "$scoped_keys" ] && ! git config --list --show-scope --name-only >/dev/null 2>&1; then
+    for sc in system global local worktree; do
+      for key in user.name user.email credential.helper; do
+        if git config --"$sc" --name-only --get-all "$key" >/dev/null 2>&1; then
+          scoped_keys="${scoped_keys}${sc}	${key}
+"
+        fi
+      done
+    done
+  fi
+  local user_name_scopes user_email_scopes cred_helper_scopes
+  user_name_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="user.name"{print $1}')"
+  user_email_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="user.email"{print $1}')"
+  cred_helper_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="credential.helper"{print $1}')"
   collect_untracked_children
   DATA=$(obj_from_fields \
     branchInfo "$branch_info" \
@@ -834,7 +862,10 @@ collect_status_fields() {
     untrackedChildren "$UNTRACKED_CHILDREN" \
     mergeInProgress "$merge_active" \
     mergeMsg "$merge_msg" \
-    rebaseInProgress "$rebase_active")
+    rebaseInProgress "$rebase_active" \
+    userNameScopes "$user_name_scopes" \
+    userEmailScopes "$user_email_scopes" \
+    credHelperScopes "$cred_helper_scopes")
 }
 
 action_status() { collect_status_fields; }
@@ -964,7 +995,7 @@ run_git_net() {
       tail -c +$((before + 1)) -f "$NGB_PROG_FILE" >&2 2>/dev/null &
       mirror_pid=$!
     fi
-    timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
+    timeout -k 5 "$NGB_NET_TIMEOUT" git -c core.pager=cat "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
     GIT_EC=$?
     if [ -n "$mirror_pid" ]; then
       sleep 1
@@ -977,7 +1008,7 @@ run_git_net() {
     progress_trim
   else
     err_f="$(mktemp)"
-    timeout -k 5 "$NGB_NET_TIMEOUT" git "$@" > "$out_f" 2> "$err_f"
+    timeout -k 5 "$NGB_NET_TIMEOUT" git -c core.pager=cat "$@" > "$out_f" 2> "$err_f"
     GIT_EC=$?
     GIT_ERR="$(cat "$err_f" | redact_url)"
     rm -f "$err_f"
@@ -1094,8 +1125,11 @@ pull_would_be_blocked_by() {
 }
 
 require_identity() {
-  if [ -z "$(git config --get user.email 2>/dev/null)" ] || [ -z "$(git config --get user.name 2>/dev/null)" ]; then
-    ERROR=$(err_json "GIT_FAILED" "git user.name / user.email are not configured in Termux. Run: git config --global user.name '...' && git config --global user.email '...'" "" "")
+  # Presence only, through --name-only: the identity VALUES never enter this
+  # shell (the user's rule — neither the plugin nor the runner may learn the
+  # git name or email). One process instead of the two the old check spawned.
+  if [ "$(git config --name-only --get-regexp '^user\.(name|email)$' 2>/dev/null | sort -u | wc -l)" -ne 2 ]; then
+    ERROR=$(err_json "GIT_FAILED" "git user.name / user.email are not configured for this repository. Nothing was committed. Set the identity from the failure window or the settings; the values stay in Termux." "" "")
     return 1
   fi
   return 0
@@ -2501,16 +2535,67 @@ ensure_trailing_newline() { # $1 file
   [ "$last" = "0a" ] || printf '\n' >> "$1"
 }
 
-require_noncone_sparse() {
-  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
-    ERROR=$(err_json GIT_FAILED "Sparse checkout is not enabled in this repository. In Termux run: git sparse-checkout set --no-cone '/*'  (then retry)." "" "")
-    return 1
-  fi
+refuse_cone_sparse() {
   if [ "$(git config --get core.sparseCheckoutCone 2>/dev/null || true)" = "true" ]; then
     ERROR=$(err_json GIT_FAILED "This repository uses cone-mode sparse checkout; per-path exclusions need pattern (non-cone) mode." "" "")
     return 1
   fi
   return 0
+}
+
+require_noncone_sparse() {
+  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
+    ERROR=$(err_json GIT_FAILED "Sparse checkout is not enabled in this repository, so there is no exclusion to remove." "" "")
+    return 1
+  fi
+  refuse_cone_sparse || return 1
+  return 0
+}
+
+# Write a pattern list and PROVE the write. A real device reported the pattern
+# file holding `/*` plus `!/*/` after an enable — git's OWN default, which
+# empties the working tree of everything below the top level. It arrives from
+# two places (`sparse_checkout_set()` substitutes it when no pattern is given;
+# cone mode prints it as a header), and the runner asks for neither, so the
+# report cannot be told apart afterwards: this is a guard, not a diagnosis.
+# After `git sparse-checkout set --no-cone --stdin` the effective file is read
+# back and three things are asserted: the include-everything base `/*` is
+# present, `!/*/` is absent, and cone mode is not on. Any one failing means git
+# wrote something other than what was asked; the saved file and config are
+# restored (or sparse disabled again, when it was off before), and the action
+# fails quoting what git actually wrote. No second write is attempted.
+sparse_write_verified() { # $1 = pattern file to apply; sets ERROR on failure
+  local sfile saved="" was_enabled was_cone
+  was_enabled="$(git config --get core.sparseCheckout 2>/dev/null || true)"
+  was_cone="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
+  sfile="$(git rev-parse --git-path info/sparse-checkout)"
+  case "$sfile" in /*) : ;; *) sfile="$NGB_REPO_DIR/$sfile" ;; esac
+  [ -f "$sfile" ] && saved="$(cat "$sfile")"
+  if ! run_git sparse-checkout set --no-cone --stdin < "$1"; then
+    ERROR=$(err_json GIT_FAILED "git sparse-checkout set failed." "$GIT_OUT" "$GIT_ERR")
+    return 1
+  fi
+  local written cone_now
+  written="$(cat "$sfile" 2>/dev/null || true)"
+  cone_now="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
+  if printf '%s\n' "$written" | grep -qx '/\*' &&
+     ! printf '%s\n' "$written" | grep -qxF '!/*/' &&
+     [ "$cone_now" != "true" ]; then
+    return 0
+  fi
+  progress_note "sparse: git wrote an unexpected pattern set; restoring the previous state"
+  if [ "$was_enabled" = "true" ]; then
+    printf '%s' "$saved" > "$sfile"
+    ensure_trailing_newline "$sfile"
+    if [ -n "$was_cone" ]; then git config core.sparseCheckoutCone "$was_cone" 2>/dev/null || true
+    else git config --unset core.sparseCheckoutCone 2>/dev/null || true; fi
+    run_git sparse-checkout reapply || true
+  else
+    run_git sparse-checkout disable || true
+    rm -f "$sfile" 2>/dev/null || true
+  fi
+  ERROR=$(err_json GIT_FAILED "git sparse-checkout wrote a pattern set that would hide the wrong files; the previous state was restored and nothing changed. It wrote what is listed below." "$written" "")
+  return 1
 }
 
 # `!/path` (no trailing slash) matches the path whether it is a file or a
@@ -2528,8 +2613,15 @@ action_sparse_exclude_add() {
   # sparse is off, the pattern list is seeded with git's own
   # include-everything base, so the first exclusion can never read as "hide
   # everything".
-  if [ "$(git config --get core.sparseCheckoutCone 2>/dev/null || true)" = "true" ]; then
-    ERROR=$(err_json GIT_FAILED "This repository uses cone-mode sparse checkout; per-path exclusions need pattern (non-cone) mode." "" "")
+  refuse_cone_sparse || return 1
+  # Excluding a path that already holds staged content strands the index:
+  # `sparse-checkout reapply` takes the files off disk and leaves the index
+  # entries with skip-worktree set — a bare `A ` nothing on the panel can act
+  # on, the exact state the 0.6.1 stranded-index bug shipped. The repair
+  # (`unstage-protected`) exists, but refusing here stops the state arising.
+  run_git diff --cached --name-only -- "$path" || true
+  if [ -n "$GIT_OUT" ]; then
+    ERROR=$(err_json GIT_FAILED "Cannot hide '$path': staged changes exist under it, and hiding it would strand them in the index. Commit or unstage the paths listed below first." "$GIT_OUT" "")
     return 1
   fi
   local tmpf; tmpf="$(mktemp)"
@@ -2542,9 +2634,8 @@ action_sparse_exclude_add() {
   fi
   if ! grep -qxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf"; then
     printf '!/%s\n' "$path" >> "$tmpf"
-    if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf"; then
+    if ! sparse_write_verified "$tmpf"; then
       rm -f "$tmpf"
-      ERROR=$(err_json GIT_FAILED "git sparse-checkout set failed." "$GIT_OUT" "$GIT_ERR")
       return 1
     fi
   fi
@@ -2562,9 +2653,8 @@ action_sparse_exclude_remove() {
   git sparse-checkout list > "$tmpf" 2>/dev/null || true
   grep -vxF -e "!/$path" -e "!/$path/" -e "!$path" -e "!$path/" "$tmpf" > "$tmpf.new" || true
   if ! cmp -s "$tmpf" "$tmpf.new"; then
-    if ! run_git sparse-checkout set --no-cone --stdin < "$tmpf.new"; then
+    if ! sparse_write_verified "$tmpf.new"; then
       rm -f "$tmpf" "$tmpf.new"
-      ERROR=$(err_json GIT_FAILED "git sparse-checkout set failed." "$GIT_OUT" "$GIT_ERR")
       return 1
     fi
   fi
@@ -2573,11 +2663,83 @@ action_sparse_exclude_remove() {
   DATA=$(merge_data "$DATA" "$(obj_from_fields sparseUnexcluded "$path")")
 }
 
+# The exit for a definition already in git's default state (`/*` + `!/*/`,
+# which hides everything below the top level) or missing its include base —
+# states the write guard can refuse to create but cannot fix once a repository
+# arrives in one. Keeps every `!/<path>` exclusion, drops any `!/*/` line,
+# re-seeds `/*`, and applies through the same verified write the ordinary
+# actions use. A step of the unified repair; deliberately no palette command
+# of its own. Cone mode is refused, not converted: a cone configuration is
+# somebody's deliberate setup, and switching modes is the user's decision.
+action_repair_sparse_definition() {
+  refuse_cone_sparse || return 1
+  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
+    DATA=$(obj_from_fields sparseRepaired "false" sparseNote "Sparse checkout is disabled; there is no definition to repair.")
+    return 0
+  fi
+  local tmpf; tmpf="$(mktemp)"
+  printf '/*\n' > "$tmpf"
+  git sparse-checkout list 2>/dev/null | grep '^!' | grep -vxF '!/*/' >> "$tmpf" || true
+  progress_note "sparse: re-seeding the include-everything base and reapplying the exclusions"
+  if ! sparse_write_verified "$tmpf"; then
+    rm -f "$tmpf"
+    return 1
+  fi
+  rm -f "$tmpf"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields sparseRepaired "true")")
+}
+
+# Remove the GLOBAL identity, value-free: --unset-all needs no knowledge of
+# what it removes. The ordering rule is absolute and enforced on BOTH sides
+# (the plugin refuses to offer this, this refuses to run): a global identity
+# is never removed while the repository has no local one, because with no
+# local identity the global one is the only thing letting commits happen —
+# here and in every other repository on the device.
+action_identity_drop_global() {
+  if [ "$(git config --local --name-only --get-regexp '^user\.(name|email)$' 2>/dev/null | sort -u | wc -l)" -ne 2 ]; then
+    ERROR=$(err_json GIT_FAILED "This repository has no local identity, so the global one is what lets commits happen. Set the local identity first; then the global one can be removed." "" "")
+    return 1
+  fi
+  git config --global --unset-all user.name 2>/dev/null || true
+  git config --global --unset-all user.email 2>/dev/null || true
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields identityDroppedGlobal "true")")
+}
+
+# Make the profile's credential file authoritative for this repository.
+# `credential.helper` is multi-valued and ACCUMULATES across scopes; helpers
+# are asked system, then global, then local, and the first that answers wins —
+# so a global helper shadows the profile's file (measured; the device hit it).
+# An empty value in the local config resets the inherited list (also
+# measured), so the two lines below are the whole fix. The global config is
+# never touched and no helper's value is ever read.
+action_cred_helper_local_reset() {
+  local creds_file; creds_file="$(ensure_profile_creds_file)"
+  git config --local --unset-all credential.helper 2>/dev/null || true
+  if ! git config --local --add credential.helper '' ||
+     ! git config --local --add credential.helper "store --file=$creds_file"; then
+    ERROR=$(err_json GIT_FAILED "Could not write the local credential configuration." "" "")
+    return 1
+  fi
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields credHelperReset "true")")
+}
+
 exclude_file_path() { git rev-parse --git-path info/exclude; }
 
 emit_exclude_list() { # DATA <- current exclude file content
   local xf; xf="$(exclude_file_path)"
   DATA=$(obj_from_fields excludeList "$(cat "$xf" 2>/dev/null || true)")
+}
+
+# For the two actions that CHANGE the exclude file: the updated list plus
+# fresh status fields, so the plugin needs no follow-up status round trip
+# (v16; protocol.md's original claim about mutating actions is true again).
+emit_exclude_with_status() {
+  local xf; xf="$(exclude_file_path)"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields excludeList "$(cat "$xf" 2>/dev/null || true)")")
 }
 
 action_exclude_list() { emit_exclude_list; }
@@ -2590,7 +2752,7 @@ action_exclude_add() {
   mkdir -p "$(dirname "$xf")"
   ensure_trailing_newline "$xf"
   grep -qxF "/$path" "$xf" 2>/dev/null || printf '/%s\n' "$path" >> "$xf"
-  emit_exclude_list
+  emit_exclude_with_status
 }
 
 action_exclude_remove() {
@@ -2602,7 +2764,7 @@ action_exclude_remove() {
     grep -vxF -e "/$path" -e "$path" -e "/$path/" -e "$path/" "$xf" > "$xf.tmp" || true
     mv "$xf.tmp" "$xf"
   fi
-  emit_exclude_list
+  emit_exclude_with_status
 }
 
 # ---- untrack and storage maintenance (v14) -------------------------------------
@@ -2894,22 +3056,60 @@ action_repo_partial_disable() {
 # "restart" half of the user's design. Off Termux (the e2e sandbox), the kill
 # would take down the test run itself and no other Termux process exists to
 # hold the lock, so only the removal happens.
-action_repair_stale_lock() {
-  local lock existed=false removed=false
+# The runner's own parent chain: the processes the kill and the triage both
+# leave alone. Sets KEEP_PIDS as " pid pid … ".
+collect_keep_pids() {
+  KEEP_PIDS=" "
+  local p=$$
+  while [ "${p:-0}" -gt 1 ] 2>/dev/null; do
+    KEEP_PIDS="$KEEP_PIDS$p "
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" || break
+    [ -n "$p" ] || break
+  done
+}
+
+# The lock file's absolute path (index.lock is the one every operation dies on).
+stale_lock_path() {
+  local lock
   lock="$(git rev-parse --git-path index.lock 2>/dev/null || true)"
   [ -n "$lock" ] || lock=".git/index.lock"
   case "$lock" in /*) : ;; *) lock="$NGB_REPO_DIR/$lock" ;; esac
+  printf '%s' "$lock"
+}
+
+# Every OTHER process of this uid with its command name — exactly what the
+# stale-lock kill would take down, so the plugin can show it and ask first
+# (v15 killed blind and never said it closes Termux sessions). Sets
+# LIVE_PROCESSES ("pid comm" per line) and LIVE_GIT.
+collect_live_processes() {
+  LIVE_PROCESSES=""; LIVE_GIT=false
+  local pid comm
+  collect_keep_pids
+  for pid in $(ps -o pid= -u "$(id -u)" 2>/dev/null); do
+    case "$KEEP_PIDS" in *" $pid "*) continue ;; esac
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
+    [ -n "$comm" ] || continue
+    LIVE_PROCESSES="${LIVE_PROCESSES}${pid} ${comm}
+"
+    case "$comm" in git|git-*) LIVE_GIT=true ;; esac
+  done
+}
+
+action_repair_stale_lock() {
+  local req_file="$1" skip_kill existed=false removed=false killed=""
+  skip_kill=$(jq -r '.args.skipKill // false' "$req_file")
+  local lock; lock="$(stale_lock_path)"
   [ -e "$lock" ] && existed=true
-  if [ -d "/data/data/com.termux" ]; then
+  # The kill is what GUARANTEES nothing holds the lock, and it is skipped only
+  # when the plugin's triage saw no live process and the user chose the plain
+  # removal — a corpse from Android stopping Termux needs no execution.
+  if [ "$skip_kill" != "true" ] && [ -d "/data/data/com.termux" ]; then
     progress_note "unlock: stopping every other Termux process"
-    local keep=" " p=$$ pid
-    while [ "${p:-0}" -gt 1 ] 2>/dev/null; do
-      keep="$keep$p "
-      p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')" || break
-      [ -n "$p" ] || break
-    done
+    collect_live_processes
+    killed="$LIVE_PROCESSES"
+    local pid
     for pid in $(ps -o pid= -u "$(id -u)" 2>/dev/null); do
-      case "$keep" in *" $pid "*) continue ;; esac
+      case "$KEEP_PIDS" in *" $pid "*) continue ;; esac
       kill -9 "$pid" 2>/dev/null || true
     done
     sleep 1
@@ -2919,7 +3119,35 @@ action_repair_stale_lock() {
     rm -f "$lock" 2>/dev/null && removed=true
   fi
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(obj_from_fields lockExisted "$existed" lockRemoved "$removed")")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields lockExisted "$existed" lockRemoved "$removed" killedProcesses "$killed")")
+}
+
+# Read-only, one round trip: everything the unified repair's step list needs
+# that a plain status does not already carry. Status fields ride along too, so
+# the plugin's decisions (identity scopes, sparse definition, rescue branches)
+# and this action's own facts arrive together.
+action_repair_triage() {
+  local lock lock_exists=false lock_age=""
+  lock="$(stale_lock_path)"
+  if [ -e "$lock" ]; then
+    lock_exists=true
+    local now mt
+    now="$(date +%s)"
+    mt="$(stat -c %Y "$lock" 2>/dev/null || echo "$now")"
+    lock_age=$((now - mt))
+  fi
+  collect_live_processes
+  # Set-aside repositories a re-clone left behind: names only, the manifests
+  # beside them carry the sizes and the plugin already reads those.
+  local prev_gits=""
+  prev_gits="$(cd "$NGB_RUNTIME_DIR" 2>/dev/null && ls -d previous-git-* 2>/dev/null | grep -v '\.json$' || true)"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields \
+    lockExists "$lock_exists" \
+    lockAgeSeconds "$lock_age" \
+    liveProcesses "$LIVE_PROCESSES" \
+    liveGit "$LIVE_GIT" \
+    previousGitDirs "$prev_gits")")
 }
 
 # ---- repository bootstrap (v11) ------------------------------------------------
@@ -3089,7 +3317,7 @@ action_init_repo() {
   }
   if [ "$initial" = "true" ]; then
     if ! require_identity; then
-      init_partial "The first commit was not made: git user.name / user.email are not configured in Termux. Run: git config --global user.name '...' && git config --global user.email '...'  then commit from the plugin."
+      init_partial "The first commit was not made: git user.name / user.email are not configured. Set the identity from the failure window or the settings, then commit from the plugin; the values stay in Termux."
       return 1
     fi
     [ -n "$msg" ] || msg="Initial commit (native git bridge)"
@@ -3570,7 +3798,8 @@ process_request() {
     repair-refetch)        action_repair_refetch || { ok=false; ec=1; } ;;
     repair-reset-upstream) action_repair_reset_upstream || { ok=false; ec=1; } ;;
     repair-drop-backup)    action_repair_drop_backup "$req_file" || { ok=false; ec=1; } ;;
-    repair-stale-lock)     action_repair_stale_lock || { ok=false; ec=1; } ;;
+    repair-stale-lock)     action_repair_stale_lock "$req_file" || { ok=false; ec=1; } ;;
+    repair-triage)         action_repair_triage || { ok=false; ec=1; } ;;
     untrack-file)          action_untrack_file "$req_file" || { ok=false; ec=1; } ;;
     maintenance-scan)      action_maintenance_scan || { ok=false; ec=1; } ;;
     maintenance-prune)     action_maintenance_prune "$req_file" || { ok=false; ec=1; } ;;
@@ -3599,6 +3828,9 @@ process_request() {
     reset-all)             action_reset_all "$req_file" || { ok=false; ec=1; } ;;
     sparse-exclude-add)    action_sparse_exclude_add "$req_file" || { ok=false; ec=1; } ;;
     sparse-exclude-remove) action_sparse_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
+    repair-sparse-definition) action_repair_sparse_definition || { ok=false; ec=1; } ;;
+    identity-drop-global)  action_identity_drop_global || { ok=false; ec=1; } ;;
+    cred-helper-local-reset) action_cred_helper_local_reset || { ok=false; ec=1; } ;;
     exclude-add)           action_exclude_add "$req_file" || { ok=false; ec=1; } ;;
     exclude-remove)        action_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
     exclude-list)          action_exclude_list || { ok=false; ec=1; } ;;
@@ -3637,7 +3869,7 @@ process_request() {
   if [ "$ok" = false ] && [ "$PROFILE_STATE" = "ready" ]; then
     case "$action" in
       # Read-only, or already collecting status themselves.
-      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|maintenance-scan) ;;
+      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|maintenance-scan|repair-triage) ;;
       *)
         error_data="$DATA"
         collect_status_fields

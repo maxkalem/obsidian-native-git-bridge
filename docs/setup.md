@@ -37,6 +37,8 @@ The installer requests storage access (accept the Android dialog), installs git/
 
 Authentication stays entirely in Termux and is configured **per repository**, so two vaults can use two different accounts: an existing PAT via credential helper, a token in the remote URL (the installer offers to move it into this repository's own credential file, mode 600), or an SSH key (generated automatically for SSH remotes; on a device that already has one, the installer offers a separate key for this vault and sets `core.sshCommand` locally). Add the printed public key to your git host. No credential ever reaches the plugin, a result file or any log.
 
+When the installer configures the repository's own credential file, it writes TWO local `credential.helper` lines: an empty value first, then the file. The empty value is what makes the file authoritative — helpers accumulate across scopes and the first that answers wins, so without it a global helper (gh's, for instance) would answer ahead of this repository's own credentials. The global configuration itself is never touched.
+
 ### GitHub OAuth instead of a PAT
 
 Termux has no OAuth of its own, but the **GitHub CLI** is packaged (`pkg install gh`) and its login is a real OAuth **device flow**: it prints a one-time code, you approve it at <https://github.com/login/device> in the phone's browser, and no local port is opened — which is the same "nothing listens, nothing runs in the background" property the bridge itself keeps.

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decideRepair, missingOids, type RepairContext } from "../src/ops/repairJob";
+import {
+  decideRepair,
+  decideStaleLock,
+  missingOids,
+  planRepair,
+  type LockFacts,
+  type RepairContext,
+  type RepairTriageFacts,
+} from "../src/ops/repairJob";
 
 /**
  * The decisions between the repair steps.
@@ -109,5 +117,140 @@ describe("decideRepair", () => {
   it("a refetch that finishes the job ends clean, whatever the branch looked like", () => {
     const d = decideRepair("refetch", { fsckMissing: "", fsckRemaining: "" }, ctx({ ahead: 7 }));
     expect(d.kind).toBe("clean");
+  });
+});
+
+/**
+ * The stale-lock plan. v15 killed blind — every uid process, no questions —
+ * and had never said it closes Termux sessions. The distinction is the
+ * user's: a live git plus a fresh lock is a RUNNING command (wait), a lock
+ * with no process behind it is a corpse from Android stopping Termux (simply
+ * removed), and anything alive means the kill needs a yes.
+ */
+describe("decideStaleLock", () => {
+  const facts = (over: Partial<LockFacts> = {}): LockFacts => ({
+    lockExists: true,
+    lockAgeSeconds: 3600,
+    liveGit: false,
+    liveProcesses: [],
+    ...over,
+  });
+
+  it("no lock, no plan — and above all no kill", () => {
+    expect(decideStaleLock(facts({ lockExists: false, liveGit: true })).kind).toBe("no-lock");
+  });
+
+  it("a live git with a fresh lock is a running command: wait", () => {
+    expect(
+      decideStaleLock(facts({ liveGit: true, lockAgeSeconds: 30, liveProcesses: ["123 git"] })).kind
+    ).toBe("running");
+  });
+
+  it("a live git with an OLD lock is not proof of work: ask before killing", () => {
+    expect(
+      decideStaleLock(facts({ liveGit: true, lockAgeSeconds: 3600, liveProcesses: ["123 git"] }))
+        .kind
+    ).toBe("ask-kill");
+  });
+
+  it("a lock with nothing alive is a corpse: removed without stopping anything", () => {
+    expect(decideStaleLock(facts()).kind).toBe("corpse");
+  });
+
+  it("an unknown lock age never counts as fresh", () => {
+    expect(
+      decideStaleLock(facts({ liveGit: true, lockAgeSeconds: null, liveProcesses: ["123 git"] }))
+        .kind
+    ).toBe("ask-kill");
+  });
+
+  it("non-git processes alive: the kill is needed and needs a yes", () => {
+    expect(decideStaleLock(facts({ liveProcesses: ["77 bash"] })).kind).toBe("ask-kill");
+  });
+});
+
+/**
+ * The unified repair's step planner. The fixture below is the real phone as
+ * the 0.6.6 spec records it: a re-clone took the local identity with the old
+ * .git, the global one remained, a local credential helper exists (global
+ * does not), sparse is off with the derived list still remembering two paths
+ * (the reconcile window's case, not this planner's).
+ */
+describe("planRepair", () => {
+  const base = (over: Partial<RepairTriageFacts> = {}): RepairTriageFacts => ({
+    lock: { lockExists: false, lockAgeSeconds: null, liveGit: false, liveProcesses: [] },
+    identity: { local: true, global: false, any: true },
+    globalCredHelper: false,
+    sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: false },
+    rescueBranches: [],
+    previousGitDirs: [],
+    ...over,
+  });
+
+  it("plans nothing for a healthy repository", () => {
+    expect(planRepair(base())).toEqual([]);
+  });
+
+  it("replays the phone: no local identity means offer-set, and nothing else", () => {
+    const plan = planRepair(
+      base({
+        identity: { local: false, global: true, any: true },
+        sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false },
+      })
+    );
+    expect(plan).toEqual([{ step: "identity", act: "offer-set" }]);
+  });
+
+  it("offers the global removal ONLY beside an existing local identity", () => {
+    expect(planRepair(base({ identity: { local: true, global: true, any: true } }))).toEqual([
+      { step: "identity", act: "offer-drop-global" },
+    ]);
+    // No identity anywhere: set first; removal is never on the plan.
+    const plan = planRepair(base({ identity: { local: false, global: false, any: false } }));
+    expect(plan).toEqual([{ step: "identity", act: "offer-set" }]);
+  });
+
+  it("plans the sparse repair for the emptying default and for a missing base", () => {
+    expect(
+      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true } }))
+    ).toEqual([{ step: "sparse", act: "repair-definition" }]);
+    expect(
+      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: false, hasEmptyingDefault: false } }))
+    ).toEqual([{ step: "sparse", act: "repair-definition" }]);
+    // Cone mode is a decision, not a repair; disabled sparse plans nothing.
+    expect(
+      planRepair(base({ sparse: { enabled: true, cone: true, hasBase: false, hasEmptyingDefault: true } }))
+    ).toEqual([{ step: "sparse", act: "cone-needs-decision" }]);
+    expect(
+      planRepair(base({ sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false } }))
+    ).toEqual([]);
+  });
+
+  it("keeps the user's order: blockers first, leftovers last", () => {
+    const plan = planRepair(
+      base({
+        lock: { lockExists: true, lockAgeSeconds: 9999, liveGit: false, liveProcesses: [] },
+        identity: { local: false, global: true, any: true },
+        globalCredHelper: true,
+        sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true },
+        rescueBranches: ["ngb-rescue-20260810T235946Z"],
+        previousGitDirs: ["previous-git-20260807T101500Z"],
+      })
+    );
+    expect(plan.map((p) => `${p.step}:${p.act}`)).toEqual([
+      "lock:remove-corpse",
+      "identity:offer-set",
+      "cred-helper:offer-reset",
+      "sparse:repair-definition",
+      "leftovers:rescue-branches",
+      "leftovers:previous-git",
+    ]);
+  });
+
+  it("a running git command stops the plan at the lock step", () => {
+    const plan = planRepair(
+      base({ lock: { lockExists: true, lockAgeSeconds: 5, liveGit: true, liveProcesses: ["1 git"] } })
+    );
+    expect(plan[0]).toEqual({ step: "lock", act: "wait-running" });
   });
 });
