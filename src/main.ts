@@ -127,6 +127,7 @@ import {
   decideRepair,
   decideStaleLock,
   planRepair,
+  summarizeFsckMissing,
   type RepairContext,
   type RepairStage,
   type RepairTriageFacts,
@@ -5015,6 +5016,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       [
         d.removedCount !== undefined ? `removed: ${d.removedCount}` : "",
         (d.recoveredBy ?? "") !== "" ? `recovered by: ${d.recoveredBy}` : "",
+        d.recoveredCount !== undefined ? `recovered: ${d.recoveredCount}` : "",
         (d.fsckMissing ?? "").trim() !== ""
           ? `still missing:\n${(d.fsckMissing ?? "").trim()}`
           : "still missing: nothing",
@@ -5024,6 +5026,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     );
     this.absorbStatusData(d);
     return result;
+  }
+
+  /**
+   * Every repair ending that leaves work behind carries this button: the user
+   * fixes what the window named (a lock, an identity, a Termux command) and
+   * runs the walk again from where they stand, instead of hunting the palette
+   * (asked for from the device, 2026-08-25). Skips the opening confirmation —
+   * the window they are looking at IS the state that confirmation describes.
+   */
+  private repairRunAgainAction(): { label: string; onClick: () => void } {
+    return { label: "Run the repair again", onClick: () => void this.cmdRepairObjects(true) };
   }
 
   /**
@@ -5094,12 +5107,16 @@ export default class NativeGitBridgePlugin extends Plugin {
             fsckMissing: (fd.fsckMissing ?? "").trim(),
             fsckRemaining: (fd.fsckRemaining ?? "").trim(),
           };
-          recoveredBy = "targeted";
+          // The runner (v16, truthful since the device day this lied on) sends
+          // recoveredBy only when the asked-for objects actually materialised;
+          // an older runner sends "targeted" unconditionally and is taken at
+          // its word — the field is informative, not load-bearing.
+          recoveredBy = (fd.recoveredBy ?? "").trim();
           stage = "fetch-missing";
           continue;
         }
         if (decision.kind === "ask-refetch") {
-          const proceed = await this.confirmRefetch(findings.fsckMissing);
+          const proceed = await this.confirmRefetch(summarizeFsckMissing(findings.fsckMissing));
           if (!proceed) {
             new ResultModal(
               this.app,
@@ -5107,13 +5124,16 @@ export default class NativeGitBridgePlugin extends Plugin {
               [
                 ...(summary.length > 0 ? [...summary, ""] : []),
                 removedLine,
-                "The targeted fetch did not bring everything back. The remaining step downloads the whole history again; run the repair again when you are ready for that.",
-                findings.fsckMissing,
+                (recoveredBy === ""
+                  ? "The targeted fetch recovered nothing — this remote does not hand out single objects."
+                  : "The targeted fetch did not bring everything back.") +
+                  " The remaining step downloads the whole history again; run the repair again when you are ready for that.",
+                summarizeFsckMissing(findings.fsckMissing),
               ],
               {
                 isError: true,
                 stderr: findings.fsckRemaining,
-                actions: finalActions.length > 0 ? finalActions : undefined,
+                actions: [...finalActions, this.repairRunAgainAction()],
               }
             ).open();
             return;
@@ -5151,6 +5171,47 @@ export default class NativeGitBridgePlugin extends Plugin {
         ];
         if (decision.kind === "clean") {
           lines.push("", "The object store is complete: git can read everything it references.");
+          // Step 7/7 (footprint), only when the walk ends whole, and only when
+          // the lightweight toggle says the store is SUPPOSED to be small: a
+          // repair refetch stuffs the packs with every blob the filter had
+          // shed, while the toggle (which mirrors the repository's config,
+          // untouched by a refetch) still reads lightweight. Measure what the
+          // filter allows shedding and offer exactly that, one tap, real
+          // number (decision 4). Toggles off mean the full history is the
+          // configured state — nothing to check and nothing to ask (the
+          // user's rule, 2026-08-26). The shallow toggle needs no check of
+          // its own: it mirrors `.git/shallow`, so either the cut survived
+          // (nothing exceeded) or the toggle itself now shows the loss. Never
+          // offered on an incomplete store: pruning while objects are missing
+          // can destroy the loose files a recovery would want. The 100 MB
+          // floor is the lazy-fetch allowance — a healthy lightweight store
+          // legitimately holds the blobs recent pulls brought in.
+          const fp7 = this.footprintState();
+          if (fp7?.partial === true && (this.lastRunnerVersion >= 14 || this.lastRunnerVersion === 0)) {
+            const meas = await this.repairStep("maintenance-scan", {}, "repair 7/7: footprint check");
+            if (meas !== null && meas.ok) {
+              const d7 = meas.data ?? {};
+              const before = parseCountObjects(d7.countObjects ?? "");
+              const blobKb = Number(d7.blobDiskKb ?? "0");
+              if (blobKb >= 100 * 1024) {
+                lines.push(
+                  "",
+                  `This repository is set to stay lightweight, but its packs hold ${formatSize(blobKb)} of file content the filter allows shedding${
+                    recoveredBy === "refetch" || recoveredBy === "recovery copy"
+                      ? " — the refetch brought back what had been shed"
+                      : ""
+                  }. The cleanup takes it back.`
+                );
+                finalActions = [
+                  ...finalActions,
+                  {
+                    label: `Free up ${formatSize(blobKb)}…`,
+                    onClick: () => void this.runMaintenanceSteps(before),
+                  },
+                ];
+              }
+            }
+          }
           new ResultModal(this.app, "Repository repaired", lines, {
             stdout: sd.removedObjects,
             actions: finalActions.length > 0 ? finalActions : undefined,
@@ -5166,7 +5227,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           new ResultModal(this.app, "Damaged objects left alone", lines, {
             stderr: findings.fsckRemaining,
             isError: true,
-            actions: finalActions.length > 0 ? finalActions : undefined,
+            actions: [...finalActions, this.repairRunAgainAction()],
           }).open();
           return;
         }
@@ -5181,7 +5242,7 @@ export default class NativeGitBridgePlugin extends Plugin {
               ctx.ahead > 0 ? `${ctx.ahead} unpushed commit${ctx.ahead === 1 ? "" : "s"}` : "a damaged index"
             }), so the damage is inside what was never pushed. Downloading cannot fix it and cloning again would throw the local commits away.`,
             "Rebuilding the branch on the remote state keeps every file on disk exactly as it is: the content of the local commits becomes ordinary uncommitted changes, the next sync commits it once, and a backup branch keeps the old history reachable.",
-            findings.fsckMissing
+            summarizeFsckMissing(findings.fsckMissing)
           );
           new ResultModal(this.app, "Repository still incomplete", lines, {
             stderr: findings.fsckRemaining,
@@ -5193,6 +5254,7 @@ export default class NativeGitBridgePlugin extends Plugin {
                 onClick: () => void this.cmdRepairResetUpstream(ctx.ahead),
               },
               ...finalActions,
+              this.repairRunAgainAction(),
             ],
           }).open();
           return;
@@ -5201,12 +5263,12 @@ export default class NativeGitBridgePlugin extends Plugin {
         lines.push(
           "",
           "The remote does not have these objects either, so nothing can bring them back: the history that referenced them is gone on both sides. Cloning the vault again is the way out — your notes on disk are not affected by it.",
-          findings.fsckMissing
+          summarizeFsckMissing(findings.fsckMissing)
         );
         new ResultModal(this.app, "Repository still incomplete", lines, {
           stderr: findings.fsckRemaining,
           isError: true,
-          actions: finalActions.length > 0 ? finalActions : undefined,
+          actions: [...finalActions, this.repairRunAgainAction()],
         }).open();
         return;
       }

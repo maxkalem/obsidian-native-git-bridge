@@ -1794,7 +1794,22 @@ EOF
     ERROR=$(err_json "GIT_FAILED" "The targeted fetch could not run: $RECOVER_ERR" "" ""); return 1
   fi
   repair_verify
-  DATA=$(merge_data "$DATA" "$(obj_from_fields recoveredBy "targeted")")
+  # recoveredBy is a claim, and a phone caught it lying: a remote that refuses
+  # to hand out single objects leaves every asked-for oid missing while the
+  # fetch itself exits clean, and three walks in a row logged "recovered by:
+  # targeted" over an unchanged missing list. Count what actually materialised
+  # (cat-file -e answers from presence) and claim only what is there.
+  local recovered=0
+  while IFS= read -r oid; do
+    [ -z "$oid" ] && continue
+    git cat-file -e "$oid" 2>/dev/null && recovered=$((recovered + 1))
+  done <<EOF
+$oids
+EOF
+  DATA=$(merge_data "$DATA" "$(obj_from_fields recoveredCount "$recovered")")
+  if [ "$recovered" -gt 0 ]; then
+    DATA=$(merge_data "$DATA" "$(obj_from_fields recoveredBy "targeted")")
+  fi
 }
 
 action_repair_refetch() {
@@ -2822,8 +2837,17 @@ action_maintenance_scan() {
   if [ -d "$packdir" ]; then
     packs="$(find "$packdir" -maxdepth 1 -type f -printf '%s\t%f\n' 2>/dev/null | sort -rn || true)"
   fi
+  # How much of the object store is file CONTENT (blobs), by disk size. On a
+  # lightweight (blob:none) repository this is what a filtered repack can
+  # shed, so it is the allowance check the repair's final window makes: a
+  # repair refetch stuffs the packs with every blob the filter had shed, and
+  # the toggle state alone cannot see that. Guarded: a store mid-damage may
+  # refuse the walk, and a missing number must read as zero, never as a lie.
+  local blob_kb
+  blob_kb="$(git cat-file --batch-all-objects --batch-check='%(objecttype) %(objectsize:disk)' 2>/dev/null | awk '$1=="blob"{s+=$2} END{printf "%d", s/1024}')"
+  [ -n "$blob_kb" ] || blob_kb=0
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(obj_from_fields countObjects "$counts" packFiles "$packs")")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields countObjects "$counts" packFiles "$packs" blobDiskKb "$blob_kb")")
 }
 
 # Remove what holds no data anyone can reach: temporary pack files left by
@@ -4074,18 +4098,35 @@ done
 # --- pass 2: drain every queue, globally oldest first --------------------------
 # Request ids embed a UTC timestamp, so sorting by file name orders the work
 # across profiles chronologically. One request at a time, as before.
-QUEUE=()
-for conf in "${HEALTHY_FILES[@]}"; do
-  read_profile_file "$conf" || continue
-  for f in "$P_RUNTIME"/requests/*.json; do
-    [ -e "$f" ] || continue
-    QUEUE+=("$(printf '%s\t%s\t%s' "$(basename "$f")" "$conf" "$f")")
+#
+# The queue is RE-SCANNED after each drain rather than snapshotted once: a
+# request queued while this runner works (its trigger bounces off the
+# single-instance lock and its runner exits without processing) used to wait
+# for the NEXT trigger, which on a phone may never come — the plugin times out
+# at 200 s while the request sits there. One device day produced three real
+# hangs of exactly this shape: a pull queued behind a seven-minute
+# repair-refetch, the installer's self-test ping, and two morning timeouts
+# behind a slow network pull. Bounded, so vaults that queue faster than the
+# runner drains cannot keep this one-shot process alive forever; whatever
+# remains after the budget waits for the next trigger, as everything did
+# before.
+DRAIN_PASS=0
+while :; do
+  DRAIN_PASS=$((DRAIN_PASS + 1))
+  QUEUE=()
+  for conf in "${HEALTHY_FILES[@]}"; do
+    read_profile_file "$conf" || continue
+    for f in "$P_RUNTIME"/requests/*.json; do
+      [ -e "$f" ] || continue
+      QUEUE+=("$(printf '%s\t%s\t%s' "$(basename "$f")" "$conf" "$f")")
+    done
   done
-done
 
-if [ "${#QUEUE[@]}" -eq 0 ]; then
-  log "RUN no pending requests"
-else
+  if [ "${#QUEUE[@]}" -eq 0 ]; then
+    [ "$DRAIN_PASS" -eq 1 ] && log "RUN no pending requests"
+    break
+  fi
+  [ "$DRAIN_PASS" -gt 1 ] && log "RUN pass $DRAIN_PASS: ${#QUEUE[@]} request(s) arrived while draining"
   mapfile -t SORTED < <(printf '%s\n' "${QUEUE[@]}" | sort)
   ACTIVE_CONF=""
   for entry in "${SORTED[@]}"; do
@@ -4103,7 +4144,11 @@ else
       log "SKIP $(basename "$f") already claimed"
     fi
   done
-fi
+  if [ "$DRAIN_PASS" -ge 10 ]; then
+    log "RUN rescan budget exhausted; anything still queued waits for the next trigger"
+    break
+  fi
+done
 
 for conf in "${HEALTHY_FILES[@]}"; do
   activate_profile "$conf" >/dev/null 2>&1 || continue

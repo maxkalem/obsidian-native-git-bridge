@@ -60,7 +60,9 @@ fetch_one() { # $1 file name
   if [ -n "$BASE_DIR" ]; then
     cp "$BASE_DIR/$1" "$TMP/$1"
   else
-    curl -fsSL "$BASE/$1" -o "$TMP/$1"
+    # --progress-bar instead of full silence: on a slow connection a silent
+    # download reads as a hang, and this script is always watched by a person.
+    curl -fL --progress-bar "$BASE/$1" -o "$TMP/$1"
   fi
 }
 

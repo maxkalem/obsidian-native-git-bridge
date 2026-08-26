@@ -1056,6 +1056,8 @@ describe("repository bootstrap", () => {
     await (h.plugin as Any).runRepairJob();
     // The safe fix ran by itself; the object steps followed; nothing else
     // became a modal mid-walk (decision 4: seven steps, not seven taps).
+    // No lightweight toggle here, so the footprint check does not even run:
+    // the full history IS the configured state (the user's rule, 2026-08-26).
     expect(sent).toEqual(["repair-triage", "repair-sparse-definition", "repair-scan"]);
     expect(__modalTitles).toContain("Repository repaired");
     // What remains rides the final window as buttons, ordering rule included:
@@ -1064,6 +1066,147 @@ describe("repository bootstrap", () => {
     expect(__modalActionLabels).not.toContain("Remove the global identity…");
     expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
     expect(__modalActionLabels).toContain("Delete repair backup branch…");
+    expect(__modalActionLabels.some((l: string) => l.startsWith("Free up"))).toBe(false);
+  });
+
+  it("a clean walk on a LIGHTWEIGHT repository measures the blob bloat and offers exactly that", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 16;
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "local",
+            userEmailScopes: "local",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            previousGitDirs: "",
+            // The lightweight toggle is ON: the config survived the refetch.
+            shallow: "false",
+            partialFilter: "blob:none",
+          },
+        };
+      }
+      if (req.action === "maintenance-scan") {
+        // The device case: a repair refetch stuffed 4.3 GB of blobs back into
+        // a repository whose filter says they should not be there.
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            partialFilter: "blob:none",
+            countObjects: "count: 0\nsize: 0\nin-pack: 14520\npacks: 2\nsize-pack: 4600000\nsize-garbage: 0",
+            blobDiskKb: "4500000",
+          },
+        };
+      }
+      // repair-scan: nothing missing, nothing damaged.
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          partialFilter: "blob:none",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(sent).toEqual(["repair-triage", "repair-scan", "maintenance-scan"]);
+    expect(__modalTitles).toContain("Repository repaired");
+    // One tap, the measured number, no hunting through the settings: the
+    // label carries what the FILTER allows shedding, not the raw store size.
+    expect(__modalActionLabels.some((l: string) => /^Free up 4\.[0-9] GB…$/.test(l))).toBe(true);
+  });
+
+  it("a lightweight repository within its allowance gets no cleanup offer", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 16;
+    answerWith(h, (req: Any) => {
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "local",
+            userEmailScopes: "local",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            previousGitDirs: "",
+            shallow: "false",
+            partialFilter: "blob:none",
+          },
+        };
+      }
+      if (req.action === "maintenance-scan") {
+        // 40 MB of blobs is what recent pulls legitimately brought in.
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            partialFilter: "blob:none",
+            countObjects: "count: 0\nsize: 0\nin-pack: 900\npacks: 1\nsize-pack: 260000\nsize-garbage: 0",
+            blobDiskKb: "40960",
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          partialFilter: "blob:none",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(__modalTitles).toContain("Repository repaired");
+    expect(__modalActionLabels.some((l: string) => l.startsWith("Free up"))).toBe(false);
   });
 
   it("the unified repair stops at ownership: nothing else can run, the fix is the clipboard", async () => {

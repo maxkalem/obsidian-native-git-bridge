@@ -36,6 +36,15 @@ describe("identitySetupCommand", () => {
     expect(cmd).not.toMatch(/--get (user|credential)/);
   });
 
+  it("pages nothing: the listing runs at a tty where a broken core.pager kills it", () => {
+    // A real device had core.pager pointing at a missing program; the listing
+    // then died with "unable to execute pager" AFTER the identity was written,
+    // which read as the whole command failing. --no-pager is the defence.
+    expect(identitySetupCommand(REPO)).toContain(
+      "git --no-pager config --local --name-only --get-regexp"
+    );
+  });
+
   it("trims a trailing slash so the quoted path stays canonical", () => {
     expect(identitySetupCommand(`${REPO}/`)).toContain(`cd "${REPO}"`);
   });

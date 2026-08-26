@@ -154,11 +154,14 @@ fi
 # rather than assumed. The plugin's partial-clone shedding needs
 # `repack --filter` (git 2.42+); prefetching the visible files afterwards
 # (`git backfill --sparse`) needs 2.49+.
-say "-- Refreshing the package index..."
-pkg update -y >/dev/null 2>&1 || say "   (index refresh failed; installs may use stale versions)"
+# apt's own output is shown rather than swallowed: the refresh is a network
+# step that can sit for minutes retrying a dead mirror, and a silent line
+# reads as a hang. A person is watching this terminal; let apt narrate.
+say "-- Refreshing the package index (apt's own output follows; a dead mirror can take a while)..."
+pkg update -y || say "   (index refresh failed; installs may use stale versions)"
 GIT_BEFORE="$(git --version 2>/dev/null | awk '{print $3}')"
 say "-- Installing/upgrading packages (git, jq, openssh)..."
-pkg install -y git jq openssh >/dev/null || fail "pkg install failed"
+pkg install -y git jq openssh || fail "pkg install failed"
 GIT_VERSION="$(git --version 2>/dev/null | awk '{print $3}')"
 if [ -n "$GIT_BEFORE" ] && [ "$GIT_BEFORE" != "$GIT_VERSION" ]; then
   say "-- git $GIT_BEFORE -> $GIT_VERSION"
@@ -226,7 +229,13 @@ say "-- Runner installed to $CONF_DIR/runner.sh."
 # runner does it on its first run, so one implementation covers both paths.
 # NGB_SCAN_ROOTS="" keeps this run from scanning shared storage - it is here to
 # migrate, and a scan of a full phone would look like a hang.
-NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" >/dev/null 2>&1 || true
+#
+# The run also drains anything already queued — a pending sync or pull is a
+# network operation that can take minutes — so it runs in interactive mode:
+# the runner narrates each step to this terminal instead of looking hung
+# (the same reason apt's output is shown above).
+say "-- First runner pass (config migration; drains any queued requests — live output follows)..."
+NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" interactive || true
 
 # 5. Repository path: use the argument, otherwise auto-detect vaults
 # (folders on shared storage containing both .obsidian and .git).
@@ -507,6 +516,7 @@ esac
 
 # Non-interactive auth self-test (fails fast instead of hanging).
 if [ -n "$REMOTE_URL" ]; then
+  say "-- Checking non-interactive access to the remote (up to 30 s)..."
   if GIT_TERMINAL_PROMPT=0 timeout 30 git -C "$REPO_DIR" ls-remote --heads origin >/dev/null 2>&1; then
     say "-- Remote authentication check PASSED (non-interactive ls-remote)."
   else
@@ -531,19 +541,52 @@ fi
 grep -qxF "$EXCLUDE_LINE" "$EXCLUDE_FILE" 2>/dev/null || printf '%s\n' "$EXCLUDE_LINE" >> "$EXCLUDE_FILE"
 say "-- Runtime dir excluded via .git/info/exclude (local only)."
 
-# 10. Test round trip: write a ping request and run the runner once.
-mkdir -p "$RUNTIME_DIR/requests"
-TEST_ID="r-$(date -u +%Y%m%dT%H%M%SZ)-install"
-cat > "$RUNTIME_DIR/requests/$TEST_ID.json" <<REQ
-{"protocolVersion":1,"id":"$TEST_ID","token":"$TOKEN","action":"ping","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":{}}
+# 10. Test round trip: write a ping request and run the runner.
+#
+# The runner is single-instance locked and snapshots the queue when it starts,
+# so a runner already serving an Obsidian trigger (sync-on-close fires exactly
+# when the user closes Obsidian to open Termux) can neither see a ping written
+# after its start nor let this script's run in: that run waits 20 s on the
+# lock and exits 0 without processing. A single silent attempt therefore
+# reported "Self-test failed" on a perfectly healthy install. Retry with a
+# FRESH ping each time (a reused request would only earn an EXPIRED answer),
+# waiting for the lock to clear between attempts. The lock-exit line lands in
+# the global runner.log, not the vault's, so the failure message names both.
+run_self_test() {
+  mkdir -p "$RUNTIME_DIR/requests"
+  local attempt=1 test_id waited
+  while :; do
+    test_id="r-$(date -u +%Y%m%dT%H%M%SZ)-install$attempt"
+    cat > "$RUNTIME_DIR/requests/$test_id.json" <<REQ
+{"protocolVersion":1,"id":"$test_id","token":"$TOKEN","action":"ping","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":{}}
 REQ
-"$CONF_DIR/runner.sh" || fail "runner test run failed"
-if jq -e '.ok == true' "$RUNTIME_DIR/results/$TEST_ID.json" >/dev/null 2>&1; then
-  say "-- Self-test PASSED (ping round trip)."
-  rm -f "$RUNTIME_DIR/results/$TEST_ID.json"
-else
-  fail "Self-test failed; see $RUNTIME_DIR/runner.log"
-fi
+    say "-- Self-test: running the runner (it drains anything queued first; live output follows)..."
+    "$CONF_DIR/runner.sh" interactive || fail "runner test run failed"
+    if jq -e '.ok == true' "$RUNTIME_DIR/results/$test_id.json" >/dev/null 2>&1; then
+      say "-- Self-test PASSED (ping round trip)."
+      rm -f "$RUNTIME_DIR/results/$test_id.json"
+      return 0
+    fi
+    rm -f "$RUNTIME_DIR/requests/$test_id.json"
+    if [ "$attempt" -ge 3 ]; then
+      break
+    fi
+    attempt=$((attempt + 1))
+    if [ -d "$CONF_DIR/.runner.lock" ]; then
+      say "-- Another runner is busy (an operation Obsidian triggered); waiting for it to finish..."
+      waited=0
+      while [ -d "$CONF_DIR/.runner.lock" ] && [ "$waited" -lt 300 ]; do
+        sleep 2
+        waited=$((waited + 2))
+        if [ $((waited % 20)) -eq 0 ]; then
+          say "   ...still waiting for the other runner (${waited}s of 300)"
+        fi
+      done
+    fi
+  done
+  fail "Self-test failed. If $CONF_DIR/runner.log ends with 'another runner is active', an Obsidian-triggered operation outlasted the retries: let it finish and re-run this installer. Otherwise see $RUNTIME_DIR/runner.log"
+}
+run_self_test
 
 # 11. Auto-pairing: the plugin imports this file on next start and deletes it,
 # so the token never has to be copied by hand. (It transits vault storage once;

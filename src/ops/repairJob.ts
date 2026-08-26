@@ -207,3 +207,20 @@ export function decideRepair(
   return { kind: "missing-remote" };
 }
 
+/**
+ * fsck names the same broken link once per referencing entry, so ten missing
+ * trees arrived at a phone as forty identical lines filling the whole window
+ * (screenshot, 2026-08-25). For DISPLAY only: collapse repeats into one line
+ * with a count, keeping first-seen order. Logs and the stderr fold keep the
+ * raw text — the repetition count is itself evidence there.
+ */
+export function summarizeFsckMissing(text: string): string {
+  const counts = new Map<string, number>();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([line, n]) => (n > 1 ? `${line} (×${n})` : line)).join("\n");
+}
+

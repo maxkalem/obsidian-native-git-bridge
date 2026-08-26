@@ -4,6 +4,7 @@ import {
   decideStaleLock,
   missingOids,
   planRepair,
+  summarizeFsckMissing,
   type LockFacts,
   type RepairContext,
   type RepairTriageFacts,
@@ -252,5 +253,29 @@ describe("planRepair", () => {
       base({ lock: { lockExists: true, lockAgeSeconds: 5, liveGit: true, liveProcesses: ["1 git"] } })
     );
     expect(plan[0]).toEqual({ step: "lock", act: "wait-running" });
+  });
+});
+
+describe("summarizeFsckMissing", () => {
+  it("collapses fsck's per-reference repeats into one line with a count", () => {
+    // The device case: ten missing trees rendered as forty identical lines.
+    const text = [
+      "broken link from    tree aaaa",
+      "broken link from    tree aaaa",
+      "broken link from    tree aaaa",
+      "broken link from    tree bbbb",
+    ].join("\n");
+    expect(summarizeFsckMissing(text)).toBe(
+      "broken link from    tree aaaa (×3)\nbroken link from    tree bbbb"
+    );
+  });
+
+  it("keeps first-seen order and single lines unmarked", () => {
+    expect(summarizeFsckMissing("b\na\nb")).toBe("b (×2)\na");
+  });
+
+  it("drops blank lines and survives empty input", () => {
+    expect(summarizeFsckMissing("")).toBe("");
+    expect(summarizeFsckMissing("\n\n a \n")).toBe("a");
   });
 });

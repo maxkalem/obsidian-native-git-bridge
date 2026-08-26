@@ -23,6 +23,13 @@ function termuxRepoPath(repoPathHint: string): string | null {
  * the values visible as they are typed, and the closing `--name-only` listing
  * is what makes git answer visibly that both keys now exist — without ever
  * printing a value into a log the plugin could see.
+ *
+ * The listing carries `--no-pager`: it runs at a real tty, where git pages
+ * multi-line output, and a device with a broken `core.pager` (a program that
+ * does not exist — a real phone has exactly that) dies with "unable to
+ * execute pager" AFTER the identity was already written, which reads as the
+ * whole command failing. The runner is immune via `-c core.pager=cat`; a
+ * pasted command has to defend itself.
  */
 export function identitySetupCommand(repoPathHint: string): string | null {
   const repo = termuxRepoPath(repoPathHint);
@@ -30,7 +37,7 @@ export function identitySetupCommand(repoPathHint: string): string | null {
   return (
     `cd "${repo}" && read -p "user.name: " n && git config --local user.name "$n" && ` +
     `read -p "user.email: " e && git config --local user.email "$e" && ` +
-    `git config --local --name-only --get-regexp '^user\\.'`
+    `git --no-pager config --local --name-only --get-regexp '^user\\.'`
   );
 }
 

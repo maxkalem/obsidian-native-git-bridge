@@ -1748,6 +1748,112 @@ check 'grep -qx "https://ghp_sometoken123:@github.com" "$CREDLAB/creds"' "a colo
 check 'grep -qx "https://user:pass@example.com" "$CREDLAB/creds"' "a user:password line is left exactly alone"
 check 'grep -qx "https://git:tok@host.tld" "$CREDLAB/creds"' "…and so is every other well-formed line"
 
+echo "# installer: run_self_test retries past a busy runner's single-instance lock (lifted)"
+# The runner snapshots its queue at start, so a runner already serving an
+# Obsidian trigger (sync-on-close fires exactly when the user closes Obsidian
+# to open Termux) can never see the installer's ping, and the installer's own
+# run exits 0 on the lock without processing. One attempt used to report
+# "Self-test failed" on a perfectly healthy install; the self-test now retries
+# with a fresh ping once the lock clears.
+STLAB="$ROOT/selftest-lab"
+mkdir -p "$STLAB/conf" "$STLAB/runtime"
+# The fake runner behaves like the real one at the lock: while the lock dir
+# exists it exits 0 writing nothing; once it is gone it answers every queued
+# request with ok=true.
+cat > "$STLAB/conf/runner.sh" <<'FAKE'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")" && pwd)"
+[ -d "$d/.runner.lock" ] && exit 0
+rt="$d/../runtime"
+mkdir -p "$rt/results"
+for f in "$rt"/requests/*.json; do
+  [ -e "$f" ] || continue
+  printf '{"ok":true}\n' > "$rt/results/$(basename "$f")"
+  rm -f "$f"
+done
+exit 0
+FAKE
+chmod +x "$STLAB/conf/runner.sh"
+check 'grep -q "^run_self_test() {" "$SCRIPT_DIR/native-git-bridge/termux/install.sh"' "the installer defines run_self_test (the probe below lifts the real one)"
+ST_OUT="$STLAB/out.txt"
+mkdir "$STLAB/conf/.runner.lock"
+( sleep 3; rmdir "$STLAB/conf/.runner.lock" ) &
+(
+  CONF_DIR="$STLAB/conf"
+  RUNTIME_DIR="$STLAB/runtime"
+  TOKEN="st-token"
+  say() { printf '%s\n' "$*" >> "$ST_OUT"; }
+  fail() { printf 'FAILED %s\n' "$*" >> "$ST_OUT"; exit 1; }
+  eval "$(sed -n '/^run_self_test() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+  run_self_test
+)
+check 'grep -q "Self-test PASSED" "$ST_OUT"' "a ping blocked by a busy runner's lock passes on the retry"
+check 'grep -q "Another runner is busy" "$ST_OUT"' "…and the wait was announced rather than silent"
+check 'grep -q "live output follows" "$ST_OUT"' "…and each runner run is announced before it starts"
+check '[ -z "$(ls "$STLAB/runtime/requests" 2>/dev/null)" ] && [ -z "$(ls "$STLAB/runtime/results" 2>/dev/null)" ]' "…and no stale ping request or result is left behind"
+# The honest failure: a runner that never answers and no lock to wait on.
+ST2="$ROOT/selftest-lab-dead"
+mkdir -p "$ST2/conf" "$ST2/runtime"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ST2/conf/runner.sh"
+chmod +x "$ST2/conf/runner.sh"
+ST2_OUT="$ST2/out.txt"
+(
+  CONF_DIR="$ST2/conf"
+  RUNTIME_DIR="$ST2/runtime"
+  TOKEN="st-token"
+  say() { printf '%s\n' "$*" >> "$ST2_OUT"; }
+  fail() { printf 'FAILED %s\n' "$*" >> "$ST2_OUT"; exit 1; }
+  eval "$(sed -n '/^run_self_test() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+  run_self_test
+) || true
+check 'grep -q "FAILED Self-test failed" "$ST2_OUT"' "a runner that never answers still fails the self-test after the retries"
+
+echo "# runner: a request queued while draining is served by the same run (rescan)"
+# The queue used to be a snapshot taken once at start, so a request queued
+# while the runner worked waited for the NEXT trigger — its own trigger had
+# bounced off the single-instance lock. On a phone the next trigger may be
+# hours away; a device day produced three hangs of exactly this shape. The
+# drain loop now re-scans until the queue is empty (bounded).
+RSC="$ROOT/rescan"
+RSCCONF="$ROOT/conf-rescan"
+mkdir -p "$RSC" "$RSCCONF"
+rscrun() { NGB_CONFIG="$RSCCONF/config" NGB_SCAN_ROOTS="$RSC" bash "$RUNNER" "$@"; }
+git init -q --bare "$RSC/remote.git"
+git clone -q "$RSC/remote.git" "$RSC/vault" 2>/dev/null
+git -C "$RSC/vault" config user.email test@example.com
+git -C "$RSC/vault" config user.name Test
+echo note > "$RSC/vault/note.md"
+git -C "$RSC/vault" add -A
+git -C "$RSC/vault" commit -qm initial
+git -C "$RSC/vault" push -q origin HEAD
+RSC_RT="$RSC/vault/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$RSC_RT/requests"
+RSC_TOKEN="rescan-token"
+cat > "$RSCCONF/config" <<CONF
+NGB_REPO_DIR="$RSC/vault"
+NGB_TOKEN="$RSC_TOKEN"
+NGB_RUNTIME_DIR="$RSC_RT"
+CONF
+rscreq() { # $1 id, $2 action
+  cat > "$RSC_RT/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$RSC_TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":{}}
+REQ
+}
+rscreq r-20260101T000000Z-rescanA repair-scan
+# The watcher queues B the moment A visibly STARTS (its progress file appears).
+# That is strictly after the first snapshot was taken — A was claimed from
+# it — so a served B can only mean the drain loop re-scanned the queue.
+(
+  while [ ! -e "$RSC_RT/progress/r-20260101T000000Z-rescanA.txt" ]; do sleep 0.01; done
+  rscreq r-20260101T000001Z-rescanB status
+) &
+RSC_WATCH=$!
+rscrun
+wait "$RSC_WATCH" 2>/dev/null || true
+check '[ -e "$RSC_RT/results/r-20260101T000001Z-rescanB.json" ]' "a request queued while the runner drained was served by the same run"
+check 'jq -e ".ok == true" "$RSC_RT/results/r-20260101T000001Z-rescanB.json" >/dev/null 2>&1' "…and it answered ok"
+check 'grep -rq "arrived while draining" "$RSC_RT" "$RSCCONF" 2>/dev/null' "…through the re-scan, not the first snapshot"
+
 # ---------------------------------------------------------------------------
 # phase 9: getting OUT of states the plugin used to be unable to leave.
 #
@@ -2254,6 +2360,7 @@ RES="$RUNTIME/results/r-20260810T100001Z-rep01b.json"
 check 'jq -e ".ok == true" "$RES" >/dev/null' "repair-fetch-missing runs"
 check '[ -z "$(jq -r ".data.fsckMissing" "$RES")" ]' "…and nothing is missing afterwards"
 check '[ "$(jq -r .data.recoveredBy "$RES")" = "targeted" ]' "…recovered by asking, not by downloading the history"
+check '[ "$(jq -r .data.recoveredCount "$RES")" -ge 1 ]' "…and the recovery is counted, not assumed"
 check 'git cat-file -p "$VSHA" >/dev/null 2>&1' "…the truncated object is back and readable"
 check 'jq -er ".data.branchInfo" "$RES" | grep -q "branch.head"' "…and fresh status rides along now that the repository is readable again"
 
@@ -2400,6 +2507,17 @@ RES="$RUNTIME/results/r-20260810T100030Z-rep04.json"
 check 'jq -r ".data.fsckMissing" "$RES" | grep -q "$ORPHAN"' "the scan names the missing object"
 check '[ "$(jq -r .data.aheadCount "$RES")" -ge 1 ]' "…and reports the branch ahead of upstream: the damage is local-only"
 check '[ "$(jq -r .data.hasUpstream "$RES")" = "true" ]' "…with an upstream to rebuild on"
+
+# The device case (2026-08-25): a targeted fetch for an object the remote never
+# had exits clean while the object stays missing, and the old result still
+# claimed "recovered by: targeted" — three walks in a row logged that over an
+# unchanged missing list. The claim is now counted, never assumed.
+req "r-20260810T100030Z-rep04a" repair-fetch-missing "$TOKEN" "{\"oids\":[\"$ORPHAN\"]}"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T100030Z-rep04a.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "a targeted fetch for an object the remote never had still runs"
+check '[ "$(jq -r .data.recoveredCount "$RES")" = "0" ]' "…counts zero recovered"
+check '[ "$(jq -r ".data.recoveredBy // empty" "$RES")" = "" ]' "…and claims no recovery it did not make"
 
 req "r-20260810T100031Z-rep04b" repair-refetch "$TOKEN" '{}'
 bash "$RUNNER"
@@ -2715,6 +2833,11 @@ check 'jq -e ".ok == true" "$RES" >/dev/null' "maintenance-scan ok"
 check 'jq -r ".data.countObjects" "$RES" | grep -q "^packs: 2"' "count-objects sees both packs"
 check 'jq -r ".data.countObjects" "$RES" | grep -q "^garbage: 2"' "…and counts the tmp files as garbage"
 check 'jq -r ".data.packFiles" "$RES" | grep -q "tmp_pack_e2estale"' "the pack listing names the leftover tmp file"
+# The repository holds real file content, so the blob measure — what a
+# blob:none repack could shed, the repair's allowance check — must be a
+# number above zero, and a number always (a broken measure reads 0, not "").
+check 'jq -r ".data.blobDiskKb" "$RES" | grep -Eq "^[0-9]+$"' "blobDiskKb is a number"
+check '[ "$(jq -r ".data.blobDiskKb" "$RES")" -gt 0 ]' "…and this store holds blob content, so it is above zero"
 
 echo "# phase 17: maintenance-prune collects tmp files whatever their age"
 req "r-20260811T140004Z-mt02" maintenance-prune "$TOKEN" '{"expire":"2.weeks.ago"}'

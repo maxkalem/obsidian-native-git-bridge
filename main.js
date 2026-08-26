@@ -3691,7 +3691,7 @@ function termuxRepoPath(repoPathHint) {
 function identitySetupCommand(repoPathHint) {
   const repo = termuxRepoPath(repoPathHint);
   if (repo === null) return null;
-  return `cd "${repo}" && read -p "user.name: " n && git config --local user.name "$n" && read -p "user.email: " e && git config --local user.email "$e" && git config --local --name-only --get-regexp '^user\\.'`;
+  return `cd "${repo}" && read -p "user.name: " n && git config --local user.name "$n" && read -p "user.email: " e && git config --local user.email "$e" && git --no-pager config --local --name-only --get-regexp '^user\\.'`;
 }
 function safeDirectoryCommand(repoPathHint) {
   const repo = termuxRepoPath(repoPathHint);
@@ -6000,6 +6000,15 @@ function decideRepair(stage, findings, ctx) {
   if (stage === "fetch-missing") return { kind: "ask-refetch" };
   if (ctx.hasUpstream && (ctx.ahead > 0 || ctx.cacheTreeBroken)) return { kind: "offer-reset" };
   return { kind: "missing-remote" };
+}
+function summarizeFsckMissing(text) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([line, n]) => n > 1 ? `${line} (\xD7${n})` : line).join("\n");
 }
 
 // src/git/pathLimits.ts
@@ -10390,12 +10399,23 @@ ${procs.join("\n")}`,
       [
         d.removedCount !== void 0 ? `removed: ${d.removedCount}` : "",
         (d.recoveredBy ?? "") !== "" ? `recovered by: ${d.recoveredBy}` : "",
+        d.recoveredCount !== void 0 ? `recovered: ${d.recoveredCount}` : "",
         (d.fsckMissing ?? "").trim() !== "" ? `still missing:
 ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
       ].filter((l) => l !== "").join("\n")
     );
     this.absorbStatusData(d);
     return result;
+  }
+  /**
+   * Every repair ending that leaves work behind carries this button: the user
+   * fixes what the window named (a lock, an identity, a Termux command) and
+   * runs the walk again from where they stand, instead of hunting the palette
+   * (asked for from the device, 2026-08-25). Skips the opening confirmation —
+   * the window they are looking at IS the state that confirmation describes.
+   */
+  repairRunAgainAction() {
+    return { label: "Run the repair again", onClick: () => void this.cmdRepairObjects(true) };
   }
   /**
    * The repair as a queue of short requests, sequenced here and decided by
@@ -10454,12 +10474,12 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
             fsckMissing: (fd.fsckMissing ?? "").trim(),
             fsckRemaining: (fd.fsckRemaining ?? "").trim()
           };
-          recoveredBy = "targeted";
+          recoveredBy = (fd.recoveredBy ?? "").trim();
           stage = "fetch-missing";
           continue;
         }
         if (decision.kind === "ask-refetch") {
-          const proceed = await this.confirmRefetch(findings.fsckMissing);
+          const proceed = await this.confirmRefetch(summarizeFsckMissing(findings.fsckMissing));
           if (!proceed) {
             new ResultModal(
               this.app,
@@ -10467,13 +10487,13 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
               [
                 ...summary.length > 0 ? [...summary, ""] : [],
                 removedLine,
-                "The targeted fetch did not bring everything back. The remaining step downloads the whole history again; run the repair again when you are ready for that.",
-                findings.fsckMissing
+                (recoveredBy === "" ? "The targeted fetch recovered nothing \u2014 this remote does not hand out single objects." : "The targeted fetch did not bring everything back.") + " The remaining step downloads the whole history again; run the repair again when you are ready for that.",
+                summarizeFsckMissing(findings.fsckMissing)
               ],
               {
                 isError: true,
                 stderr: findings.fsckRemaining,
-                actions: finalActions.length > 0 ? finalActions : void 0
+                actions: [...finalActions, this.repairRunAgainAction()]
               }
             ).open();
             return;
@@ -10500,6 +10520,28 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         ];
         if (decision.kind === "clean") {
           lines.push("", "The object store is complete: git can read everything it references.");
+          const fp7 = this.footprintState();
+          if (fp7?.partial === true && (this.lastRunnerVersion >= 14 || this.lastRunnerVersion === 0)) {
+            const meas = await this.repairStep("maintenance-scan", {}, "repair 7/7: footprint check");
+            if (meas !== null && meas.ok) {
+              const d7 = meas.data ?? {};
+              const before = parseCountObjects(d7.countObjects ?? "");
+              const blobKb = Number(d7.blobDiskKb ?? "0");
+              if (blobKb >= 100 * 1024) {
+                lines.push(
+                  "",
+                  `This repository is set to stay lightweight, but its packs hold ${formatSize(blobKb)} of file content the filter allows shedding${recoveredBy === "refetch" || recoveredBy === "recovery copy" ? " \u2014 the refetch brought back what had been shed" : ""}. The cleanup takes it back.`
+                );
+                finalActions = [
+                  ...finalActions,
+                  {
+                    label: `Free up ${formatSize(blobKb)}\u2026`,
+                    onClick: () => void this.runMaintenanceSteps(before)
+                  }
+                ];
+              }
+            }
+          }
           new ResultModal(this.app, "Repository repaired", lines, {
             stdout: sd.removedObjects,
             actions: finalActions.length > 0 ? finalActions : void 0
@@ -10515,7 +10557,7 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           new ResultModal(this.app, "Damaged objects left alone", lines, {
             stderr: findings.fsckRemaining,
             isError: true,
-            actions: finalActions.length > 0 ? finalActions : void 0
+            actions: [...finalActions, this.repairRunAgainAction()]
           }).open();
           return;
         }
@@ -10524,7 +10566,7 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
             "",
             `The remote does not have these objects, and this branch carries local-only state (${ctx.ahead > 0 ? `${ctx.ahead} unpushed commit${ctx.ahead === 1 ? "" : "s"}` : "a damaged index"}), so the damage is inside what was never pushed. Downloading cannot fix it and cloning again would throw the local commits away.`,
             "Rebuilding the branch on the remote state keeps every file on disk exactly as it is: the content of the local commits becomes ordinary uncommitted changes, the next sync commits it once, and a backup branch keeps the old history reachable.",
-            findings.fsckMissing
+            summarizeFsckMissing(findings.fsckMissing)
           );
           new ResultModal(this.app, "Repository still incomplete", lines, {
             stderr: findings.fsckRemaining,
@@ -10535,7 +10577,8 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
                 cta: true,
                 onClick: () => void this.cmdRepairResetUpstream(ctx.ahead)
               },
-              ...finalActions
+              ...finalActions,
+              this.repairRunAgainAction()
             ]
           }).open();
           return;
@@ -10543,12 +10586,12 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         lines.push(
           "",
           "The remote does not have these objects either, so nothing can bring them back: the history that referenced them is gone on both sides. Cloning the vault again is the way out \u2014 your notes on disk are not affected by it.",
-          findings.fsckMissing
+          summarizeFsckMissing(findings.fsckMissing)
         );
         new ResultModal(this.app, "Repository still incomplete", lines, {
           stderr: findings.fsckRemaining,
           isError: true,
-          actions: finalActions.length > 0 ? finalActions : void 0
+          actions: [...finalActions, this.repairRunAgainAction()]
         }).open();
         return;
       }
