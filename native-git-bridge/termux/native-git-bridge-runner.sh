@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=16
+RUNNER_VERSION=17
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -54,6 +54,19 @@ else
   export GCM_INTERACTIVE=never
   export SSH_ASKPASS=/bin/false
 fi
+
+# Interactive-terminal colors (v17): a finished request paints its verdict
+# green or red. Only when stderr — where the narration goes — is a real
+# terminal: the progress files and any piped run stay plain text.
+if [ "$NGB_INTERACTIVE" = 1 ] && [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+  NGB_CI_GREEN="$(printf '\033[32m')"
+  NGB_CI_RED="$(printf '\033[31m')"
+  NGB_CI_CYAN="$(printf '\033[36m')"
+  NGB_CI_OFF="$(printf '\033[0m')"
+else
+  NGB_CI_GREEN=""; NGB_CI_RED=""; NGB_CI_CYAN=""; NGB_CI_OFF=""
+fi
+NGB_CI_SEP="--------------------"
 
 die() { echo "native-git-bridge-runner: $*" >&2; exit 1; }
 
@@ -655,8 +668,17 @@ progress_note() {
   printf '%s\n' "$*" >> "$NGB_PROG_FILE" 2>/dev/null || true
   # A person at an interactive terminal gets the same narration the panel
   # gets; without it the step announcements exist only in a file they are
-  # not looking at.
-  if [ "$NGB_INTERACTIVE" = 1 ]; then printf -- '-- %s\n' "$*" >&2; fi
+  # not looking at. The terminal copy (never the file) paints a finished
+  # request's verdict — the ok=true/ok=false TOKEN only, green or red: a
+  # whole green line was the user's correction, twice (v17, 2026-08-26).
+  if [ "$NGB_INTERACTIVE" = 1 ]; then
+    local msg="$*"
+    case "$msg" in
+      *"finished (ok=true)")  printf -- '-- %s(%s)\n' "${msg%"(ok=true)"}" "${NGB_CI_GREEN}ok=true${NGB_CI_OFF}" >&2 ;;
+      *"finished (ok=false)") printf -- '-- %s(%s)\n' "${msg%"(ok=false)"}" "${NGB_CI_RED}ok=false${NGB_CI_OFF}" >&2 ;;
+      *)                      printf -- '-- %s\n' "$msg" >&2 ;;
+    esac
+  fi
 }
 
 # What a terminal would have shown: for each line, only the text after the last
@@ -3805,6 +3827,9 @@ process_request() {
   # From here on stderr is streamed where the plugin can watch it. Started after
   # every rejection above, so a request that never ran leaves no stream to read.
   progress_begin "$id"
+  # One visual break per request on an interactive terminal: a drain that
+  # serves several queued requests otherwise reads as one run-on wall (v17).
+  if [ "$NGB_INTERACTIVE" = 1 ]; then printf '\n%s\n' "$NGB_CI_SEP" >&2; fi
   progress_note "$action started"
   case "$action" in
     ping)                  action_ping || { ok=false; ec=1; } ;;
@@ -3966,8 +3991,16 @@ acquire_lock
 # the RUN_COMMAND result bundle, so the setup screen can learn the CURRENT
 # runner version right after an update instead of waiting for Obsidian to
 # reopen it. Plugin-triggered runs have no result receiver — stdout is simply
-# discarded there.
-echo "NGB_RUNNER_VERSION=$RUNNER_VERSION"
+# discarded there. An interactive run frames the line in dashes so a person
+# scrolling the install output can find the version at a glance (v17); the
+# companion's regex matches the line itself and does not care.
+# Cyan in interactive runs so the version stands out of the narration (the
+# user's pick, 2026-08-26, second round: cyan for the version, yellow for
+# profile ids); the codes are empty without a terminal, and the companion's
+# regex is unanchored, so the probe match survives either way.
+[ "$NGB_INTERACTIVE" = 1 ] && echo "$NGB_CI_SEP"
+echo "${NGB_CI_CYAN}NGB_RUNNER_VERSION=$RUNNER_VERSION${NGB_CI_OFF}"
+[ "$NGB_INTERACTIVE" = 1 ] && echo "$NGB_CI_SEP"
 
 # An interactive run has a person reading the terminal, so say what is about
 # to happen and why git may ask questions. Non-interactive runs keep stdout to
@@ -4155,5 +4188,5 @@ for conf in "${HEALTHY_FILES[@]}"; do
   cleanup_old
 done
 json_cleanup
-[ "$NGB_INTERACTIVE" = 1 ] && echo "-- Done. Return to Obsidian; the result is picked up there."
+[ "$NGB_INTERACTIVE" = 1 ] && echo "-- ${NGB_CI_GREEN}Done${NGB_CI_OFF}. Return to Obsidian; the result is picked up there."
 exit 0

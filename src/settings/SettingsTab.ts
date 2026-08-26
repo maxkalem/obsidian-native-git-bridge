@@ -11,7 +11,6 @@ import { MIN_NETWORK_TIMEOUT_SECONDS, RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { formatSize } from "../git/previousRepos";
 import type { InlineDiffUnit } from "../git/inlineDiff";
-import { Notice } from "obsidian";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: NativeGitBridgePlugin) {
@@ -113,10 +112,12 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
           "'Set up Termux' button that copies this command and opens Termux for you."
       )
       .addButton((b) =>
-        b.setButtonText("Copy command").setCta().onClick(() => { void (async () => {
-          await navigator.clipboard.writeText(cmd);
-          new Notice("Install command copied.");
-        })(); })
+        // Copying alone left the user to find Termux themselves; the plugin
+        // method copies, notices, and brings Termux forward (or the way to
+        // GET it when the companion reports it missing).
+        b.setButtonText("Copy command & open Termux").setCta().onClick(() =>
+          this.plugin.copyCommandAndOpenTermux()
+        )
       );
 
     const localCmd = this.plugin.installCommandLocal();
@@ -133,10 +134,9 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
             "arrived through vault sync."
         )
         .addButton((b) =>
-          b.setButtonText("Copy offline command").onClick(() => { void (async () => {
-            await navigator.clipboard.writeText(localCmd);
-            new Notice("Offline install command copied.");
-          })(); })
+          b.setButtonText("Copy offline command & open Termux").onClick(() =>
+            this.plugin.copyLocalCommandAndOpenTermux()
+          )
         );
     }
 

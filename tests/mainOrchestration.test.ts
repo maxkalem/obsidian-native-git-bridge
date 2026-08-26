@@ -1967,6 +1967,39 @@ describe("companion update advice", () => {
   });
 });
 
+describe("openTermux is the one door to Termux, with the get-it fallback", () => {
+  it("opens Termux while nothing has claimed it is missing", async () => {
+    const h = await loadPlugin();
+    h.plugin.openTermux();
+    expect(h.runner.uris).toContain("nativegitbridge://open-termux");
+  });
+
+  it("still sends open-termux after an ack that confirms Termux", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "1", "0.4.0");
+    h.plugin.openTermux();
+    expect(h.runner.uris).toContain("nativegitbridge://open-termux");
+  });
+
+  it("routes to GETTING Termux when the companion reported it missing", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "0", "0.4.0");
+    h.plugin.openTermux();
+    // The companion opens F-Droid's Termux page and falls back to the site
+    // itself; the plugin only names the intent.
+    expect(h.runner.uris).toContain("nativegitbridge://get-termux");
+    expect(h.runner.uris).not.toContain("nativegitbridge://open-termux");
+  });
+
+  it("copy-command buttons ride the same fallback: copy still happens, the door changes", async () => {
+    const h = await loadPlugin();
+    h.plugin.onCompanionAck("run", "0", "0.4.0");
+    h.plugin.copyCommandAndOpenTermux();
+    expect(h.runner.copied).toHaveLength(1);
+    expect(h.runner.uris).toContain("nativegitbridge://get-termux");
+  });
+});
+
 describe("panel context menus reflect the row's own group", () => {
   const collect = () => {
     const titles: string[] = [];
@@ -2361,6 +2394,8 @@ describe("runner version advice", () => {
     expect(await adviceFor(13)).toEqual([]);
     expect(await adviceFor(14)).toEqual([]);
     expect(await adviceFor(15)).toEqual([]);
+    expect(await adviceFor(16)).toEqual([]);
+    expect(await adviceFor(17)).toEqual([]);
   });
 
   it("flags a runner below the floor as outdated, with the reinstall route", async () => {
@@ -2370,7 +2405,7 @@ describe("runner version advice", () => {
   });
 
   it("flags a runner above the shipped version as the plugin being behind", async () => {
-    const advice = await adviceFor(17);
+    const advice = await adviceFor(18);
     expect(advice).toHaveLength(1);
     expect(advice[0]!.text).toContain("NEWER than this plugin knows");
   });

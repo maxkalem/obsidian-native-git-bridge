@@ -9,7 +9,7 @@ export const RUNNER_MIN_VERSION = 12;
  * the floor branded every up-to-date runner "newer than expected" — the
  * released 0.6.3 showed that warning to every correctly installed device.
  */
-export const RUNNER_SHIPPED_VERSION = 16;
+export const RUNNER_SHIPPED_VERSION = 17;
 
 /**
  * git's canonical empty-tree object (constant across all repositories).
@@ -213,5 +213,5 @@ export const COMPANION_GET_TERMUX_URI = "nativegitbridge://get-termux";
 /** Shown whenever the Termux-side runner is older than RUNNER_MIN_VERSION. */
 export const RUNNER_OUTDATED_HINT =
   "The Termux runner script is outdated. Updating the plugin does not update it — " +
-  "re-run the install command in Termux (Settings -> Native Git Bridge -> Copy command, " +
-  "or the 'Set up Termux' button in the companion app).";
+  "re-run the install command in Termux (Settings -> Native Git Bridge -> " +
+  "Copy command & open Termux, or the 'Set up Termux' button in the companion app).";

@@ -56,16 +56,58 @@ esac
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Download one file with a SHORT progress bar: 20 cells, prefixed with the
+# file's name and size. curl's own --progress-bar was tried and dropped — it
+# is as wide as the terminal, and the two downloads stacked read as one wall
+# of # with nothing saying what was downloaded or why twice (user report,
+# 2026-08-26). Progress at all, rather than silence, stays for the original
+# reason: on a slow connection a silent download reads as a hang, and this
+# script is always watched by a person. Without a Content-Length the bar is
+# skipped and the download narrates start and end only.
 fetch_one() { # $1 file name
   if [ -n "$BASE_DIR" ]; then
     cp "$BASE_DIR/$1" "$TMP/$1"
-  else
-    # --progress-bar instead of full silence: on a slow connection a silent
-    # download reads as a hang, and this script is always watched by a person.
-    curl -fL --progress-bar "$BASE/$1" -o "$TMP/$1"
+    return $?
   fi
+  local url="$BASE/$1" out="$TMP/$1" total got filled shown=-1 bar pid
+  total="$(curl -fsLI -o /dev/null -w '%{content_length}' "$url" 2>/dev/null || printf '0')"
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+  # Sizes are printed the way Termux's own apt prints them: SI kB, 1000 bytes
+  # (apt says "[9,383 kB]"), not the 1024-byte KiB.
+  if [ "$total" -le 0 ]; then
+    printf -- '-- %s ... ' "$1"
+    curl -fsSL "$url" -o "$out" || { printf 'FAILED\n'; return 1; }
+    printf 'ok (%d kB)\n' "$(( $(wc -c < "$out") / 1000 ))"
+    return 0
+  fi
+  curl -fsSL "$url" -o "$out" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    got="$(wc -c < "$out" 2>/dev/null || printf '0')"
+    case "$got" in ''|*[!0-9]*) got=0 ;; esac
+    filled=$(( got * 20 / total ))
+    [ "$filled" -gt 20 ] && filled=20
+    if [ "$filled" -ne "$shown" ]; then
+      bar="$(printf '%*s' "$filled" '' | tr ' ' '#')$(printf '%*s' "$((20 - filled))" '' | tr ' ' '.')"
+      printf -- '\r-- %s [%s] %d/%d kB' "$1" "$bar" "$(( got / 1000 ))" "$(( total / 1000 ))"
+      shown=$filled
+    fi
+    sleep 0.2
+  done
+  if ! wait "$pid"; then
+    printf '\n'
+    return 1
+  fi
+  # The finish line replaces the bar instead of redrawing it full: a bar
+  # exists to show progress, and a decorative 100% repaint said nothing
+  # (user's correction, 2026-08-26). Trailing spaces erase the bar's leftovers.
+  printf -- '\r-- %s ok (%d kB)                                \n' "$1" "$(( total / 1000 ))"
 }
 
+# A blank line and a rule before the first output: the command the user just
+# pasted sits directly above, and without the break the narration reads as
+# part of it (user request, 2026-08-26).
+printf '\n--------------------\n'
 if [ -n "$BASE_DIR" ]; then
   echo "-- Taking the Native Git Bridge installer from $BASE_DIR ..."
 else

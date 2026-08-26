@@ -351,7 +351,12 @@ class SetupActivity : Activity() {
         Toast.makeText(this, R.string.setup_command_copied, Toast.LENGTH_LONG).show()
         val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
         if (launch != null) startActivity(launch)
-        else Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
+        else {
+            // A toast alone left the user at a dead end; open the way to GET
+            // Termux (F-Droid page, or the official site without F-Droid).
+            Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
+            BridgeActivity.openTermuxStore(this)
+        }
     }
 
     /** True when Obsidian reported a runner older than what the plugin needs. */

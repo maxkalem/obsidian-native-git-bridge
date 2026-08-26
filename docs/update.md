@@ -36,7 +36,7 @@ bash "<vault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "<vault>"
 
 Settings → *Install without a network* shows that line with your paths filled in. Nothing is downloaded, so a GitHub outage, a captive portal or a flight cannot block a runner update.
 
-The manual route is unchanged: paste the install command again in Termux (Settings → Native Git Bridge → Copy command, or see [setup.md](setup.md) step 3). Re-running is safe and idempotent: it keeps **this vault's** pairing token, re-checks auth, re-writes the runner, and re-runs the self-test. Nothing in the vault or the git history is touched.
+The manual route is unchanged: paste the install command again in Termux (Settings → Native Git Bridge → Copy command & open Termux, or see [setup.md](setup.md) step 3). Re-running is safe and idempotent: it keeps **this vault's** pairing token, re-checks auth, re-writes the runner, and re-runs the self-test. Nothing in the vault or the git history is touched.
 
 Since runner v10 the Termux side keeps one profile per paired vault. Re-running the installer for one vault leaves the others untouched (it used to overwrite them), and an existing single-vault configuration is migrated to a profile automatically on the first run of the new runner — same token, no re-pairing. Updating the runner therefore updates it for every vault at once; the profiles are independent of it.
 

@@ -25,6 +25,23 @@ class BridgeActivity : Activity() {
         /** Termux inside the F-Droid app (used only when F-Droid is installed). */
         const val TERMUX_FDROID_URL = "https://f-droid.org/packages/com.termux/"
         const val FDROID_PACKAGE = "org.fdroid.fdroid"
+
+        /**
+         * The one way to GET Termux, shared by every path that finds it
+         * missing. With F-Droid installed, go straight to its Termux page
+         * (one Install tap). Otherwise open the OFFICIAL SITE in the real
+         * browser — termux.dev lists the supported download sources itself,
+         * which is friendlier than dropping the user on a repository page.
+         */
+        fun openTermuxStore(activity: Activity) {
+            val inFdroid = Intent(Intent.ACTION_VIEW, Uri.parse(TERMUX_FDROID_URL))
+                .setPackage(FDROID_PACKAGE)
+            try {
+                activity.startActivity(inFdroid)
+            } catch (e: Exception) {
+                activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(TERMUX_SITE_URL)))
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -63,24 +80,15 @@ class BridgeActivity : Activity() {
             // real browser) is the whole benefit without the permission.
             uri.host == "get-termux" -> {
                 ackObsidian("get-termux")
-                // With F-Droid installed, go straight to its Termux page (one
-                // Install tap). Otherwise open the OFFICIAL SITE in the real
-                // browser — termux.dev lists the supported download sources
-                // itself, which is friendlier than dropping the user on a
-                // repository page.
-                val inFdroid = Intent(Intent.ACTION_VIEW, Uri.parse(TERMUX_FDROID_URL))
-                    .setPackage(FDROID_PACKAGE)
-                try {
-                    startActivity(inFdroid)
-                } catch (e: Exception) {
-                    startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(TERMUX_SITE_URL)))
-                }
+                openTermuxStore(this)
             }
             uri.host == "open-termux" -> {
                 ackObsidian("open-termux")
+                // Termux missing means there is nothing to open, so fall back
+                // to getting it: F-Droid's Termux page, then the site.
                 val launch = packageManager.getLaunchIntentForPackage(TermuxForwarder.TERMUX_PACKAGE)
                 if (launch != null) startActivity(launch)
-                else startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(TERMUX_SITE_URL)))
+                else openTermuxStore(this)
             }
             uri.host != "run" ->
                 toast(R.string.err_unknown_action)

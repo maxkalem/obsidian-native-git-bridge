@@ -1879,7 +1879,7 @@ export default class NativeGitBridgePlugin extends Plugin {
             keepOpen: true,
             onClick: () => {
               void navigator.clipboard.writeText(cmd);
-              this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+              this.openTermux();
             },
           },
           {
@@ -2552,6 +2552,24 @@ export default class NativeGitBridgePlugin extends Plugin {
   private openUrlPreferCompanion(companionUri: string, directUrl: string): void {
     if (this.lastCompanionAckMs > 0) this.openExternalUri(companionUri);
     else this.openExternalUri(directUrl);
+  }
+
+  /**
+   * Bring Termux to the foreground — the ONE place every "open Termux"
+   * goes through. When the companion has reported Termux missing, opening
+   * it is impossible, so route to getting it instead: the companion opens
+   * Termux's page inside F-Droid (one Install tap) and falls back to the
+   * official site when F-Droid is not installed either; without a companion
+   * ack the site is the only reliable target. When the report is "installed"
+   * or nothing has answered yet, send open-termux — a current companion
+   * applies the same F-Droid-then-site fallback on its side.
+   */
+  openTermux(): void {
+    if (this.lastAckTermuxInstalled === false) {
+      this.openUrlPreferCompanion(COMPANION_GET_TERMUX_URI, TERMUX_SITE_URL);
+      return;
+    }
+    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
   }
 
   private openExternalUri(uri: string): void {
@@ -4381,7 +4399,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           keepOpen: true,
           onClick: () => {
             void navigator.clipboard.writeText(cmd);
-            this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+            this.openTermux();
           },
         },
       ],
@@ -6154,7 +6172,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     void navigator.clipboard.writeText(cmd);
     new Notice("Offline install command copied - long-press in Termux to paste, then Enter.");
-    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+    this.openTermux();
   }
 
   /** Open the latest release page (companion APK + plugin files live there). */
@@ -6166,7 +6184,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   copyCommandAndOpenTermux(): void {
     void navigator.clipboard.writeText(this.installCommand());
     new Notice("Install command copied - long-press in Termux to paste, then Enter.");
-    this.openExternalUri(COMPANION_OPEN_TERMUX_URI);
+    this.openTermux();
   }
 
   async cmdSelfCheck(timedOut = false): Promise<void> {
@@ -6219,7 +6237,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         actions.push({
           label: "Open Termux",
           keepOpen: true,
-          onClick: () => this.openExternalUri(COMPANION_OPEN_TERMUX_URI),
+          onClick: () => this.openTermux(),
         });
       }
       if (this.lastAckTermuxInstalled === false) {

@@ -1276,6 +1276,7 @@ INT_OUT="$(brun interactive)"
 check 'jq -e ".ok == true" "$CC_RT/results/r-20260806T106500Z-int01.json" >/dev/null' "a queued request is served by an interactive run"
 check 'printf "%s" "$INT_OUT" | grep -q "interactively"' "the interactive run announces itself on stdout (a person is reading it)"
 check 'printf "%s" "$INT_OUT" | grep -q "NGB_RUNNER_VERSION="' "…and keeps the version probe line"
+check 'printf "%s" "$INT_OUT" | grep -B1 "NGB_RUNNER_VERSION=" | grep -qx -- "--------------------"' "…framed in a 20-dash rule so a person can find it (v17)"
 
 echo "# phase 7: an interactive clone narrates to the terminal (the mirror)"
 # The user's report: pasting the command gave "just silence and a timer" while
@@ -1716,8 +1717,10 @@ for entry in "a:$PROBE_DIR/Alive" "b:$PROBE_DIR/NotARepo" "c:$PROBE_DIR/Gone"; d
     "$suffix" "$dir" > "$PROBE_DIR/profiles/p-0000000$suffix.conf"
 done
 {
+  printf 'NGB_YELLOW=""; NGB_OFF=""\n'
   printf 'say() { printf "%%s\\n" "$*"; }\n'
   printf 'sayr() { printf "%%s\\n" "$*"; }\n'
+  printf 'section() { printf "%%s\\n" "$*"; }\n'
   printf 'profile_value() { sed -n "s/^$2=\\"\\{0,1\\}\\([^\\"]*\\)\\"\\{0,1\\}$/\\1/p" "$1" | head -1; }\n'
   printf 'PROFILES_DIR="%s/profiles"\n' "$PROBE_DIR"
   printf 'PROFILE_FILE="%s/profiles/p-0000000b.conf"\n' "$PROBE_DIR"
@@ -1753,6 +1756,52 @@ check 'grep -qx "https://ghp_sometoken123:@github.com" "$CREDLAB/creds"' "a colo
 check 'grep -qx "https://user:pass@example.com" "$CREDLAB/creds"' "a user:password line is left exactly alone"
 check 'grep -qx "https://git:tok@host.tld" "$CREDLAB/creds"' "…and so is every other well-formed line"
 
+echo "# installer: apt_filter reshapes pkg/apt output for a phone screen (lifted)"
+# The device install showed the raw pkg/apt firehose: mirror verdicts hidden
+# at the end of wrapped URLs, sizes at the end of Get lines, screens of index
+# boilerplate, and a whole-system "0 upgraded … 77 not upgraded" summary that
+# reads as "nothing was installed". The filter puts verdicts and sizes first,
+# drops the boilerplate, rewrites the summary honestly, and passes everything
+# it does not recognize through untouched (user request, 2026-08-26).
+APTLAB="$ROOT/apt-lab"
+mkdir -p "$APTLAB"
+cat > "$APTLAB/sample.txt" <<'APTSAMPLE'
+Report issues at https://termux.dev/issues
+Testing the available mirrors:
+[*] (1) https://mirror.alive.example/apt/termux-main: ok
+[*] (7) https://mirror.dead.example/apt/termux-main: bad
+Reading package lists... Done
+Building dependency tree... Done
+77 packages can be upgraded. Run 'apt list --upgradable' to see them.
+The following packages will be upgraded:
+  apt bash coreutils
+Get:1 https://host.example/apt/termux-main stable/main aarch64 git aarch64 2.55.0 [9,383 kB]
+Get:2 https://host.example/apt/termux-main stable InRelease [14.2 kB]
+0 upgraded, 9 newly installed, 0 to remove and 77 not upgraded.
+Unpacking git (2.55.0) ...
+Setting up git (2.55.0) ...
+WARNING: apt does not have a stable CLI interface. Use with caution in scripts.
+W: some apt warning
+custom line nothing recognizes
+APTSAMPLE
+check 'grep -q "^apt_filter() {" "$SCRIPT_DIR/native-git-bridge/termux/install.sh"' "the installer defines apt_filter (the probe below lifts the real one)"
+APT_OUT="$(
+  NGB_GREEN=""; NGB_RED=""; NGB_OFF=""
+  eval "$(sed -n '/^apt_filter() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+  apt_filter < "$APTLAB/sample.txt"
+)"
+check 'printf %s "$APT_OUT" | grep -qx "OK  https://mirror.alive.example/apt/termux-main"' "a live mirror leads with OK, then the URL"
+check 'printf %s "$APT_OUT" | grep -qx "BAD https://mirror.dead.example/apt/termux-main"' "a dead mirror leads with BAD, then the URL"
+check 'printf %s "$APT_OUT" | grep -qx "GET 9,383 kB  git 2.55.0"' "a package Get line leads with the size, then name and version"
+check 'printf %s "$APT_OUT" | grep -q "^GET 14.2 kB  InRelease$"' "an index Get line leads with the size too"
+check 'printf %s "$APT_OUT" | grep -q "9 new, 0 upgraded" && printf %s "$APT_OUT" | grep -q "left alone on purpose"' "the whole-system apt summary is replaced with the honest per-installer count"
+check '! printf %s "$APT_OUT" | grep -q "not upgraded"' "…and the misleading raw summary is gone"
+check '! printf %s "$APT_OUT" | grep -qE "Reading package lists|packages can be upgraded|The following packages|^  apt bash|^Unpacking |Report issues"' "index and dpkg boilerplate is dropped"
+check 'printf %s "$APT_OUT" | grep -q "^Setting up git"' "Setting up lines still show install progress"
+check 'printf %s "$APT_OUT" | grep -qx "W: some apt warning"' "apt warnings pass through"
+check '! printf %s "$APT_OUT" | grep -q "stable CLI interface"' "…but apt's script-author warning does not (it is aimed at this script, not the user)"
+check 'printf %s "$APT_OUT" | grep -qx "custom line nothing recognizes"' "unrecognized lines pass through untouched, so no failure can be filtered away"
+
 echo "# installer: run_self_test retries past a busy runner's single-instance lock (lifted)"
 # The runner snapshots its queue at start, so a runner already serving an
 # Obsidian trigger (sync-on-close fires exactly when the user closes Obsidian
@@ -1787,6 +1836,7 @@ mkdir "$STLAB/conf/.runner.lock"
   CONF_DIR="$STLAB/conf"
   RUNTIME_DIR="$STLAB/runtime"
   TOKEN="st-token"
+  NGB_GREEN=""; NGB_OFF=""
   say() { printf '%s\n' "$*" >> "$ST_OUT"; }
   fail() { printf 'FAILED %s\n' "$*" >> "$ST_OUT"; exit 1; }
   eval "$(sed -n '/^run_self_test() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
@@ -1806,6 +1856,7 @@ ST2_OUT="$ST2/out.txt"
   CONF_DIR="$ST2/conf"
   RUNTIME_DIR="$ST2/runtime"
   TOKEN="st-token"
+  NGB_GREEN=""; NGB_OFF=""
   say() { printf '%s\n' "$*" >> "$ST2_OUT"; }
   fail() { printf 'FAILED %s\n' "$*" >> "$ST2_OUT"; exit 1; }
   eval "$(sed -n '/^run_self_test() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"

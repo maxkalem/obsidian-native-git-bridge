@@ -228,7 +228,7 @@ An unknown action, invalid path (absolute, `..`, inside `.git`, git pathspec mag
 
 ## RUNNER_INTERNAL: the runner could not finish
 
-A serialization failure (see `runner.log` in the runtime folder), or a request that was interrupted twice and given up on. Most commonly the runner is simply **outdated**: updating the plugin never updates the runner. Re-run the install command (Settings → Copy command); the plugin's version handshake tells you explicitly when this is the case.
+A serialization failure (see `runner.log` in the runtime folder), or a request that was interrupted twice and given up on. Most commonly the runner is simply **outdated**: updating the plugin never updates the runner. Re-run the install command (Settings → Copy command & open Termux); the plugin's version handshake tells you explicitly when this is the case.
 
 ## EXPIRED: a stale request was skipped
 

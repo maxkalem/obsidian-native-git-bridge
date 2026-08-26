@@ -31,7 +31,7 @@ curl -fsSL https://github.com/maxkalem/obsidian-native-git-bridge/releases/lates
 
 (You can omit the path; the installer scans shared storage for vaults that are git repositories and asks if it finds several.)
 
-Better: copy the command from the plugin (Settings → Copy command) or from the companion app's step 3. Those versions are **pinned to the release you are running**, so the runner they install is exactly the one your plugin build was tested against. The command above tracks the newest release instead, and neither fetches from the `main` branch, which is the development state and may be mid-change.
+Better: copy the command from the plugin (Settings → Copy command & open Termux) or from the companion app's step 3. Those versions are **pinned to the release you are running**, so the runner they install is exactly the one your plugin build was tested against. The command above tracks the newest release instead, and neither fetches from the `main` branch, which is the development state and may be mid-change.
 
 The installer requests storage access (accept the Android dialog), installs git/jq/openssh, marks the repo as `safe.directory` if needed (asks first), enables `allow-external-apps` (required for the companion), configures authentication for this repository non-interactively, installs the runner to `~/.config/native-git-bridge/runner.sh`, writes a profile for this vault (`~/.config/native-git-bridge/profiles/<id>.conf`, mode 600, with a token of its own), excludes the runtime folder from git locally, runs a ping self-test, and drops a one-shot `pairing.json` that the plugin imports and deletes on its next start.
 
@@ -74,7 +74,7 @@ Copy that folder to the device and run, in Termux:
 bash "/storage/emulated/0/<YourVault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "/storage/emulated/0/<YourVault>"
 ```
 
-`bootstrap.sh` takes `install.sh` and the runner from the directory it is started from, so there is nothing to download, no version to pass and nothing that depends on GitHub being reachable. The plugin shows this exact command under *Settings → Install without a network* (and as *Copy offline command* in the setup guide) as soon as the repository path is set, because Termux addresses the vault by its absolute path.
+`bootstrap.sh` takes `install.sh` and the runner from the directory it is started from, so there is nothing to download, no version to pass and nothing that depends on GitHub being reachable. The plugin shows this exact command under *Settings → Install without a network* (and as *Copy offline command* in the setup guide) as soon as the repository path is set, because Termux addresses the vault by its absolute path. Both buttons also bring Termux to the front, ready for the paste.
 
 If you prefer to pipe the script instead of running it, the source has to be named explicitly, since a piped script cannot know where it came from:
 
