@@ -751,7 +751,12 @@ git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2
 check '[ ! -e Private/Hidden/mem.md ]' "fixture exclusions restored"
 
 echo "# config: cone mode is refused before anything is written (v16)"
-git config core.sparseCheckoutCone true
+# The flag goes where git itself puts it. On git >= 2.36 sparse-checkout has
+# already enabled extensions.worktreeConfig and written the cone flag FALSE
+# into worktree scope, which overrides local — a plain `git config` here made
+# this fixture invisible on 2.55 (the 0.6.6 tag's first CI run) while 2.34,
+# with no worktree config, stayed green. The fallback keeps 2.34 working.
+git config --worktree core.sparseCheckoutCone true 2>/dev/null || git config core.sparseCheckoutCone true
 req "r-20260825T100003Z-spg004" sparse-exclude-add "$TOKEN" '{"path":"ConeProbe"}'
 bash "$RUNNER"
 RES="$RUNTIME/results/r-20260825T100003Z-spg004.json"
@@ -760,7 +765,7 @@ check 'jq -er ".error.message" "$RES" | grep -qi "cone" ' "the refusal names con
 req "r-20260825T100004Z-spg005" repair-sparse-definition "$TOKEN"
 bash "$RUNNER"
 check 'jq -e ".ok == false" "$RUNTIME/results/r-20260825T100004Z-spg005.json" >/dev/null' "the repair refuses cone mode rather than converting it"
-git config --unset core.sparseCheckoutCone
+git config --worktree --unset core.sparseCheckoutCone 2>/dev/null || git config --unset core.sparseCheckoutCone
 check '! git sparse-checkout list | grep -q "ConeProbe"' "nothing was written for the cone refusal"
 
 echo "# config: status reports identity and helper SCOPES, never values (v16)"
