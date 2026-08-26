@@ -744,11 +744,56 @@ check 'jq -e ".data.sparseRepaired == \"true\"" "$RES" >/dev/null' "the repair r
 check 'git sparse-checkout list | grep -qxF "/*"' "the include-everything base is back"
 check '! git sparse-checkout list | grep -qxF "!/*/"' "the emptying default is gone"
 check '[ -f Private/Hidden/mem.md ]' "the repair materialized what the default had hidden"
+check 'grep -qxF "!/*/" .git/info/sparse-checkout.ngb-prev' "…and the definition it replaced was backed up beside the file first (v17)"
 # The repair cannot know which exclusions the user meant (the broken write lost
 # them); the plugin re-adds them through the reconcile flow. Restore the
 # fixture's canonical set here so later phases see what they expect.
 git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2>/dev/null
 check '[ ! -e Private/Hidden/mem.md ]' "fixture exclusions restored"
+
+echo "# config: repair-sparse-definition refuses a hand-made definition (v17)"
+# The WScafe device, 2026-08-26, on released 0.6.6: a whitelist — exclude
+# everything, then include named paths — has no '/*' base BY DESIGN. The
+# shipped repair kept only the '!' lines and rebuilt the file into '/*' plus
+# '!/*', destroying the include list, which exists nowhere else (.git/info is
+# in no commit). A definition holding anything the plugin's model does not
+# write is refused like cone mode: quoted, untouched. Written straight into
+# the file (no reapply) so the fixture's working tree is never emptied.
+printf '!/*\n!/*/\n/.obsidian\n/Documentation\n/.gitignore\n' > .git/info/sparse-checkout
+cp .git/info/sparse-checkout "$ROOT/whitelist.before"
+req "r-20260826T190000Z-spg006" repair-sparse-definition "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260826T190000Z-spg006.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "a whitelist definition is refused, not rebuilt"
+check 'jq -er ".error.message" "$RES" | grep -q "did not write"' "the refusal says whose patterns these are not"
+check 'jq -er ".error.stdout" "$RES" | grep -qx "/.obsidian"' "the refusal quotes the definition"
+check 'cmp -s .git/info/sparse-checkout "$ROOT/whitelist.before"' "the file is byte-for-byte untouched"
+
+echo "# config: the defect's own residue (/* + !/*) is refused too (v17)"
+# Rebuilding it into a bare '/*' would SHOW everything a whitelist meant to
+# hide; the honest exit is the refusal naming the file to edit.
+printf '/*\n!/*\n' > .git/info/sparse-checkout
+req "r-20260826T190001Z-spg007" repair-sparse-definition "$TOKEN"
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260826T190001Z-spg007.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "the exclude-everything residue is refused"
+check 'jq -er ".error.stdout" "$RES" | grep -qxF "!/*"' "…quoting the pattern that makes it foreign"
+
+echo "# config: the verified write refuses a set containing !/* (v17)"
+# Had this assertion existed, the 0.6.6 rebuild would have rolled itself
+# back. The include line keeps the working tree non-empty while the write
+# applies, so the probe tests the guard and not git's empty-checkout edge.
+printf '/*\n!/*\n/Private/\n' > .git/info/sparse-checkout
+req "r-20260826T190002Z-spg008" sparse-exclude-add "$TOKEN" '{"path":"RollbackProbe2"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260826T190002Z-spg008.json"
+check 'jq -e ".ok == false and .error.code == \"GIT_FAILED\"" "$RES" >/dev/null' "a write that keeps !/* is refused"
+check 'jq -er ".error.stdout" "$RES" | grep -qxF "!/*"' "the refusal quotes the exclude-everything pattern"
+check '! git sparse-checkout list | grep -q "RollbackProbe2"' "the new pattern did not survive the rollback"
+check 'grep -qxF "!/*" .git/info/sparse-checkout' "the previous definition is back after the rollback"
+# Restore the fixture's canonical set for the phases that follow.
+git sparse-checkout set --no-cone '/*' '!Private/Hidden/' '!Projects/Archive/' 2>/dev/null
+check '[ ! -e Private/Hidden/mem.md ]' "fixture exclusions restored after the foreign-shape probes"
 
 echo "# config: cone mode is refused before anything is written (v16)"
 # The flag goes where git itself puts it. On git >= 2.36 sparse-checkout has

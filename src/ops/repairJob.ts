@@ -131,6 +131,14 @@ export interface RepairTriageFacts {
     hasBase: boolean;
     /** git's own emptying default (the `!` + `/*` + `/` line) is present. */
     hasEmptyingDefault: boolean;
+    /**
+     * The list holds patterns this plugin's own model never writes: an
+     * include line other than `/*`, or the exclude-everything `!` + `/*`.
+     * That is somebody's hand-made definition (a whitelist, usually) —
+     * exactly like cone mode, it is a setup, not damage. The released 0.6.6
+     * repair rebuilt one into `/*` + `!/*` and destroyed the only copy.
+     */
+    foreign: boolean;
   };
   rescueBranches: string[];
   previousGitDirs: string[];
@@ -153,6 +161,8 @@ export type RepairPlanItem =
   | { step: "sparse"; act: "repair-definition" }
   /** Cone mode is somebody's setup; switching modes is the user's decision. */
   | { step: "sparse"; act: "cone-needs-decision" }
+  /** A hand-made pattern set (whitelist): reported, never rewritten. */
+  | { step: "sparse"; act: "foreign-needs-decision" }
   | { step: "leftovers"; act: "rescue-branches" }
   | { step: "leftovers"; act: "previous-git" };
 
@@ -177,7 +187,12 @@ export function planRepair(f: RepairTriageFacts): RepairPlanItem[] {
   if (f.globalCredHelper) plan.push({ step: "cred-helper", act: "offer-reset" });
   if (f.sparse.enabled) {
     if (f.sparse.cone) plan.push({ step: "sparse", act: "cone-needs-decision" });
-    else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
+    else if (f.sparse.foreign) {
+      // Checked BEFORE the missing-base test: a whitelist has no `/*` by
+      // design, and treating that as damage is how the 0.6.6 repair
+      // destroyed a real device's definition.
+      plan.push({ step: "sparse", act: "foreign-needs-decision" });
+    } else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
       plan.push({ step: "sparse", act: "repair-definition" });
     }
   }

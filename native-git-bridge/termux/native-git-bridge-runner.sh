@@ -2615,8 +2615,14 @@ sparse_write_verified() { # $1 = pattern file to apply; sets ERROR on failure
   local written cone_now
   written="$(cat "$sfile" 2>/dev/null || true)"
   cone_now="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
+  # `!/*` joined the refusal list after a real repository was left with
+  # exactly `/*` + `!/*` — a set that hides every top-level entry (last match
+  # wins) and sailed through a guard that only knew about `!/*/`. The runner
+  # never writes an exclude-everything pattern on purpose, so its presence in
+  # a runner write is always a defect.
   if printf '%s\n' "$written" | grep -qx '/\*' &&
      ! printf '%s\n' "$written" | grep -qxF '!/*/' &&
+     ! printf '%s\n' "$written" | grep -qxF '!/*' &&
      [ "$cone_now" != "true" ]; then
     return 0
   fi
@@ -2708,15 +2714,42 @@ action_sparse_exclude_remove() {
 # actions use. A step of the unified repair; deliberately no palette command
 # of its own. Cone mode is refused, not converted: a cone configuration is
 # somebody's deliberate setup, and switching modes is the user's decision.
+#
+# TWO HARD LESSONS from a real device (2026-08-26, released 0.6.6). This
+# action rebuilt a hand-written WHITELIST (`!/*`, `!/*/`, then include lines)
+# into `/*` + `!/*`: the include lines are not `!` lines, so the rebuild
+# dropped them — the one copy of that definition, destroyed, because
+# .git/info/sparse-checkout is in no commit. Hence:
+# 1. A definition holding anything this plugin's own model does not write —
+#    an include line other than `/*`, or the exclude-everything `!/*` — is
+#    somebody's deliberate setup, exactly like cone mode: REFUSED, quoting
+#    the definition, changing nothing.
+# 2. Even for the shapes it does fix, the previous definition is copied to
+#    sparse-checkout.ngb-prev beside the original first, so one rewrite is
+#    always reversible by hand.
 action_repair_sparse_definition() {
   refuse_cone_sparse || return 1
   if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" != "true" ]; then
     DATA=$(obj_from_fields sparseRepaired "false" sparseNote "Sparse checkout is disabled; there is no definition to repair.")
     return 0
   fi
+  local current foreign
+  current="$(git sparse-checkout list 2>/dev/null || true)"
+  foreign="$(printf '%s\n' "$current" | grep -v '^!' | grep -vx '/\*' | grep -v '^$' || true)"
+  if [ -z "$foreign" ]; then
+    foreign="$(printf '%s\n' "$current" | grep -xF '!/*' || true)"
+  fi
+  if [ -n "$foreign" ]; then
+    ERROR=$(err_json GIT_FAILED "The sparse definition contains patterns this plugin did not write (a hand-made include list, for example). Rebuilding it would destroy them, so nothing was changed. The current definition is listed below; edit .git/info/sparse-checkout in Termux if it is wrong." "$current" "")
+    return 1
+  fi
+  local sfile
+  sfile="$(git rev-parse --git-path info/sparse-checkout)"
+  case "$sfile" in /*) : ;; *) sfile="$NGB_REPO_DIR/$sfile" ;; esac
+  [ -f "$sfile" ] && cp "$sfile" "$sfile.ngb-prev" 2>/dev/null
   local tmpf; tmpf="$(mktemp)"
   printf '/*\n' > "$tmpf"
-  git sparse-checkout list 2>/dev/null | grep '^!' | grep -vxF '!/*/' >> "$tmpf" || true
+  printf '%s\n' "$current" | grep '^!' | grep -vxF '!/*/' >> "$tmpf" || true
   progress_note "sparse: re-seeding the include-everything base and reapplying the exclusions"
   if ! sparse_write_verified "$tmpf"; then
     rm -f "$tmpf"
@@ -2724,7 +2757,7 @@ action_repair_sparse_definition() {
   fi
   rm -f "$tmpf"
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(obj_from_fields sparseRepaired "true")")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields sparseRepaired "true" sparseBackup "$sfile.ngb-prev")")
 }
 
 # Remove the GLOBAL identity, value-free: --unset-all needs no knowledge of

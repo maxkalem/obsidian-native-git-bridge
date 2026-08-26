@@ -63,6 +63,8 @@ Every failure window carrying that message offers **Delete the stale lock…**, 
 
 Every commit records an author, and a freshly cloned or re-cloned repository has no local `user.name` / `user.email` — the local configuration dies with the old `.git`. The failure window (and the settings) offer **Set the git identity…**: the command goes to the clipboard, Termux opens, and git asks for the name and the email right there. What you type stays in Termux — the plugin never learns the values, only that they now exist. The identity is set for THIS repository, so other repositories on the device are not affected.
 
+Changing an identity later is the same command: `git config` overwrites, so **Set or change the git identity** in the palette (or **Change the git identity…** in the identity check window) reruns the same Termux prompt with new values.
+
 The palette command **Check git identity** shows where the keys are set (local, global, and so on — never the values). Two warnings it can raise: a global identity with no local one means every commit silently uses the global name, including in vaults where you meant another; and a global `credential.helper` answers BEFORE this repository's own credential file, so operations here can quietly use another account's saved credentials. The first is fixed by setting the local identity (after which the window offers to remove the global one — never before, since with no local identity the global one is what lets commits happen at all). The second is fixed by **Prefer this repository's credentials…**, which makes the repository's own credential file authoritative without touching the global configuration.
 
 ## A long clone or fetch dies with `Killed`
@@ -106,6 +108,16 @@ The repair button is labelled for what it will do, which depends on where the bl
 Fixed in runner v13. Before it, a protected path whose name contained a space or a character outside ASCII — an em dash in a note title is enough — could not be cleared at all: git prints such a path quoted and octal-escaped, the repair compared that against the real name, decided the entry was already gone, and reported success having removed nothing. Sync then blocked on the same list, forever.
 
 If you see this, the runner is older than the plugin. Update it (Settings shows the version, the companion has an "Update runner" button) and repair again.
+
+### The 0.6.6 repair rewrote a hand-written sparse definition
+
+The repair in plugin 0.6.6 (runner v16) treated any pattern list without the include-everything `/*` base as damage. A hand-made definition — a whitelist that excludes everything and then includes named paths — has no `/*` by design, and the rebuild kept only the `!` lines: the include list was lost and the file ended as `/*` plus `!/*`, which hides every top-level entry.
+
+Fixed in runner v17: a definition holding patterns this plugin does not write is reported and left alone, and any rebuild first copies the previous definition to `sparse-checkout.ngb-prev` beside the file. If 0.6.6 already rewrote yours, git kept no copy — write it again in Termux:
+
+    git -C /path/to/vault sparse-checkout set --no-cone --stdin
+
+then paste your patterns and end with Ctrl-D. Until the runner is updated to v17, do not run *Repair the repository* on a repository with a hand-written sparse definition.
 
 ### Sending a log to someone
 

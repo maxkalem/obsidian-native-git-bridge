@@ -5981,7 +5981,9 @@ function planRepair(f) {
   if (f.globalCredHelper) plan.push({ step: "cred-helper", act: "offer-reset" });
   if (f.sparse.enabled) {
     if (f.sparse.cone) plan.push({ step: "sparse", act: "cone-needs-decision" });
-    else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
+    else if (f.sparse.foreign) {
+      plan.push({ step: "sparse", act: "foreign-needs-decision" });
+    } else if (!f.sparse.hasBase || f.sparse.hasEmptyingDefault) {
       plan.push({ step: "sparse", act: "repair-definition" });
     }
   }
@@ -8029,6 +8031,11 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       { id: "maintenance-cleanup", name: "Clean up repository storage (.git/objects)", cb: () => void this.cmdMaintenance() },
       { id: "drop-rescue-backup", name: "Delete repair backup branch (ngb-rescue)", cb: () => this.cmdRescueCleanup() },
       { id: "check-git-identity", name: "Check git identity (scopes only, no values)", cb: () => void this.cmdCheckIdentity() },
+      // Setting and CHANGING are one command — git config overwrites — but a
+      // set identity left the change route unreachable: the check window only
+      // offered Set while none existed. Its own palette entry is the direct
+      // answer to "how do I change it" (user, 2026-08-26).
+      { id: "set-git-identity", name: "Set or change the git identity (typed in Termux, never read here)", cb: () => this.cmdSetGitIdentity() },
       // The unified repair (0.6.6): one command walks every known problem in
       // sequence. The routes that start from an error window stay where they
       // are — a window that caught a specific failure is the shortest path to
@@ -9935,14 +9942,13 @@ ${procs.join("\n")}`
       );
     }
     const actions = [];
-    if (!hasLocal) {
-      actions.push({
-        label: "Set the git identity\u2026",
-        cta: true,
-        keepOpen: true,
-        onClick: () => this.cmdSetGitIdentity()
-      });
-    } else if (hasGlobal) {
+    actions.push({
+      label: hasLocal ? "Change the git identity\u2026" : "Set the git identity\u2026",
+      cta: !hasLocal,
+      keepOpen: true,
+      onClick: () => this.cmdSetGitIdentity()
+    });
+    if (hasLocal && hasGlobal) {
       actions.push({
         label: "Remove the global identity\u2026",
         onClick: () => this.cmdDropGlobalIdentity()
@@ -10282,7 +10288,11 @@ ${err?.stderr ?? ""}`, err?.stdout)) {
         enabled: d.sparseEnabled === "true",
         cone: d.sparseCone === "true",
         hasBase: sparsePatterns.includes("/*"),
-        hasEmptyingDefault: sparsePatterns.includes("!/*/")
+        hasEmptyingDefault: sparsePatterns.includes("!/*/"),
+        // Anything the plugin's own model never writes: an include line other
+        // than the `/*` base, or the exclude-everything `!/*`. Such a set is
+        // somebody's hand-made definition and the repair must not touch it.
+        foreign: sparsePatterns.some((p) => !p.startsWith("!") && p !== "/*" || p === "!/*")
       },
       rescueBranches: list(d.rescueBranches),
       previousGitDirs: list(d.previousGitDirs)
@@ -10377,6 +10387,12 @@ ${procs.join("\n")}`,
       if (item.step === "sparse" && item.act === "cone-needs-decision") {
         summary.push(
           "This repository uses cone-mode sparse checkout; per-path protection needs pattern (non-cone) mode, and switching modes is a decision, not a repair. In Termux: git sparse-checkout init --no-cone (then re-add exclusions here)."
+        );
+        continue;
+      }
+      if (item.step === "sparse" && item.act === "foreign-needs-decision") {
+        summary.push(
+          "The sparse definition is hand-made (an include list, not this plugin's include-everything-then-exclude shape). The repair leaves it alone: rebuilding it would destroy patterns nothing else stores. If files are unexpectedly missing, review .git/info/sparse-checkout in Termux."
         );
         continue;
       }

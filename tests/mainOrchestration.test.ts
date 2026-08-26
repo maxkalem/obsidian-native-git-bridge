@@ -925,6 +925,9 @@ describe("repository bootstrap", () => {
     await (h.plugin as Any).cmdCheckIdentity();
     expect(__modalActionLabels).toContain("Remove the global identity…");
     expect(__modalActionLabels).not.toContain("Set the git identity…");
+    // An identity once set must stay CHANGEABLE from the same window: the set
+    // command overwrites, so it doubles as the change route (user, 2026-08-26).
+    expect(__modalActionLabels).toContain("Change the git identity…");
     expect(__modalActionLabels).not.toContain("Prefer this repository's credentials…");
   });
 
@@ -1067,6 +1070,62 @@ describe("repository bootstrap", () => {
     expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
     expect(__modalActionLabels).toContain("Delete repair backup branch…");
     expect(__modalActionLabels.some((l: string) => l.startsWith("Free up"))).toBe(false);
+  });
+
+  it("the walk NEVER rewrites a hand-made sparse definition (the WScafe replay)", async () => {
+    // Released 0.6.6 broke a real device with exactly this: a whitelist
+    // (`!/*`, `!/*/`, then include lines) has no `/*` base by design, the
+    // planner read that as damage, and repair-sparse-definition rebuilt the
+    // file into `/*` + `!/*` — the only copy of the include list, destroyed.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 17;
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 17,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "local",
+            userEmailScopes: "local",
+            credHelperScopes: "local",
+            sparseEnabled: "true",
+            sparseCone: "false",
+            sparseList: "!/*\n!/*/\n/.obsidian\n/Documentation\n/.gitignore",
+            rescueBranches: "",
+            previousGitDirs: "",
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 17,
+        data: {
+          branchInfo: "# branch.head main",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(sent).not.toContain("repair-sparse-definition");
+    expect(sent).toContain("repair-scan"); // the walk goes on; it only skips the rewrite
+    expect(__modalTitles).toContain("Repository repaired");
   });
 
   it("a clean walk on a LIGHTWEIGHT repository measures the blob bloat and offers exactly that", async () => {

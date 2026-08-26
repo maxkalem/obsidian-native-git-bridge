@@ -182,7 +182,7 @@ describe("planRepair", () => {
     lock: { lockExists: false, lockAgeSeconds: null, liveGit: false, liveProcesses: [] },
     identity: { local: true, global: false, any: true },
     globalCredHelper: false,
-    sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: false },
+    sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: false, foreign: false },
     rescueBranches: [],
     previousGitDirs: [],
     ...over,
@@ -196,7 +196,7 @@ describe("planRepair", () => {
     const plan = planRepair(
       base({
         identity: { local: false, global: true, any: true },
-        sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false },
+        sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false, foreign: false },
       })
     );
     expect(plan).toEqual([{ step: "identity", act: "offer-set" }]);
@@ -213,18 +213,43 @@ describe("planRepair", () => {
 
   it("plans the sparse repair for the emptying default and for a missing base", () => {
     expect(
-      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true } }))
+      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true, foreign: false } }))
     ).toEqual([{ step: "sparse", act: "repair-definition" }]);
     expect(
-      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: false, hasEmptyingDefault: false } }))
+      planRepair(base({ sparse: { enabled: true, cone: false, hasBase: false, hasEmptyingDefault: false, foreign: false } }))
     ).toEqual([{ step: "sparse", act: "repair-definition" }]);
     // Cone mode is a decision, not a repair; disabled sparse plans nothing.
     expect(
-      planRepair(base({ sparse: { enabled: true, cone: true, hasBase: false, hasEmptyingDefault: true } }))
+      planRepair(base({ sparse: { enabled: true, cone: true, hasBase: false, hasEmptyingDefault: true, foreign: false } }))
     ).toEqual([{ step: "sparse", act: "cone-needs-decision" }]);
     expect(
-      planRepair(base({ sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false } }))
+      planRepair(base({ sparse: { enabled: false, cone: false, hasBase: false, hasEmptyingDefault: false, foreign: false } }))
     ).toEqual([]);
+  });
+
+  it("leaves a hand-made definition alone: foreign wins over the missing base", () => {
+    // The WScafe device replay (2026-08-26, released 0.6.6): a whitelist —
+    // `!/*`, `!/*/`, then include lines — has no `/*` base BY DESIGN. The
+    // shipped planner read that as damage and the repair rebuilt the file
+    // into `/*` + `!/*`, destroying the only copy of the include list.
+    expect(
+      planRepair(
+        base({ sparse: { enabled: true, cone: false, hasBase: false, hasEmptyingDefault: true, foreign: true } })
+      )
+    ).toEqual([{ step: "sparse", act: "foreign-needs-decision" }]);
+    // The defect's own residue (`/*` + `!/*`) is foreign too: rebuilding it
+    // into a bare `/*` would show everything a whitelist meant to hide.
+    expect(
+      planRepair(
+        base({ sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: false, foreign: true } })
+      )
+    ).toEqual([{ step: "sparse", act: "foreign-needs-decision" }]);
+    // Cone still outranks foreign: it is the more specific decision.
+    expect(
+      planRepair(
+        base({ sparse: { enabled: true, cone: true, hasBase: false, hasEmptyingDefault: false, foreign: true } })
+      )
+    ).toEqual([{ step: "sparse", act: "cone-needs-decision" }]);
   });
 
   it("keeps the user's order: blockers first, leftovers last", () => {
@@ -233,7 +258,7 @@ describe("planRepair", () => {
         lock: { lockExists: true, lockAgeSeconds: 9999, liveGit: false, liveProcesses: [] },
         identity: { local: false, global: true, any: true },
         globalCredHelper: true,
-        sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true },
+        sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: true, foreign: false },
         rescueBranches: ["ngb-rescue-20260810T235946Z"],
         previousGitDirs: ["previous-git-20260807T101500Z"],
       })
