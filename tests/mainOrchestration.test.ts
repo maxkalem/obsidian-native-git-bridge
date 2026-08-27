@@ -1864,30 +1864,104 @@ describe("version advice across the three parts", () => {
 });
 
 describe("commit messages (0.6.7 item 6)", () => {
-  it("sync without a typed message commits with the RENDERED auto template", async () => {
-    // obsidian-git's model, the user's pick: no modal, the template filled in
-    // with the device-local date. The runner's fixed fallback stays for old
-    // plugins but is no longer reachable from here.
+  const okSync = {
+    ok: true,
+    exitCode: 0,
+    runnerVersion: 17,
+    data: {
+      branchInfo: "# branch.head main",
+      steps: "repo-verified,fetched,staged,committed,pushed",
+      committed: "true",
+      pushed: "true",
+    },
+  };
+
+  it("each of the three triggers commits with ITS OWN slot's template", async () => {
+    // The user's design (2026-08-27): the history must keep saying WHICH
+    // trigger committed — manual sync, the automatic one, and sync-on-close
+    // each have a slot, defaulting to the old fixed strings.
     const h = await loadPlugin();
     await enableBridge(h);
     h.useFastClient();
-    let sentMessage: string | null = null;
+    const messages: string[] = [];
     answerWith(h, (req: Any) => {
-      if (req.action === "sync") sentMessage = req.args?.message ?? "";
+      if (req.action === "sync") messages.push(req.args?.message ?? "");
+      return okSync;
+    });
+    await h.plugin.cmdSync();
+    expect(messages).toEqual(["vault sync (native git bridge)"]);
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(messages[1]).toBe("vault auto commit (native git bridge)");
+    // The fire-and-forget close path writes the request and never polls; the
+    // message is read from the request file itself.
+    (h.plugin as Any).lastAutoSyncMs = 0;
+    await (h.plugin as Any).queueSyncAndForget();
+    const reqFile = requestFiles(h.adapter).at(-1)!;
+    const req = JSON.parse(h.adapter.files.get(reqFile)!);
+    expect(req.args.message).toBe("vault sync on close (native git bridge)");
+  });
+
+  it("a slot template with {{date}} is rendered before it is sent", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await h.plugin.updateDeviceSettings({ syncTemplate: "Update {{date}}" });
+    let sent = "";
+    answerWith(h, (req: Any) => {
+      if (req.action === "sync") sent = req.args?.message ?? "";
+      return okSync;
+    });
+    await h.plugin.cmdSync();
+    expect(sent).toMatch(/^Update \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it("a typed message renders its variables at commit time; the RAW text joins the recents", async () => {
+    // The user's rule (2026-08-27, second round): {{date}} may sit in ANY
+    // message — typed or picked — and what lands in history is the value.
+    // The recents keep the braces, so a reused entry re-renders next time.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let sent = "";
+    answerWith(h, (req: Any) => {
+      if (req.action === "commit") sent = req.args?.message ?? "";
       return {
         ok: true,
         exitCode: 0,
         runnerVersion: 17,
-        data: {
-          branchInfo: "# branch.head main",
-          steps: "repo-verified,fetched,staged,committed,pushed",
-          committed: "true",
-          pushed: "true",
-        },
+        data: { branchInfo: "# branch.head main", committed: "true", newHead: "abc1234567" },
       };
     });
-    await h.plugin.cmdSync();
-    expect(sentMessage).toMatch(/^Update \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    await h.plugin.performCommit("note {{date}}");
+    expect(sent).toMatch(/^note \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(h.plugin.recentCommitMessages()).toEqual(["note {{date}}"]);
+  });
+
+  it("default templates are seeded exactly once, and a wiped list stays wiped", async () => {
+    // The marker is the memory (the user's design): a fresh data.json gets
+    // the defaults and the marker; a data.json whose owner deleted every
+    // template keeps its empty list, marker and all.
+    const fresh = await loadPlugin();
+    expect(fresh.plugin.sharedPrefs.commitTemplates).toContain("Update {{date}}");
+    expect(fresh.plugin.sharedPrefs.commitTemplates).toContain("vault sync (native git bridge)");
+    expect(fresh.plugin.sharedPrefs.commitTemplatesSeeded).toBe(true);
+    const adapter2 = memAdapter();
+    const app2 = makeApp(adapter2);
+    const runner2: FakeRunner = { uris: [], onTrigger: null, copied: [] };
+    installGlobals(runner2);
+    const p2 = new (NativeGitBridgePlugin as Any)(app2, {
+      id: "native-git-bridge",
+      name: "Native Git Bridge",
+      version: "0.6.7",
+    }) as NativeGitBridgePlugin;
+    (p2 as Any).__setData({
+      showStatusBar: false,
+      showRibbonIcon: false,
+      commitTemplates: ["mine"],
+      commitTemplatesSeeded: true,
+    });
+    await p2.onload();
+    expect(p2.sharedPrefs.commitTemplates).toEqual(["mine"]);
   });
 
   it("recents are remembered newest-first and capped by the device setting", async () => {

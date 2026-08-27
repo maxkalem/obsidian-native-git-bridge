@@ -11,7 +11,8 @@ import { MIN_NETWORK_TIMEOUT_SECONDS, RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { formatSize } from "../git/previousRepos";
 import type { InlineDiffUnit } from "../git/inlineDiff";
-import { DEFAULT_COMMIT_DATE_FORMAT, DEFAULT_COMMIT_TEMPLATE } from "../git/commitMessage";
+import { DEFAULT_COMMIT_DATE_FORMAT } from "../git/commitMessage";
+import { promptNewTemplate, TemplateManagerModal } from "../ui/gitModals";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: NativeGitBridgePlugin) {
@@ -331,34 +332,98 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl).setName("Commit messages").setHeading();
 
-    new Setting(containerEl)
-      .setName("Message templates")
-      .setDesc(
-        "One per line; offered as one-tap choices in the commit window. {{date}} becomes the " +
-          "current date and time in this device's timezone, using the format below. Shared across " +
-          "devices (stored in data.json)."
-      )
-      .addTextArea((t) => {
-        t.setValue(this.plugin.sharedPrefs.commitTemplates.join("\n")).onChange((v) => { void (async () => {
-          const list = v.split("\n").map((x) => x.trim()).filter((x) => x !== "");
-          await this.plugin.setSharedPref({ commitTemplates: list });
-        })(); });
-        t.inputEl.rows = 3;
-      });
+    // The list itself lives in ITS OWN modal (a list of any length stopped
+    // fitting this page — the user's report); the row here shows the count
+    // and opens it. The trigger slots refresh in place, the rule the four
+    // config-rule managers follow.
+    const tplRow = containerEl.createDiv();
+    const slotBox = containerEl.createDiv();
+    const templateIo = {
+      get: () => this.plugin.sharedPrefs.commitTemplates,
+      set: (next: string[]) => this.plugin.setSharedPref({ commitTemplates: next }),
+      onChanged: () => {
+        renderTemplateRow();
+        renderSlots();
+      },
+    };
+    const renderTemplateRow = () => {
+      tplRow.empty();
+      new Setting(tplRow)
+        .setName("Message templates")
+        .setDesc(
+          `${this.plugin.sharedPrefs.commitTemplates.length} template(s). The commit window and ` +
+            "the three automatic triggers below pick from this list; {{date}} becomes the current " +
+            "date and time using the format below. Shared across devices (data.json)."
+        )
+        .addButton((b) =>
+          b.setButtonText("Manage templates…").onClick(() =>
+            new TemplateManagerModal(this.app, templateIo).open()
+          )
+        );
+    };
 
-    new Setting(containerEl)
-      .setName("Automatic commit message")
-      .setDesc(
-        "What Sync commits with when you did not type a message. A merge in progress always uses " +
-          "git's own prepared merge message instead. Shared across devices."
-      )
-      .addText((t) =>
-        t.setValue(this.plugin.sharedPrefs.autoCommitTemplate).onChange((v) => { void (async () => {
-          await this.plugin.setSharedPref({
-            autoCommitTemplate: v.trim() === "" ? DEFAULT_COMMIT_TEMPLATE : v,
-          });
-        })(); })
+    // One slot per automatic trigger: a dropdown over the SHARED template
+    // list plus "+ New template…" (the shared add window), which saves into
+    // the list and into the slot. The slot itself is DEVICE-LOCAL and stores
+    // the template STRING, so deleting a list row never retargets it — the
+    // kept string just says it left the list.
+    const slotSetting = (
+      name: string,
+      desc: string,
+      key: "syncOnCloseTemplate" | "autoCommitTemplate" | "syncTemplate"
+    ) => {
+      const patchFor = (v: string) =>
+        key === "syncOnCloseTemplate"
+          ? { syncOnCloseTemplate: v }
+          : key === "autoCommitTemplate"
+            ? { autoCommitTemplate: v }
+            : { syncTemplate: v };
+      new Setting(slotBox)
+        .setName(name)
+        .setDesc(desc)
+        .addDropdown((d) => {
+          const cur = this.plugin.deviceSettings[key];
+          const list = this.plugin.sharedPrefs.commitTemplates;
+          if (!list.includes(cur)) d.addOption(cur, `${cur} (not in the list)`);
+          for (const t of list) d.addOption(t, t);
+          d.addOption("__new__", "+ New template…");
+          d.setValue(cur).onChange((v) => { void (async () => {
+            if (v === "__new__") {
+              promptNewTemplate(this.app, async (msg) => {
+                await this.plugin.setSharedPref({
+                  commitTemplates: [...this.plugin.sharedPrefs.commitTemplates, msg],
+                });
+                await this.plugin.updateDeviceSettings(patchFor(msg));
+                renderTemplateRow();
+                renderSlots();
+              });
+              renderSlots(); // put the dropdown back until the prompt answers
+              return;
+            }
+            await this.plugin.updateDeviceSettings(patchFor(v));
+          })(); });
+        });
+    };
+    const renderSlots = () => {
+      slotBox.empty();
+      slotSetting(
+        "Sync-on-close message",
+        "What the fire-and-forget sync commits with when Obsidian goes to the background. Device-local.",
+        "syncOnCloseTemplate"
       );
+      slotSetting(
+        "Automatic sync message",
+        "What the periodic sync and sync-on-open commit with. Device-local.",
+        "autoCommitTemplate"
+      );
+      slotSetting(
+        "Sync message",
+        "What the Sync command commits with when you did not type a message. A merge in progress always uses git's own prepared merge message instead. Device-local.",
+        "syncTemplate"
+      );
+    };
+    renderTemplateRow();
+    renderSlots();
 
     new Setting(containerEl)
       .setName("{{date}} format")

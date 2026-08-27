@@ -569,16 +569,20 @@
 /* Full-width textarea (was an inline style, which themes cannot override). */
 .ngb-textarea-full { width: 100%; }
 
-/* Commit-message suggestion chips (templates first, then this device's
-   recents). One-line each with an ellipsis: a recent can be a whole typed
-   sentence, and a chip that wraps turns the row of choices into a wall. */
-.ngb-msg-suggestions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-2); }
-.ngb-msg-chip {
-  font-size: var(--font-ui-smaller); color: var(--text-normal);
-  background: var(--background-modifier-border); border-radius: var(--radius-s);
-  padding: 2px var(--size-4-2); max-width: 100%;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+/* The commit window's two dropdowns (Recent messages, Templates), side by
+   side; the platform's own picker scrolls and keeps one open at a time.
+   Entries APPEND to the message. */
+.ngb-msg-pick-row { display: flex; gap: var(--size-4-2); margin-top: var(--size-4-2); }
+.ngb-msg-pick { flex: 1 1 0; min-width: 0; }
+/* The ? in the commit window's corner (mirrors the mobile action button's
+   top-left slot on the OTHER side). */
+.ngb-msg-help { position: absolute; top: var(--size-4-2); left: var(--size-4-2); }
+/* The variables modal: token + copy on one line, the meaning under it. */
+.ngb-var-row { margin-top: var(--size-4-2); }
+.ngb-var-head { display: flex; align-items: center; gap: var(--size-4-1); }
+/* The template manager's rows: the input IS the row, the trash sits beside. */
+.ngb-tpl-row { display: flex; align-items: center; gap: var(--size-4-1); margin-top: var(--size-4-2); }
+.ngb-tpl-input { flex: 1 1 0; min-width: 0; }
 
 /* ---------------------------------------------------------------- history */
 
@@ -874,6 +878,12 @@
 .ngb-diff-view.ngb-diff-wrap .d2h-code-linenumber {
   width: var(--ngb-diff-gutter-w, 6em);
   overflow: hidden;
+}
+/* The width fixed layout ACTUALLY reads: the <col>, not a later row's td.
+   The first row is the @@ header (one colspan=2 cell), so without the col
+   the browser split the columns 50/50 and the gutter took half the pane. */
+.ngb-diff-view.ngb-diff-wrap col.ngb-col-gutter {
+  width: var(--ngb-diff-gutter-w, 6em);
 }
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line { white-space: normal; }
 .ngb-diff-view.ngb-diff-wrap .d2h-code-line-ctn {

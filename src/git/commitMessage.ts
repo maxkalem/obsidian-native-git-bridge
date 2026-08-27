@@ -16,6 +16,38 @@
 export const DEFAULT_COMMIT_TEMPLATE = "Update {{date}}";
 export const DEFAULT_COMMIT_DATE_FORMAT = "YYYY-MM-DD HH:mm:ss";
 
+/**
+ * Default messages of the three automatic triggers, one each, matching the
+ * fixed strings earlier releases used — the user's correction (2026-08-27):
+ * which trigger made a commit must stay readable in the history, and the
+ * first cut of this feature had collapsed all three into one template.
+ */
+export const DEFAULT_SYNC_ON_CLOSE_TEMPLATE = "vault sync on close (native git bridge)";
+export const DEFAULT_AUTO_COMMIT_TEMPLATE = "vault auto commit (native git bridge)";
+export const DEFAULT_SYNC_TEMPLATE = "vault sync (native git bridge)";
+
+/** The template list a fresh install starts with: the slots' three plus the dated one. */
+export const DEFAULT_COMMIT_TEMPLATES = [
+  DEFAULT_COMMIT_TEMPLATE,
+  DEFAULT_SYNC_TEMPLATE,
+  DEFAULT_SYNC_ON_CLOSE_TEMPLATE,
+  DEFAULT_AUTO_COMMIT_TEMPLATE,
+];
+
+/**
+ * The variables a commit message may carry, for the commit window's help
+ * modal. Every one is substituted at COMMIT time — in the typed message, a
+ * picked template, and the automatic slots alike — so what lands in history
+ * is the value, never the braces.
+ */
+export const TEMPLATE_VARIABLES: Array<{ token: string; description: string }> = [
+  {
+    token: "{{date}}",
+    description:
+      "The current date and time in this device's timezone, formatted per the '{{date}} format' setting (default YYYY-MM-DD HH:mm:ss).",
+  },
+];
+
 /** Device-local time, moment-style tokens (the subset named above). */
 export function formatCommitDate(fmt: string, d: Date): string {
   const p2 = (n: number) => String(n).padStart(2, "0");

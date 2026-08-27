@@ -209,9 +209,15 @@ export class RunnerOutputView extends ItemView {
     wrapBtn.addEventListener("click", () => {
       // Await the preference write before reading it back: the highlight and
       // the class must be set from what was SAVED, not from what was hoped.
+      // `finally`, because the write also refreshes the other panels and a
+      // throw in any of them used to swallow the read-back — the device then
+      // showed the console wrapped with the button dark (2026-08-27 report).
       void (async () => {
-        await this.actions.toggleWrapLines();
-        this.applyWrapState();
+        try {
+          await this.actions.toggleWrapLines();
+        } finally {
+          this.applyWrapState();
+        }
       })();
     });
     this.wrapBtn = wrapBtn;
@@ -264,8 +270,15 @@ export class RunnerOutputView extends ItemView {
   /** The wrap toggle's highlight and the console's class, from the saved pref. */
   private applyWrapState(): void {
     const on = this.actions.wrapLines();
-    this.wrapBtn?.toggleClass("ngb-sv-icon-active", on);
-    this.wrapBtn?.setAttribute("aria-pressed", on ? "true" : "false");
+    if (this.wrapBtn) {
+      this.wrapBtn.toggleClass("ngb-sv-icon-active", on);
+      // The inline colour doubles the class on purpose: on the user's device
+      // the class stopped RENDERING after the first toggle while the console
+      // kept following the same saved value (root cause never reproduced off
+      // the device); an inline style survives whatever ate the class.
+      this.wrapBtn.style.color = on ? "var(--text-accent)" : "";
+      this.wrapBtn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
     this.streamBox?.toggleClass("ngb-out-wrap", on);
   }
 
@@ -307,6 +320,10 @@ export class RunnerOutputView extends ItemView {
   }
 
   private apply(s: RunnerOutputSnapshot): void {
+    // Self-healing for the wrap toggle: reassert the saved preference on
+    // every snapshot, so any desync between the button and the console (the
+    // 2026-08-26 device showed exactly one) outlives at most one tick.
+    this.applyWrapState();
     const running = s.action !== null;
     if (this.cancelBtn) {
       // Hidden rather than disabled: nothing to cancel is not the same as a

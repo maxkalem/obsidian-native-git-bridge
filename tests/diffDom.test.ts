@@ -36,6 +36,20 @@ function codeRows(root: Any): Any[] {
 beforeEach(() => __resetObsidianMock());
 
 describe("the structure styles.css depends on", () => {
+  it("every table declares its columns: fixed layout reads widths from <col> only", () => {
+    // The wrapped layout is `table-layout: fixed`, and fixed takes column
+    // widths from <col> or the FIRST ROW — which here is always the `@@`
+    // header, one colspan=2 cell naming no widths. Without the colgroup the
+    // browser split the two columns 50/50 and the number gutter swallowed
+    // half the pane (two device screenshots before this was understood).
+    const root = render(SAMPLE);
+    const table = __findByClass(root, "d2h-diff-table");
+    const colgroup = table.children[0];
+    expect(colgroup?.tagName).toBe("COLGROUP");
+    expect(colgroup.children[0]?.hasClass("ngb-col-gutter")).toBe(true);
+    expect(colgroup.children).toHaveLength(2);
+  });
+
   it("nests wrapper → file → code-wrapper → table → tbody", () => {
     const root = render(SAMPLE);
     const wrapper = __findByClass(root, "d2h-wrapper");

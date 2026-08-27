@@ -1,4 +1,9 @@
 import { STORAGE_PREFIX, DEFAULT_PROTECTED_PATHS, DEFAULT_TIMEOUT_SECONDS } from "../constants";
+import {
+  DEFAULT_AUTO_COMMIT_TEMPLATE,
+  DEFAULT_SYNC_ON_CLOSE_TEMPLATE,
+  DEFAULT_SYNC_TEMPLATE,
+} from "../git/commitMessage";
 
 export interface DeviceLocalSettings {
   schemaVersion: number;
@@ -73,6 +78,15 @@ export interface DeviceLocalSettings {
    * decides how much of it this device stores. 0 turns the recents off.
    */
   recentCommitMessagesMax: number;
+  /**
+   * The three automatic commit-message slots, one per trigger, each a plain
+   * template string ({{date}} allowed). Device-local by the user's design
+   * (2026-08-27): each device picks its own trigger messages out of the
+   * SHARED template list, which lives in data.json.
+   */
+  syncOnCloseTemplate: string;
+  autoCommitTemplate: string;
+  syncTemplate: string;
   /**
    * Epoch ms of the last "you still have an old repository set aside" reminder.
    * Device-local: the copy sits on THIS device's disk, and so does the decision
@@ -158,6 +172,9 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   deleteUntrackedPermanently: false,
   rowsPerGroup: DEFAULT_ROWS_PER_GROUP_SETTING,
   recentCommitMessagesMax: 10,
+  syncOnCloseTemplate: DEFAULT_SYNC_ON_CLOSE_TEMPLATE,
+  autoCommitTemplate: DEFAULT_AUTO_COMMIT_TEMPLATE,
+  syncTemplate: DEFAULT_SYNC_TEMPLATE,
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,

@@ -172,7 +172,16 @@ export function gutterWidthCh(root: ParentNode): number {
   return 2 * digits + 5;
 }
 
-/** Apply the measured gutter width to the pane (used by the wrapped layout). */
+/**
+ * Apply the measured gutter width to the pane (used by the wrapped layout).
+ *
+ * The digit-count formula, deliberately: a scrollWidth-based measurement was
+ * tried and reverted the same day — it read the CELL, whose width already
+ * included the previous value, so every re-render could only grow it. The
+ * real cause of the half-pane gutter was never the number here at all: fixed
+ * table layout ignored the td width and split the columns 50/50, which the
+ * <colgroup> in diffDom now prevents.
+ */
 export function sizeGutter(box: HTMLElement): void {
   const host = box.closest<HTMLElement>(".ngb-diff-view") ?? box;
   host.style.setProperty("--ngb-diff-gutter-w", `${gutterWidthCh(box)}ch`);

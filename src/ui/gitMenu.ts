@@ -45,11 +45,15 @@ export interface GitMenuFlags {
   untrack: boolean;
   /**
    * Whether the remote maps to a known web host (remoteFileUrl answered for
-   * this path and commit). The open-on-remote entry appears only then: a
-   * wrong link is worse than no link, and an entry that opens nothing is a
-   * bug report waiting to be written.
+   * this path and commit). The copy-remote-link entry appears only then: a
+   * wrong link is worse than no link.
    */
   remoteMappable?: boolean;
+  /**
+   * Whether the device's absolute repository path is known (the repository
+   * path hint in settings), so "Copy path (from system root)" can be honest.
+   */
+  absolutePathAvailable?: boolean;
 }
 
 /**
@@ -103,8 +107,10 @@ export type MenuAction =
   | "untrack"
   | "open-diff-at-commit"
   | "show-at-commit"
-  | "restore-from-commit"
-  | "open-remote";
+  | "restore-after-commit"
+  | "restore-before-commit"
+  | "copy-remote-link"
+  | "copy-path-absolute";
 
 export interface MenuEntry {
   action: MenuAction;
@@ -137,18 +143,40 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
     // nothing to restore from, and no history under the path it no longer has.
     if (scope.code !== "D") {
       out.push({ action: "show-at-commit", title: "Show the file as of this commit", icon: "eye" });
+      // Two restores, because "restore from this commit" never said WHICH
+      // state (the user's report): the file as this commit left it, and the
+      // file as it was before the commit touched it. The BEFORE state exists
+      // only when the commit modified an existing path — a file the commit
+      // ADDED (or renamed into place) has nothing under this path at hash^.
+      // Short titles (they truncated on the phone); the confirmation window
+      // spells the exact state out before anything is written.
       out.push({
-        action: "restore-from-commit",
-        title: "Restore the file from this commit",
+        action: "restore-after-commit",
+        title: "Restore: after this commit",
         icon: "rotate-ccw",
         danger: true,
       });
+      if (scope.code === "M" || scope.code === "T") {
+        out.push({
+          action: "restore-before-commit",
+          title: "Restore: before this commit",
+          icon: "rotate-ccw",
+          danger: true,
+        });
+      }
       out.push({ action: "open-history", title: "Open file history", icon: "history" });
       if (f.remoteMappable === true) {
-        out.push({ action: "open-remote", title: "Open on the remote (browser)", icon: "globe" });
+        // COPIED, never opened: opening needs a browser that happens to be
+        // signed into the account that can see the blob, and Android's app
+        // links hand github.com to whatever app claims it. A copied link
+        // goes wherever the user's session already is.
+        out.push({ action: "copy-remote-link", title: "Copy remote link", icon: "link" });
       }
     }
-    out.push({ action: "copy-path", title: "Copy path", icon: "copy" });
+    out.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    if (f.absolutePathAvailable === true) {
+      out.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+    }
     return out;
   }
   const out: MenuEntry[] = [];
@@ -200,7 +228,12 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
     out.push({ action: "open-external", title: "Open in default app", icon: "external-link" });
   }
   if (scope.kind !== "group") {
-    out.push({ action: "copy-path", title: "Copy path", icon: "copy" });
+    // The two spellings Obsidian's own file manager offers (the user's ask):
+    // repository-relative, and absolute on this device when the path is known.
+    out.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    if (f.absolutePathAvailable === true) {
+      out.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+    }
   }
 
   // 7-9. Config editing. On a single path the entry flips between add and

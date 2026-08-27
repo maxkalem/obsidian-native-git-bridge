@@ -61,6 +61,15 @@ export function renderUnifiedDiff(
       .createDiv({ cls: "d2h-file-diff" })
       .createDiv({ cls: "d2h-code-wrapper" })
       .createEl("table", { cls: "d2h-diff-table" });
+    // Explicit columns, because the wrapped layout is `table-layout: fixed`
+    // and fixed reads widths from <col> or the FIRST ROW ONLY — and the first
+    // row here is always the `@@` header, one colspan=2 cell that names no
+    // widths. With nothing to read, the browser split the two columns 50/50
+    // and the gutter swallowed half the pane (the device screenshots, twice);
+    // the width the stylesheet put on the td of LATER rows never counted.
+    const colgroup = table.createEl("colgroup");
+    colgroup.createEl("col", { cls: "ngb-col-gutter" });
+    colgroup.createEl("col");
     const tbody = table.createEl("tbody", { cls: "d2h-diff-tbody" });
     for (const hunk of file.hunks) {
       renderHunkHeader(tbody, hunk.header, hunk, hunkIndex, opts);

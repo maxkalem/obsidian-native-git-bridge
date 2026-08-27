@@ -58,7 +58,8 @@ describe("git context menu, one description for every surface", () => {
     expect(a).toEqual([
       "open-diff-at-commit",
       "show-at-commit",
-      "restore-from-commit",
+      "restore-after-commit",
+      "restore-before-commit",
       "open-history",
       "copy-path",
     ]);
@@ -67,12 +68,17 @@ describe("git context menu, one description for every surface", () => {
     for (const x of ["stage", "discard", "gitignore-add", "sparse-add", "exclude-add", "untrack"]) {
       expect(a).not.toContain(x);
     }
-    // The restore route is marked destructive, like every discard.
+    // Both restore routes are marked destructive, like every discard.
     const entries = buildMenuEntries(at("M"), allOn);
-    expect(entries.find((e) => e.action === "restore-from-commit")!.danger).toBe(true);
+    expect(entries.find((e) => e.action === "restore-after-commit")!.danger).toBe(true);
+    expect(entries.find((e) => e.action === "restore-before-commit")!.danger).toBe(true);
+    // A file the commit ADDED has no before-state under this path: only the
+    // after-restore is offered.
+    expect(actions(at("A"))).not.toContain("restore-before-commit");
+    expect(actions(at("A"))).toContain("restore-after-commit");
   });
 
-  it("open-on-remote appears only when the remote actually maps to a web host", () => {
+  it("the remote link is a COPY, offered only when the remote maps to a web host", () => {
     const at: MenuScope = {
       kind: "file-at-commit",
       path: "Notes/a.md",
@@ -81,8 +87,14 @@ describe("git context menu, one description for every surface", () => {
       subject: "a subject",
       code: "M",
     };
-    expect(actions(at)).not.toContain("open-remote"); // flag absent = unmappable
-    expect(actions(at, { remoteMappable: true })).toContain("open-remote");
+    expect(actions(at)).not.toContain("copy-remote-link"); // flag absent = unmappable
+    expect(actions(at, { remoteMappable: true })).toContain("copy-remote-link");
+  });
+
+  it("the absolute-path copy appears only while the device's root is known", () => {
+    const file: MenuScope = { kind: "file", path: "a.md", group: "unstaged" };
+    expect(actions(file)).not.toContain("copy-path-absolute");
+    expect(actions(file, { absolutePathAvailable: true })).toContain("copy-path-absolute");
   });
 
   it("a file DELETED by the commit has no content there: only the diff and the path", () => {

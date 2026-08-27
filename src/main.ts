@@ -46,12 +46,12 @@ import {
   ResultModal,
   SparseSafetyModal,
   StatusModal,
-  TextPreviewModal,
   type ResultModalAction,
   type SparseSafetyFixes,
 } from "./ui/modals";
 import { DiagnosticsModal, type DiagnosticsReport } from "./ui/DiagnosticsModal";
 import { CommitMessageModal, ConflictModal } from "./ui/gitModals";
+import { FileAtCommitView, NGB_FILE_AT_COMMIT_VIEW } from "./ui/FileAtCommitView";
 import { parsePairingFile } from "./settings/pairing";
 import {
   bytesToTextIfNotBinary,
@@ -92,8 +92,11 @@ import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { isValidBranchName, redactRemoteUrl, remoteFileUrl, validateRemoteUrl } from "./git/remoteUrl";
 import {
+  DEFAULT_AUTO_COMMIT_TEMPLATE,
   DEFAULT_COMMIT_DATE_FORMAT,
-  DEFAULT_COMMIT_TEMPLATE,
+  DEFAULT_COMMIT_TEMPLATES,
+  DEFAULT_SYNC_ON_CLOSE_TEMPLATE,
+  DEFAULT_SYNC_TEMPLATE,
   pushRecentMessage,
   renderCommitTemplate,
 } from "./git/commitMessage";
@@ -216,18 +219,24 @@ interface SharedUiPrefs {
   /** Conflict pane: show raw <<<<<<< markers with separate action rows. */
   showConflictMarkers: boolean;
   /**
-   * Commit message templates offered as one-tap chips in the commit window,
-   * and the one the automatic sync commit uses when nothing was typed.
-   * `{{date}}` renders in device-local time with `commitDateFormat`
-   * (moment-style tokens; the supported subset is in commitMessage.ts) —
-   * obsidian-git's model, the user's pick (2026-08-26). Shared through
-   * data.json: a template is a preference about how the history READS, the
-   * same on every device. The typed-message RECENTS are not here — they are
-   * this device's typing history and live in localStorage, with their cap in
-   * the device settings.
+   * Commit message templates: an open-ended list, each row deletable in
+   * settings, offered as a dropdown in the commit window. `{{date}}` renders
+   * in device-local time with `commitDateFormat` (moment-style tokens; the
+   * supported subset is in commitMessage.ts) — obsidian-git's model, the
+   * user's pick (2026-08-26). Shared through data.json: a template is a
+   * preference about how the history READS, the same on every device. The
+   * typed-message RECENTS are not here — they are this device's typing
+   * history and live in localStorage, with their cap in the device settings.
    */
   commitTemplates: string[];
-  autoCommitTemplate: string;
+  /**
+   * Set once the defaults have been written into `commitTemplates`, so they
+   * are seeded exactly one time per data.json and never re-added — a user
+   * who deletes them means it (their design, 2026-08-27). The three trigger
+   * SLOTS are not here: they live in the device-local settings as plain
+   * strings, so each device picks its own trigger messages.
+   */
+  commitTemplatesSeeded: boolean;
   commitDateFormat: string;
   /** Render file lists as a folder tree (status + history panels). */
   treeView: boolean;
@@ -252,8 +261,8 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   openOutputForLongOps: false,
   inlineDiffUnit: "word",
   showConflictMarkers: false,
-  commitTemplates: [DEFAULT_COMMIT_TEMPLATE],
-  autoCommitTemplate: DEFAULT_COMMIT_TEMPLATE,
+  commitTemplates: [],
+  commitTemplatesSeeded: false,
   commitDateFormat: DEFAULT_COMMIT_DATE_FORMAT,
   treeView: false,
   customColors: false,
@@ -424,6 +433,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     // merged over the defaults and anything that is not a hex value is dropped.
     this.sharedPrefs.colorsLight = sanitizeColorSet(this.sharedPrefs.colorsLight, "light");
     this.sharedPrefs.colorsDark = sanitizeColorSet(this.sharedPrefs.colorsDark, "dark");
+    // Seed the default templates EXACTLY ONCE per data.json (the marker is
+    // what says it happened): a user who later deletes them means it, and a
+    // reseed on every load would resurrect them forever.
+    if (!this.sharedPrefs.commitTemplatesSeeded) {
+      const missing = DEFAULT_COMMIT_TEMPLATES.filter(
+        (t) => !this.sharedPrefs.commitTemplates.includes(t)
+      );
+      this.sharedPrefs.commitTemplates = [...this.sharedPrefs.commitTemplates, ...missing];
+      this.sharedPrefs.commitTemplatesSeeded = true;
+      await this.saveData(this.sharedPrefs);
+    }
 
     registerIcons();
     const paths = new RuntimePaths(this.app.vault.configDir);
@@ -592,6 +612,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     );
 
     this.registerView(
+      NGB_FILE_AT_COMMIT_VIEW,
+      (leaf: WorkspaceLeaf) =>
+        new FileAtCommitView(leaf, {
+          loadContent: (path, hash) => this.loadFileAtCommit(path, hash),
+        })
+    );
+
+    this.registerView(
       NGB_OUTPUT_VIEW,
       (leaf: WorkspaceLeaf) =>
         new RunnerOutputView(leaf, {
@@ -671,6 +699,18 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.addMenuEntries(menu, scope);
   }
 
+  /**
+   * The path as this DEVICE spells it, from the repository path hint in
+   * settings ("Copy path (from system root)"), or null while the hint is
+   * unset — the entry is not offered then, because a guessed root is worse
+   * than no entry.
+   */
+  private absolutePathOf(rel: string): string | null {
+    const root = this.deviceSettings.repoPathHint.trim().replace(/\/+$/, "");
+    if (root === "" || !root.startsWith("/")) return null;
+    return rel === "." ? root : `${root}/${rel}`;
+  }
+
   /** Which panel group a path belongs to, from the last status the panel saw. */
   private inferGroup(p: string): Group {
     const st = this.lastStatus?.status;
@@ -714,6 +754,7 @@ export default class NativeGitBridgePlugin extends Plugin {
       remoteMappable:
         scope.kind === "file-at-commit" &&
         remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash) !== null,
+      absolutePathAvailable: this.absolutePathOf(".") !== null,
     });
     // What the menu is about, above what it can do. A panel row truncates its
     // name to fit one line and the file explorer shows no path at all, so this
@@ -755,32 +796,46 @@ export default class NativeGitBridgePlugin extends Plugin {
         case "show-at-commit":
           void this.showFileAtCommit(scope.path, scope.hash, scope.date);
           return;
-        case "restore-from-commit":
+        case "restore-after-commit":
+        case "restore-before-commit": {
           // The same confirmed route the file-history panel uses; the path AT
           // the commit doubles as the current path, which the confirmation
-          // window names before anything is written.
+          // window names before anything is written. BEFORE is the parent
+          // (`hash^`), which the runner's commit validation accepts.
+          const before = action === "restore-before-commit";
           this.confirmRestore(scope.path, {
-            hash: scope.hash,
+            hash: before ? `${scope.hash}^` : scope.hash,
             date: scope.date,
             author: "",
-            subject: scope.subject,
+            subject: before ? `the state before: ${scope.subject}` : scope.subject,
             pathAtCommit: scope.path,
           });
           return;
+        }
         case "open-history":
           void this.openFileHistoryPanel(scope.path);
           return;
-        case "open-remote": {
+        case "copy-remote-link": {
           // Recomputed rather than carried: the entry existed because this
           // answered, and the URL never contains userinfo (remoteFileUrl
-          // drops it, the runner redacted it before that).
+          // drops it, the runner redacted it before that). Copied, never
+          // opened — a private repository's page needs whichever browser the
+          // user is actually signed into, and Android's app links would hand
+          // the URL to the GitHub app regardless.
           const url = remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash);
-          if (url !== null) this.openExternalUri(url);
+          if (url !== null) {
+            void navigator.clipboard.writeText(url);
+            new Notice("Remote link copied.");
+          }
           return;
         }
         case "copy-path":
           void navigator.clipboard.writeText(scope.path);
           new Notice("Path copied.");
+          return;
+        case "copy-path-absolute":
+          void navigator.clipboard.writeText(this.absolutePathOf(scope.path) ?? scope.path);
+          new Notice("Absolute path copied.");
           return;
         default:
           return;
@@ -822,6 +877,10 @@ export default class NativeGitBridgePlugin extends Plugin {
       case "copy-path":
         void navigator.clipboard.writeText(path);
         new Notice("Path copied.");
+        return;
+      case "copy-path-absolute":
+        void navigator.clipboard.writeText(this.absolutePathOf(path) ?? path);
+        new Notice("Absolute path copied.");
         return;
       case "abort-merge":
         void this.cmdAbortMerge();
@@ -951,7 +1010,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!this.autoActionAllowed()) return;
     this.lastAutoSyncMs = Date.now();
     this.log.add("info", "auto", `Automatic sync (${reason}).`);
-    await this.cmdSync(undefined, true);
+    await this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
   }
 
   /** Queue a sync request without waiting (used only on close/background). */
@@ -965,7 +1024,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     try {
       const req = createRequest(
         "sync",
-        { protectedPaths: this.effectiveProtectedPaths(), message: "vault sync on close (native git bridge)" },
+        {
+          protectedPaths: this.effectiveProtectedPaths(),
+          message: this.renderedSlotMessage("sync-on-close"),
+        },
         s.authToken,
         s.opTimeoutSeconds
       );
@@ -1075,7 +1137,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (this.deviceSettings.enabledOnThisDevice && onOpen !== "nothing") {
       if (this.autoActionAllowed()) {
         this.log.add("info", "auto", `Auto ${onOpen} on open.`);
-        if (onOpen === "sync") void this.cmdSync(undefined, true);
+        if (onOpen === "sync") void this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
         else void this.cmdPull(true);
       }
     }
@@ -4807,16 +4869,11 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Committing a resolved merge: prefill git's own prepared message
     // ("Merge branch … # Conflicts: …") so the history reads like any merge.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
-    // One-tap suggestions: the templates, rendered for this moment, then this
-    // device's recents. Deduped so a template that was also typed recently
-    // appears once. Not offered mid-merge: git's prepared message is the one
+    // Two pickers: this device's recents and the SHARED template list, both
+    // as raw text — {{date}} stays visible in the window and is substituted
+    // at commit time (performCommit), in typed messages and picks alike.
+    // Neither picker is offered mid-merge: git's prepared message is the one
     // that belongs there.
-    const rendered = this.sharedPrefs.commitTemplates.map((t) =>
-      renderCommitTemplate(t, this.sharedPrefs.commitDateFormat)
-    );
-    const suggestions = mergeMsg
-      ? []
-      : [...rendered, ...this.recentCommitMessages().filter((r) => !rendered.includes(r))];
     new CommitMessageModal(
       this.app,
       {
@@ -4824,32 +4881,42 @@ export default class NativeGitBridgePlugin extends Plugin {
         placeholder: "Commit message…",
         submitLabel: "Commit",
         initial: mergeMsg,
-        suggestions,
+        recents: mergeMsg ? [] : this.recentCommitMessages(),
+        templates: mergeMsg ? [] : [...this.sharedPrefs.commitTemplates],
+        showVariablesHelp: !mergeMsg,
       },
       async (message) => {
         if (message === null) return;
-        // Remember what was TYPED (or picked), never the merge prefill: that
-        // one is git's, one-off, and would crowd the list.
-        if (message !== mergeMsg) this.rememberCommitMessage(message);
-        const result = await this.runOperation("commit", {
-          protectedPaths: this.effectiveProtectedPaths(),
-          message,
-        });
-        if (!result) return;
-        if (!result.ok) return this.renderMutationError("Native Git: commit failed", result);
-        this.absorbStatusData(result.data ?? {});
-        const committed = result.data?.committed === "true";
-        this.reportSuccess(
-          "Native Git: commit",
-          [
-            committed
-              ? `Committed ${result.data?.newHead?.slice(0, 8) ?? ""}.`
-              : "Nothing to commit (no staged changes after safety filtering).",
-          ],
-          result.data?.commitOutput
-        );
+        await this.performCommit(message, mergeMsg);
       }
     ).open();
+  }
+
+  /**
+   * The commit itself, split from the modal so the substitution rule is
+   * testable: the RAW message (variables visible) goes into the recents, the
+   * RENDERED one goes to git — what lands in history is the value, never the
+   * braces. The merge prefill is git's own, one-off: not remembered.
+   */
+  async performCommit(message: string, mergeMsg?: string): Promise<void> {
+    if (message !== mergeMsg) this.rememberCommitMessage(message);
+    const result = await this.runOperation("commit", {
+      protectedPaths: this.effectiveProtectedPaths(),
+      message: renderCommitTemplate(message, this.sharedPrefs.commitDateFormat),
+    });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: commit failed", result);
+    this.absorbStatusData(result.data ?? {});
+    const committed = result.data?.committed === "true";
+    this.reportSuccess(
+      "Native Git: commit",
+      [
+        committed
+          ? `Committed ${result.data?.newHead?.slice(0, 8) ?? ""}.`
+          : "Nothing to commit (no staged changes after safety filtering).",
+      ],
+      result.data?.commitOutput
+    );
   }
 
   async cmdPush(): Promise<void> {
@@ -4862,9 +4929,23 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.reportSuccess("Native Git: push", ["Push completed."], result.data?.pushOutput);
   }
 
-  /** The template the automatic sync commit uses, rendered for this moment. */
-  renderedAutoCommitMessage(): string {
-    return renderCommitTemplate(this.sharedPrefs.autoCommitTemplate, this.sharedPrefs.commitDateFormat);
+  /**
+   * One of the three automatic message slots, rendered for this moment.
+   * Three slots rather than one (the user's design, 2026-08-27): the old
+   * fixed strings let the history say WHICH trigger committed, and the
+   * first cut of the templates had collapsed that distinction.
+   */
+  renderedSlotMessage(slot: "sync-on-close" | "auto-commit" | "sync"): string {
+    // The slots are DEVICE-LOCAL plain strings (the user's design): each
+    // device picks its own trigger messages, out of the shared template list.
+    const s = this.deviceSettings;
+    const t =
+      slot === "sync-on-close"
+        ? s.syncOnCloseTemplate
+        : slot === "auto-commit"
+          ? s.autoCommitTemplate
+          : s.syncTemplate;
+    return renderCommitTemplate(t, this.sharedPrefs.commitDateFormat);
   }
 
   /** This device's recently typed commit messages, newest first. */
@@ -4896,7 +4977,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
-      message: message ?? mergeMsg ?? this.renderedAutoCommitMessage(),
+      message: message ?? mergeMsg ?? this.renderedSlotMessage("sync"),
     });
     if (!result) return;
     if (!result.ok) {
@@ -5747,22 +5828,27 @@ export default class NativeGitBridgePlugin extends Plugin {
    * nothing else: it offers the file itself when there is no diff to show, and
    * at that point it has a `HEAD`, a hash or a `hash^`, not a log entry.
    */
-  private async showFileAtCommit(path: string, hash: string, date?: string): Promise<void> {
+  /** The file's text at a commit for the file-at-commit pane; null = binary. */
+  private async loadFileAtCommit(path: string, hash: string): Promise<string | null> {
     const result = await this.runOperation("show-file-at-commit", { path, commit: hash });
-    if (!result) return;
-    if (!result.ok) return this.renderMutationError("Native Git: show file failed", result);
-    const bytes = decodeBase64ToBytes(result.data?.contentBase64 ?? "");
-    const text = bytesToTextIfNotBinary(bytes);
-    const when = date === undefined ? "" : ` · ${date.slice(0, 16).replace("T", " ")}`;
-    const meta = `${path} @ ${hash.slice(0, 8)}${when} · ${bytes.length} bytes`;
-    if (text === null) {
-      new ResultModal(this.app, "Binary file", [
-        `${path} at ${hash.slice(0, 8)} is binary (${bytes.length} bytes); preview is not available.`,
-        "Restore is still possible from the history list.",
-      ]).open();
-      return;
+    if (!result) return null;
+    if (!result.ok) {
+      this.renderMutationError("Native Git: show file failed", result);
+      return null;
     }
-    new TextPreviewModal(this.app, "File at commit", meta, text).open();
+    return bytesToTextIfNotBinary(decodeBase64ToBytes(result.data?.contentBase64 ?? ""));
+  }
+
+  /** Opens (or retargets) the file-at-commit PANE — a modal until 2026-08-27. */
+  private async showFileAtCommit(path: string, hash: string, date?: string): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(NGB_FILE_AT_COMMIT_VIEW);
+    const leaf = existing.length > 0 ? existing[0]! : this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: NGB_FILE_AT_COMMIT_VIEW,
+      active: true,
+      state: { path, hash, date: date ?? "" },
+    });
+    await this.app.workspace.revealLeaf(leaf);
   }
 
   async cmdDiffCurrentFile(): Promise<void> {
