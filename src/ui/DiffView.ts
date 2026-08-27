@@ -184,7 +184,13 @@ export function gutterWidthCh(root: ParentNode): number {
  */
 export function sizeGutter(box: HTMLElement): void {
   const host = box.closest<HTMLElement>(".ngb-diff-view") ?? box;
-  host.style.setProperty("--ngb-diff-gutter-w", `${gutterWidthCh(box)}ch`);
+  const w = gutterWidthCh(box);
+  host.style.setProperty("--ngb-diff-gutter-w", `${w}ch`);
+  // Each NUMBER box gets the same fixed width (the digit count backed out of
+  // the total): a deleted row holds one number and one empty box, and with
+  // content-sized boxes its number drifted out of the column the paired rows
+  // drew (the 2026-08-28 device screenshots).
+  host.style.setProperty("--ngb-num-w", `${(w - 5) / 2}ch`);
 }
 
 /**

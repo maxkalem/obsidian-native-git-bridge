@@ -699,13 +699,22 @@
    min-width is now a floor for short files only, and the separator does the
    work at every length. */
 .ngb-diff-view .line-num1, .ngb-diff-view .line-num2 {
-  display: inline-block; box-sizing: border-box; overflow: hidden;
+  display: inline-block; box-sizing: content-box; overflow: hidden;
+  /* BOTH boxes carry the same fixed width (set by sizeGutter from the digit
+     count): a deleted row holds one number and one EMPTY box, and with
+     content-sized boxes its number drifted out of the column the paired rows
+     drew. The min-width stays as the floor for short files. */
+  width: var(--ngb-num-w, 1.6em);
   min-width: 1.6em; text-align: right;
+  /* Top, not baseline: an EMPTY inline-block's baseline is its bottom edge,
+     which is what shoved the +/- prefix downward on rows with a gap. */
+  vertical-align: top;
 }
 .ngb-diff-view .line-num1 { padding-right: 0.6em; }
 .ngb-diff-view .line-num2 { padding-right: 0.35em; }
 .ngb-diff-view .d2h-code-linenumber .d2h-code-line-prefix {
   display: inline-block; width: 1em; text-align: center; color: var(--text-muted);
+  vertical-align: top;
 }
 /* The line container collapses whitespace (nowrap) and only the content span
    preserves the file's real spaces (pre, inline-block).

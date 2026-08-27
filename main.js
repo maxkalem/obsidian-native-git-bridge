@@ -3864,14 +3864,14 @@ function buildMenuEntries(scope, f) {
       out2.push({ action: "show-at-commit", title: "Show the file as of this commit", icon: "eye" });
       out2.push({
         action: "restore-after-commit",
-        title: "Restore: after this commit",
+        title: "Restore file to state after this commit",
         icon: "rotate-ccw",
         danger: true
       });
       if (scope.code === "M" || scope.code === "T") {
         out2.push({
           action: "restore-before-commit",
-          title: "Restore: before this commit",
+          title: "Restore file to state before this commit",
           icon: "rotate-ccw",
           danger: true
         });
@@ -3881,9 +3881,9 @@ function buildMenuEntries(scope, f) {
         out2.push({ action: "copy-remote-link", title: "Copy remote link", icon: "link" });
       }
     }
-    out2.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    out2.push({ action: "copy-path", title: "Copy path (from Vault folder)", icon: "copy" });
     if (f.absolutePathAvailable === true) {
-      out2.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+      out2.push({ action: "copy-path-absolute", title: "Copy path (from system root)", icon: "copy" });
     }
     return out2;
   }
@@ -3925,9 +3925,9 @@ function buildMenuEntries(scope, f) {
     out.push({ action: "open-external", title: "Open in default app", icon: "external-link" });
   }
   if (scope.kind !== "group") {
-    out.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    out.push({ action: "copy-path", title: "Copy path (from Vault folder)", icon: "copy" });
     if (f.absolutePathAvailable === true) {
-      out.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+      out.push({ action: "copy-path-absolute", title: "Copy path (from system root)", icon: "copy" });
     }
   }
   if (f.menuGitignore && !empty) {
@@ -5132,7 +5132,9 @@ function gutterWidthCh(root) {
 }
 function sizeGutter(box) {
   const host = box.closest(".ngb-diff-view") ?? box;
-  host.style.setProperty("--ngb-diff-gutter-w", `${gutterWidthCh(box)}ch`);
+  const w = gutterWidthCh(box);
+  host.style.setProperty("--ngb-diff-gutter-w", `${w}ch`);
+  host.style.setProperty("--ngb-num-w", `${(w - 5) / 2}ch`);
 }
 var DiffView = class extends import_obsidian11.ItemView {
   constructor(leaf, actions) {

@@ -152,14 +152,14 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
       // spells the exact state out before anything is written.
       out.push({
         action: "restore-after-commit",
-        title: "Restore: after this commit",
+        title: "Restore file to state after this commit",
         icon: "rotate-ccw",
         danger: true,
       });
       if (scope.code === "M" || scope.code === "T") {
         out.push({
           action: "restore-before-commit",
-          title: "Restore: before this commit",
+          title: "Restore file to state before this commit",
           icon: "rotate-ccw",
           danger: true,
         });
@@ -173,9 +173,9 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
         out.push({ action: "copy-remote-link", title: "Copy remote link", icon: "link" });
       }
     }
-    out.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    out.push({ action: "copy-path", title: "Copy path (from Vault folder)", icon: "copy" });
     if (f.absolutePathAvailable === true) {
-      out.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+      out.push({ action: "copy-path-absolute", title: "Copy path (from system root)", icon: "copy" });
     }
     return out;
   }
@@ -229,10 +229,12 @@ export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[]
   }
   if (scope.kind !== "group") {
     // The two spellings Obsidian's own file manager offers (the user's ask):
-    // repository-relative, and absolute on this device when the path is known.
-    out.push({ action: "copy-path", title: "Copy path (vault)", icon: "copy" });
+    // repository-relative, and absolute on this device when the path is
+    // known. The titles match the file-at-commit menu's pair verbatim — the
+    // user picked that wording (2026-08-28).
+    out.push({ action: "copy-path", title: "Copy path (from Vault folder)", icon: "copy" });
     if (f.absolutePathAvailable === true) {
-      out.push({ action: "copy-path-absolute", title: "Copy path (system)", icon: "copy" });
+      out.push({ action: "copy-path-absolute", title: "Copy path (from system root)", icon: "copy" });
     }
   }
 
