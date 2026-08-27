@@ -11,6 +11,7 @@ import { MIN_NETWORK_TIMEOUT_SECONDS, RUNNER_MIN_VERSION } from "../constants";
 import { DEFAULT_COLORS, type NgbColorSet } from "../ui/colors";
 import { formatSize } from "../git/previousRepos";
 import type { InlineDiffUnit } from "../git/inlineDiff";
+import { DEFAULT_COMMIT_DATE_FORMAT, DEFAULT_COMMIT_TEMPLATE } from "../git/commitMessage";
 
 export class NativeGitBridgeSettingTab extends PluginSettingTab {
   constructor(app: App, private plugin: NativeGitBridgePlugin) {
@@ -69,16 +70,36 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       "companion"
     );
 
+    // One box per advice entry; which buttons it carries follows the advice's
+    // `kind` (the four-state model): below the floor gets the one fix, an
+    // available update gets the update plus the stay-put route, and a HALF
+    // NEWER than this build gets both exits of that choice.
     for (const a of advice) {
       const box = containerEl.createDiv({ cls: "ngb-warning" });
       box.createDiv({ text: a.text });
       const btns = box.createDiv({ cls: "ngb-add-row" });
+      const button = (text: string, cta: boolean, onClick: () => void) => {
+        const b = btns.createEl("button", { text, cls: cta ? "mod-cta" : undefined });
+        b.addEventListener("click", onClick);
+      };
       if (a.part === "runner") {
-        const b = btns.createEl("button", { text: "Copy command & open Termux", cls: "mod-cta" });
-        b.addEventListener("click", () => this.plugin.copyCommandAndOpenTermux());
+        button("Copy command & open Termux", true, () => this.plugin.copyCommandAndOpenTermux());
+        if (a.kind === "newer-half") {
+          button("Open latest release", false, () => this.plugin.openLatestRelease());
+        }
+      } else if (a.part === "companion") {
+        button("Update companion app", true, () => this.plugin.openLatestRelease());
+        if (a.kind === "update-available" && this.plugin.stayOnCompanionAvailable()) {
+          button("Stay on this companion…", false, () => this.plugin.cmdStayOnCompanion());
+        }
       } else {
-        const b = btns.createEl("button", { text: "Open latest release", cls: "mod-cta" });
-        b.addEventListener("click", () => this.plugin.openLatestRelease());
+        // The plugin is the older half (a newer companion answered): both
+        // exits of the choice. The matching APK is a copied link, never an
+        // opened one — Custom Tab downloads get discarded.
+        button("Open latest release", true, () => this.plugin.openLatestRelease());
+        if (a.kind === "newer-half") {
+          button("Copy link to the matching APK", false, () => this.plugin.copyMatchingApkLink());
+        }
       }
     }
 
@@ -305,6 +326,66 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(s.deleteUntrackedPermanently).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ deleteUntrackedPermanently: v });
+        })(); })
+      );
+
+    new Setting(containerEl).setName("Commit messages").setHeading();
+
+    new Setting(containerEl)
+      .setName("Message templates")
+      .setDesc(
+        "One per line; offered as one-tap choices in the commit window. {{date}} becomes the " +
+          "current date and time in this device's timezone, using the format below. Shared across " +
+          "devices (stored in data.json)."
+      )
+      .addTextArea((t) => {
+        t.setValue(this.plugin.sharedPrefs.commitTemplates.join("\n")).onChange((v) => { void (async () => {
+          const list = v.split("\n").map((x) => x.trim()).filter((x) => x !== "");
+          await this.plugin.setSharedPref({ commitTemplates: list });
+        })(); });
+        t.inputEl.rows = 3;
+      });
+
+    new Setting(containerEl)
+      .setName("Automatic commit message")
+      .setDesc(
+        "What Sync commits with when you did not type a message. A merge in progress always uses " +
+          "git's own prepared merge message instead. Shared across devices."
+      )
+      .addText((t) =>
+        t.setValue(this.plugin.sharedPrefs.autoCommitTemplate).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({
+            autoCommitTemplate: v.trim() === "" ? DEFAULT_COMMIT_TEMPLATE : v,
+          });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("{{date}} format")
+      .setDesc(
+        "Tokens: YYYY, YY, MM, DD, HH, mm, ss (the same spelling obsidian-git uses). " +
+          "Local time on each device. Shared across devices."
+      )
+      .addText((t) =>
+        t.setValue(this.plugin.sharedPrefs.commitDateFormat).onChange((v) => { void (async () => {
+          await this.plugin.setSharedPref({
+            commitDateFormat: v.trim() === "" ? DEFAULT_COMMIT_DATE_FORMAT : v,
+          });
+        })(); })
+      );
+
+    new Setting(containerEl)
+      .setName("Recently typed messages to remember")
+      .setDesc(
+        "The commit window offers this many of your recent messages beside the templates. " +
+          "0 turns the list off. The list is typing history and stays on this device."
+      )
+      .addText((t) =>
+        t.setValue(String(s.recentCommitMessagesMax)).onChange((v) => { void (async () => {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n) && n >= 0 && n <= 50) {
+            await this.plugin.updateDeviceSettings({ recentCommitMessagesMax: n });
+          }
         })(); })
       );
 

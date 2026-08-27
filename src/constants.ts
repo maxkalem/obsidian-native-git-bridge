@@ -12,6 +12,17 @@ export const RUNNER_MIN_VERSION = 12;
 export const RUNNER_SHIPPED_VERSION = 17;
 
 /**
+ * The oldest companion APK this plugin works with — the same floor model the
+ * runner has had all along: anything in [floor, current] is a correct
+ * installation, and only BELOW the floor is a refusal. The companion is
+ * updated by hand (an APK install), so the floor moves only when the plugin
+ * starts DEPENDING on a companion behavior, never just because a release
+ * happened. 0.4.1 is where the ack gained the `termux=` flag, which
+ * versionAdvice, the self-check and the setup guide all read.
+ */
+export const COMPANION_MIN_VERSION = "0.4.1";
+
+/**
  * git's canonical empty-tree object (constant across all repositories).
  * Diffing the ROOT commit against its (non-existent) parent fails; diffing
  * against the empty tree shows it as all-additions instead.
@@ -195,6 +206,16 @@ export const COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
  * closes (the file never reaches Downloads).
  */
 export const COMPANION_DOWNLOAD_APK_URI = "nativegitbridge://download-apk";
+
+/**
+ * The release page of ONE version — where its own APK and plugin files live.
+ * The pinned counterpart of COMPANION_RELEASES_URL: the newer-half and
+ * stay-on-this-version routes need the release matching a KNOWN number, not
+ * whatever is newest today.
+ */
+export function releaseTagUrl(version: string): string {
+  return `https://github.com/maxkalem/obsidian-native-git-bridge/releases/tag/${version}`;
+}
 
 /** Official Termux site (the F-Droid build; Play Store build is deprecated). */
 export const TERMUX_SITE_URL = "https://termux.dev";

@@ -3,6 +3,7 @@ import type { GitFileEntry, GitStatusSummary, SparseStateSummary } from "../type
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
 import { describeMove, revealOnTap } from "./revealOnTap";
+import { attachContextMenu } from "./contextMenu";
 import {
   NGB_ICON_FETCH,
   NGB_ICON_PULL,
@@ -686,7 +687,7 @@ export class StatusView extends ItemView {
     });
     // Long press / right click on the header: the group's own menu (bulk
     // unstage, .gitignore, sparse, exclude), gated by the settings toggles.
-    this.attachContextMenu(header, (pos) => this.actions.groupMenu(group, pos));
+    attachContextMenu(header, (pos) => this.actions.groupMenu(group, pos));
     if (this.collapsed[group]) return;
 
     const list = wrap.createDiv({ cls: "ngb-sv-list" });
@@ -830,45 +831,6 @@ export class StatusView extends ItemView {
   }
 
   /**
-   * Right click (desktop) and long press (touch) on any row or header. The
-   * touch timer backs up `contextmenu`, which Android's WebView delivers
-   * inconsistently, and is cancelled by movement so scrolling never opens a
-   * menu. The caller receives the anchor position and opens the menu itself.
-   */
-  private attachContextMenu(el: HTMLElement, open: (pos: { x: number; y: number }) => void): void {
-    const anchor = (ev: MouseEvent | TouchEvent): { x: number; y: number } => {
-      if (ev instanceof MouseEvent && ev.clientX) return { x: ev.clientX, y: ev.clientY };
-      const r = el.getBoundingClientRect();
-      return { x: r.left, y: r.bottom };
-    };
-    el.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      open(anchor(ev));
-    });
-    let longPress: number | null = null;
-    const clearLongPress = () => {
-      if (longPress !== null) {
-        window.clearTimeout(longPress);
-        longPress = null;
-      }
-    };
-    el.addEventListener(
-      "touchstart",
-      (ev) => {
-        clearLongPress();
-        longPress = window.setTimeout(() => {
-          longPress = null;
-          open(anchor(ev));
-        }, 500);
-      },
-      { passive: true }
-    );
-    for (const e of ["touchend", "touchmove", "touchcancel"]) {
-      el.addEventListener(e, clearLongPress, { passive: true });
-    }
-  }
-
-  /**
    * One action column, used by folder rows AND group headers so both mirror
    * the file rows slot for slot ([open] [stage/unstage] [discard] plus the
    * count column). `null` renders an invisible placeholder that keeps the
@@ -961,7 +923,7 @@ export class StatusView extends ItemView {
     }
     // The folder's own menu: the same entries a file gets, applied to every
     // child in this group's state (the runner takes a directory path).
-    this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
+    attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
     // Folder actions apply to every file under the folder IN THIS GROUP's
     // state; main.ts scopes the git invocation accordingly. The action area
     // mirrors the FILE row slot for slot ([open] [stage/unstage] [discard]
@@ -1055,7 +1017,7 @@ export class StatusView extends ItemView {
       // Same Git menu as the file explorer, on the whole row. The menu is told
       // WHICH GROUP the row came from, so its entries match the state the
       // panel is showing rather than being re-inferred.
-      this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
+      attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
       // Tooltips are unavailable on touch, so the change is spelled out there —
       // unless the reader has turned the words off, which is what someone with
       // long file names wants: `conflicted` and `modified` take room from the

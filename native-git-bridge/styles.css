@@ -569,6 +569,17 @@
 /* Full-width textarea (was an inline style, which themes cannot override). */
 .ngb-textarea-full { width: 100%; }
 
+/* Commit-message suggestion chips (templates first, then this device's
+   recents). One-line each with an ellipsis: a recent can be a whole typed
+   sentence, and a chip that wraps turns the row of choices into a wall. */
+.ngb-msg-suggestions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-2); }
+.ngb-msg-chip {
+  font-size: var(--font-ui-smaller); color: var(--text-normal);
+  background: var(--background-modifier-border); border-radius: var(--radius-s);
+  padding: 2px var(--size-4-2); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 /* ---------------------------------------------------------------- history */
 
 /* The history panel's top region ends in the strip, not in a branch line, so

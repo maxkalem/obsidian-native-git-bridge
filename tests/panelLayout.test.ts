@@ -72,6 +72,7 @@ function historyActions(over: Partial<HistoryViewActions> = {}): HistoryViewActi
   return {
     loadPage: async () => [],
     openDiffAtCommit: () => undefined,
+    fileMenu: () => undefined,
     openFile: () => undefined,
     progressText: () => "",
     progressDetail: () => "",

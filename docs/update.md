@@ -42,7 +42,7 @@ Since runner v10 the Termux side keeps one profile per paired vault. Re-running 
 
 ## Updating the companion app
 
-The companion carries the **same version number as the release**, so "companion 0.5.2" belongs to plugin 0.5.2. If the numbers differ, the companion is the older part. It changes rarely, so a release usually says whether updating it matters.
+The companion carries the **same version number as the release**, so "companion 0.5.2" belongs to plugin 0.5.2. It changes rarely, and differing numbers are usually fine: the plugin declares the oldest companion it works with (the same floor model as the runner handshake), and anything between that floor and the current release keeps working — the settings tab then offers the update without demanding it, alongside the option to stay on the installed companion by putting the matching plugin release in place by hand. Only a companion below the floor is a real fault, and the message says so and names the floor. A companion NEWER than the plugin is a choice, not an error: update the plugin from the latest release, or install the companion APK matching the plugin from that release's own page — every release keeps its APK.
 
 Note Android's signature rule: a debug APK and a signed release APK cannot update each other, so uninstall the old one first (the companion holds no state, nothing is lost). Two signed APKs update over each other normally.
 

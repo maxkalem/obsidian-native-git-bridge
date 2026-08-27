@@ -37,6 +37,7 @@ var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
 var RUNNER_MIN_VERSION = 12;
 var RUNNER_SHIPPED_VERSION = 17;
+var COMPANION_MIN_VERSION = "0.4.1";
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
 var RUNTIME_DIR_NAME = "runtime";
@@ -111,6 +112,9 @@ var COMPANION_SETUP_URI = "nativegitbridge://setup";
 var COMPANION_RELEASES_URL = "https://github.com/maxkalem/obsidian-native-git-bridge/releases/latest";
 var COMPANION_OPEN_TERMUX_URI = "nativegitbridge://open-termux";
 var COMPANION_DOWNLOAD_APK_URI = "nativegitbridge://download-apk";
+function releaseTagUrl(version) {
+  return `https://github.com/maxkalem/obsidian-native-git-bridge/releases/tag/${version}`;
+}
 var TERMUX_SITE_URL = "https://termux.dev";
 var TERMUX_FDROID_URL = "https://f-droid.org/packages/com.termux/";
 var COMPANION_GET_TERMUX_URI = "nativegitbridge://get-termux";
@@ -229,6 +233,7 @@ var DEFAULT_DEVICE_SETTINGS = {
   menuExclude: true,
   deleteUntrackedPermanently: false,
   rowsPerGroup: DEFAULT_ROWS_PER_GROUP_SETTING,
+  recentCommitMessagesMax: 10,
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,
@@ -1201,6 +1206,23 @@ function reposToRemindAbout(repos, state, now = Date.now()) {
   return repos.filter((r) => !state.dismissed.includes(r.dir));
 }
 
+// src/git/commitMessage.ts
+var DEFAULT_COMMIT_TEMPLATE = "Update {{date}}";
+var DEFAULT_COMMIT_DATE_FORMAT = "YYYY-MM-DD HH:mm:ss";
+function formatCommitDate(fmt, d) {
+  const p2 = (n) => String(n).padStart(2, "0");
+  return fmt.replace(/YYYY/g, String(d.getFullYear())).replace(/YY/g, p2(d.getFullYear() % 100)).replace(/MM/g, p2(d.getMonth() + 1)).replace(/DD/g, p2(d.getDate())).replace(/HH/g, p2(d.getHours())).replace(/mm/g, p2(d.getMinutes())).replace(/ss/g, p2(d.getSeconds()));
+}
+function renderCommitTemplate(template, fmt, now = /* @__PURE__ */ new Date()) {
+  return template.split("{{date}}").join(formatCommitDate(fmt, now));
+}
+function pushRecentMessage(recents, msg, max) {
+  const m = msg.trim();
+  const capped = Math.max(0, max);
+  if (m === "") return recents.slice(0, capped);
+  return [m, ...recents.filter((r) => r !== m)].slice(0, capped);
+}
+
 // src/settings/SettingsTab.ts
 var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab {
   constructor(app, plugin) {
@@ -1246,12 +1268,25 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
       const box = containerEl.createDiv({ cls: "ngb-warning" });
       box.createDiv({ text: a.text });
       const btns = box.createDiv({ cls: "ngb-add-row" });
+      const button = (text, cta, onClick) => {
+        const b = btns.createEl("button", { text, cls: cta ? "mod-cta" : void 0 });
+        b.addEventListener("click", onClick);
+      };
       if (a.part === "runner") {
-        const b = btns.createEl("button", { text: "Copy command & open Termux", cls: "mod-cta" });
-        b.addEventListener("click", () => this.plugin.copyCommandAndOpenTermux());
+        button("Copy command & open Termux", true, () => this.plugin.copyCommandAndOpenTermux());
+        if (a.kind === "newer-half") {
+          button("Open latest release", false, () => this.plugin.openLatestRelease());
+        }
+      } else if (a.part === "companion") {
+        button("Update companion app", true, () => this.plugin.openLatestRelease());
+        if (a.kind === "update-available" && this.plugin.stayOnCompanionAvailable()) {
+          button("Stay on this companion\u2026", false, () => this.plugin.cmdStayOnCompanion());
+        }
       } else {
-        const b = btns.createEl("button", { text: "Open latest release", cls: "mod-cta" });
-        b.addEventListener("click", () => this.plugin.openLatestRelease());
+        button("Open latest release", true, () => this.plugin.openLatestRelease());
+        if (a.kind === "newer-half") {
+          button("Copy link to the matching APK", false, () => this.plugin.copyMatchingApkLink());
+        }
       }
     }
     containerEl.createEl("p", {
@@ -1400,6 +1435,52 @@ var NativeGitBridgeSettingTab = class extends import_obsidian3.PluginSettingTab 
       (t) => t.setValue(s.deleteUntrackedPermanently).onChange((v) => {
         void (async () => {
           await this.plugin.updateDeviceSettings({ deleteUntrackedPermanently: v });
+        })();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Commit messages").setHeading();
+    new import_obsidian3.Setting(containerEl).setName("Message templates").setDesc(
+      "One per line; offered as one-tap choices in the commit window. {{date}} becomes the current date and time in this device's timezone, using the format below. Shared across devices (stored in data.json)."
+    ).addTextArea((t) => {
+      t.setValue(this.plugin.sharedPrefs.commitTemplates.join("\n")).onChange((v) => {
+        void (async () => {
+          const list = v.split("\n").map((x) => x.trim()).filter((x) => x !== "");
+          await this.plugin.setSharedPref({ commitTemplates: list });
+        })();
+      });
+      t.inputEl.rows = 3;
+    });
+    new import_obsidian3.Setting(containerEl).setName("Automatic commit message").setDesc(
+      "What Sync commits with when you did not type a message. A merge in progress always uses git's own prepared merge message instead. Shared across devices."
+    ).addText(
+      (t) => t.setValue(this.plugin.sharedPrefs.autoCommitTemplate).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({
+            autoCommitTemplate: v.trim() === "" ? DEFAULT_COMMIT_TEMPLATE : v
+          });
+        })();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("{{date}} format").setDesc(
+      "Tokens: YYYY, YY, MM, DD, HH, mm, ss (the same spelling obsidian-git uses). Local time on each device. Shared across devices."
+    ).addText(
+      (t) => t.setValue(this.plugin.sharedPrefs.commitDateFormat).onChange((v) => {
+        void (async () => {
+          await this.plugin.setSharedPref({
+            commitDateFormat: v.trim() === "" ? DEFAULT_COMMIT_DATE_FORMAT : v
+          });
+        })();
+      })
+    );
+    new import_obsidian3.Setting(containerEl).setName("Recently typed messages to remember").setDesc(
+      "The commit window offers this many of your recent messages beside the templates. 0 turns the list off. The list is typing history and stays on this device."
+    ).addText(
+      (t) => t.setValue(String(s.recentCommitMessagesMax)).onChange((v) => {
+        void (async () => {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n) && n >= 0 && n <= 50) {
+            await this.plugin.updateDeviceSettings({ recentCommitMessagesMax: n });
+          }
         })();
       })
     );
@@ -2357,6 +2438,16 @@ var CommitMessageModal = class extends import_obsidian5.Modal {
     ta.rows = 3;
     ta.placeholder = this.opts.placeholder;
     ta.value = this.opts.initial ?? "";
+    if (this.opts.suggestions !== void 0 && this.opts.suggestions.length > 0) {
+      const box = c.createDiv({ cls: "ngb-msg-suggestions" });
+      for (const s of this.opts.suggestions) {
+        const chip = box.createEl("button", { cls: "ngb-msg-chip", text: s });
+        chip.addEventListener("click", () => {
+          ta.value = s;
+          ta.focus();
+        });
+      }
+    }
     const note = c.createDiv({ cls: "ngb-invalid" });
     const doSubmit = () => {
       const msg = ta.value.trim();
@@ -2739,6 +2830,42 @@ function renderCountBadge(parent, count, describe) {
   el.setAttribute("aria-label", describe(count));
   if (!fmt.clamped) return el;
   return revealOnTap(el, describe(count), { align: "right" });
+}
+
+// src/ui/contextMenu.ts
+function attachContextMenu(el, open) {
+  const anchor = (ev) => {
+    if (typeof MouseEvent !== "undefined" && ev instanceof MouseEvent && ev.clientX) {
+      return { x: ev.clientX, y: ev.clientY };
+    }
+    const r = el.getBoundingClientRect();
+    return { x: r.left, y: r.bottom };
+  };
+  el.addEventListener("contextmenu", (ev) => {
+    ev.preventDefault();
+    open(anchor(ev));
+  });
+  let longPress = null;
+  const clearLongPress = () => {
+    if (longPress !== null) {
+      window.clearTimeout(longPress);
+      longPress = null;
+    }
+  };
+  el.addEventListener(
+    "touchstart",
+    (ev) => {
+      clearLongPress();
+      longPress = window.setTimeout(() => {
+        longPress = null;
+        open(anchor(ev));
+      }, 500);
+    },
+    { passive: true }
+  );
+  for (const e of ["touchend", "touchmove", "touchcancel"]) {
+    el.addEventListener(e, clearLongPress, { passive: true });
+  }
 }
 
 // src/ui/icons.ts
@@ -3163,7 +3290,7 @@ var StatusView = class extends import_obsidian8.ItemView {
       this.collapsed[group] = !this.collapsed[group];
       this.render();
     });
-    this.attachContextMenu(header, (pos) => this.actions.groupMenu(group, pos));
+    attachContextMenu(header, (pos) => this.actions.groupMenu(group, pos));
     if (this.collapsed[group]) return;
     const list = wrap.createDiv({ cls: "ngb-sv-list" });
     if (items.length === 0) {
@@ -3273,44 +3400,6 @@ var StatusView = class extends import_obsidian8.ItemView {
     });
   }
   /**
-   * Right click (desktop) and long press (touch) on any row or header. The
-   * touch timer backs up `contextmenu`, which Android's WebView delivers
-   * inconsistently, and is cancelled by movement so scrolling never opens a
-   * menu. The caller receives the anchor position and opens the menu itself.
-   */
-  attachContextMenu(el, open) {
-    const anchor = (ev) => {
-      if (ev instanceof MouseEvent && ev.clientX) return { x: ev.clientX, y: ev.clientY };
-      const r = el.getBoundingClientRect();
-      return { x: r.left, y: r.bottom };
-    };
-    el.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      open(anchor(ev));
-    });
-    let longPress = null;
-    const clearLongPress = () => {
-      if (longPress !== null) {
-        window.clearTimeout(longPress);
-        longPress = null;
-      }
-    };
-    el.addEventListener(
-      "touchstart",
-      (ev) => {
-        clearLongPress();
-        longPress = window.setTimeout(() => {
-          longPress = null;
-          open(anchor(ev));
-        }, 500);
-      },
-      { passive: true }
-    );
-    for (const e of ["touchend", "touchmove", "touchcancel"]) {
-      el.addEventListener(e, clearLongPress, { passive: true });
-    }
-  }
-  /**
    * One action column, used by folder rows AND group headers so both mirror
    * the file rows slot for slot ([open] [stage/unstage] [discard] plus the
    * count column). `null` renders an invisible placeholder that keeps the
@@ -3375,7 +3464,7 @@ var StatusView = class extends import_obsidian8.ItemView {
     if (hit && (busy === "stage-file" || busy === "unstage-file" || busy === "discard-file")) {
       rowEl.addClass("ngb-sv-file-busy");
     }
-    this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
+    attachContextMenu(rowEl, (pos) => this.actions.fileMenu(node.path, group, pos));
     const slot = this.slotFactory(rowEl.createDiv({ cls: "ngb-sv-file-actions" }));
     for (const s of actionSlots("folder", group)) {
       slot(
@@ -3436,7 +3525,7 @@ var StatusView = class extends import_obsidian8.ItemView {
       } else {
         main.addEventListener("click", () => this.actions.openDiff(it.path, group));
       }
-      this.attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
+      attachContextMenu(rowEl, (pos) => this.actions.fileMenu(it.path, group, pos));
       if (import_obsidian8.Platform.isMobile && this.actions.showChangeWords()) {
         main.createSpan({ cls: "ngb-sv-file-kind", text: kind });
       }
@@ -3537,19 +3626,40 @@ function menuHeader(scope) {
   const trimmed = scope.path.endsWith("/") ? scope.path.slice(0, -1) : scope.path;
   const cut = trimmed.lastIndexOf("/");
   const base = cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+  const name = scope.kind === "file-at-commit" ? `${base} @ ${scope.hash.slice(0, 8)}` : base;
   return {
     dir: cut >= 0 ? trimmed.slice(0, cut) : "",
-    name: isDir ? `${base}/` : base
+    name: isDir ? `${name}/` : name
   };
 }
 function suffix(scope) {
-  return scope.kind === "file" ? "" : ` (${scope.count})`;
+  return scope.kind === "folder" || scope.kind === "group" ? ` (${scope.count})` : "";
 }
 function noun(scope) {
-  if (scope.kind === "file") return "";
-  return scope.kind === "folder" ? " in folder" : " in group";
+  if (scope.kind === "folder") return " in folder";
+  return scope.kind === "group" ? " in group" : "";
 }
 function buildMenuEntries(scope, f) {
+  if (scope.kind === "file-at-commit") {
+    const out2 = [
+      { action: "open-diff-at-commit", title: "Open this commit's diff", icon: "file-diff" }
+    ];
+    if (scope.code !== "D") {
+      out2.push({ action: "show-at-commit", title: "Show the file as of this commit", icon: "eye" });
+      out2.push({
+        action: "restore-from-commit",
+        title: "Restore the file from this commit",
+        icon: "rotate-ccw",
+        danger: true
+      });
+      out2.push({ action: "open-history", title: "Open file history", icon: "history" });
+      if (f.remoteMappable === true) {
+        out2.push({ action: "open-remote", title: "Open on the remote (browser)", icon: "globe" });
+      }
+    }
+    out2.push({ action: "copy-path", title: "Copy path", icon: "copy" });
+    return out2;
+  }
   const out = [];
   const single2 = scope.kind === "file";
   const bulk = !single2;
@@ -4330,6 +4440,7 @@ var HistoryView = class extends import_obsidian9.ItemView {
       revealOnTap(from, describeMove(f.origPath, f.path), { align: "left" });
     }
     main.addEventListener("click", () => this.actions.openDiffAtCommit(f, e));
+    attachContextMenu(row, (pos) => this.actions.fileMenu(f, e, pos));
     const acts = row.createDiv({ cls: "ngb-sv-file-actions" });
     const openBtn = acts.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     openBtn.setAttribute("aria-label", "Open file (current version)");
@@ -5800,6 +5911,28 @@ function validateRemoteUrl(raw) {
 function redactRemoteUrl(url) {
   return url.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@]+@/, "$1***@");
 }
+function remoteFileUrl(remote, path, commit) {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) return null;
+  let host = "";
+  let repo = "";
+  const https = /^https:\/\/(?:[^/@]+@)?([A-Za-z0-9._-]+)\/(.+)$/.exec(remote.trim());
+  const scp = /^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):(.+)$/.exec(remote.trim());
+  if (https) {
+    host = https[1].toLowerCase();
+    repo = https[2];
+  } else if (scp) {
+    host = scp[1].toLowerCase();
+    repo = scp[2];
+  } else {
+    return null;
+  }
+  repo = repo.replace(/\.git$/, "").replace(/\/+$/, "");
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) return null;
+  const encPath = path.split("/").map(encodeURIComponent).join("/");
+  if (host === "github.com") return `https://github.com/${repo}/blob/${commit}/${encPath}`;
+  if (host === "gitlab.com") return `https://gitlab.com/${repo}/-/blob/${commit}/${encPath}`;
+  return null;
+}
 function isValidBranchName(name) {
   if (name === "" || name.length > 100) return false;
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(name)) return false;
@@ -6325,6 +6458,9 @@ var DEFAULT_SHARED_PREFS = {
   openOutputForLongOps: false,
   inlineDiffUnit: "word",
   showConflictMarkers: false,
+  commitTemplates: [DEFAULT_COMMIT_TEMPLATE],
+  autoCommitTemplate: DEFAULT_COMMIT_TEMPLATE,
+  commitDateFormat: DEFAULT_COMMIT_DATE_FORMAT,
   treeView: false,
   customColors: false,
   colorsLight: { ...DEFAULT_COLORS.light },
@@ -6355,6 +6491,7 @@ function abortMergeFailure(result) {
 var MARKER_KEY = "active-op";
 var REPAIR_JOB_KEY = "repair-job";
 var LAST_SYNC_KEY = "last-sync";
+var RECENT_COMMIT_MESSAGES_KEY = "recent-commit-messages";
 var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   constructor() {
     super(...arguments);
@@ -6540,6 +6677,21 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
         loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
         openDiffAtCommit: (file, entry2) => void this.openCommitDiff(file, entry2),
         openFile: (p) => this.openVaultFile(p),
+        // Long press / right click on a file row: the file-at-commit menu
+        // (restore, view as of the commit, diff, history, copy) — the same
+        // answers the file-history panel gives for the same file (item 10).
+        fileMenu: (file, entry2, pos) => {
+          const menu = new import_obsidian15.Menu();
+          this.addMenuEntries(menu, {
+            kind: "file-at-commit",
+            path: file.path,
+            hash: entry2.hash,
+            date: entry2.date,
+            subject: entry2.subject,
+            code: file.code
+          });
+          menu.showAtPosition(pos);
+        },
         progressText: () => this.progressText ?? "",
         progressDetail: () => this.progressDetail ?? "",
         openOutput: () => void this.openOutputPanel(),
@@ -6697,7 +6849,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   addMenuEntries(menu, scope) {
     const single2 = scope.kind === "file";
     const path = scope.kind === "group" ? "" : scope.path;
-    const targets = () => single2 ? [path] : this.pathsUnder(path, scope.group);
+    const targets = () => scope.kind === "folder" || scope.kind === "group" ? this.pathsUnder(path, scope.group) : [path];
     const entries = buildMenuEntries(scope, {
       menuGitignore: this.deviceSettings.menuGitignore,
       menuSparse: this.deviceSettings.menuSparse,
@@ -6707,7 +6859,8 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       excluded: single2 && this.isExcluded(path),
       // The entry is only honest when the runner can serve it; 0 (never heard
       // from a runner) also stays silent rather than offering a refusal.
-      untrack: this.lastRunnerVersion >= 14
+      untrack: this.lastRunnerVersion >= 14,
+      remoteMappable: scope.kind === "file-at-commit" && remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash) !== null
     });
     const head = this.sharedPrefs.showMenuHeader ? menuHeader(scope) : null;
     if (head !== null) {
@@ -6730,6 +6883,44 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
   }
   runMenuAction(action, scope, targets) {
     const path = scope.kind === "group" ? "." : scope.path;
+    if (scope.kind === "file-at-commit") {
+      switch (action) {
+        case "open-diff-at-commit":
+          void this.openDiffPane({
+            path: scope.path,
+            from: `${scope.hash}^`,
+            to: scope.hash,
+            label: `${scope.hash.slice(0, 8)}^ \u2192 ${scope.hash.slice(0, 8)}`
+          });
+          return;
+        case "show-at-commit":
+          void this.showFileAtCommit(scope.path, scope.hash, scope.date);
+          return;
+        case "restore-from-commit":
+          this.confirmRestore(scope.path, {
+            hash: scope.hash,
+            date: scope.date,
+            author: "",
+            subject: scope.subject,
+            pathAtCommit: scope.path
+          });
+          return;
+        case "open-history":
+          void this.openFileHistoryPanel(scope.path);
+          return;
+        case "open-remote": {
+          const url = remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash);
+          if (url !== null) this.openExternalUri(url);
+          return;
+        }
+        case "copy-path":
+          void navigator.clipboard.writeText(scope.path);
+          new import_obsidian15.Notice("Path copied.");
+          return;
+        default:
+          return;
+      }
+    }
     const group = scope.group;
     switch (action) {
       case "stage":
@@ -8415,7 +8606,7 @@ var NativeGitBridgePlugin = class extends import_obsidian15.Plugin {
       return;
     }
     this.log.add("info", "companion", "Opening companion setup checklist.");
-    const q = `?pv=${encodeURIComponent(this.manifest.version)}&rv=${this.lastRunnerVersion}&rmin=${RUNNER_MIN_VERSION}`;
+    const q = `?pv=${encodeURIComponent(this.manifest.version)}&rv=${this.lastRunnerVersion}&rmin=${RUNNER_MIN_VERSION}&rship=${RUNNER_SHIPPED_VERSION}&cmin=${encodeURIComponent(COMPANION_MIN_VERSION)}`;
     this.openExternalUri(COMPANION_SETUP_URI + q);
     if (await this.probeCompanion()) return;
     this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
@@ -10109,16 +10300,22 @@ ${procs.join("\n")}`
   async cmdCommit() {
     if (!await this.guardPathLimits()) return;
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : void 0;
+    const rendered = this.sharedPrefs.commitTemplates.map(
+      (t) => renderCommitTemplate(t, this.sharedPrefs.commitDateFormat)
+    );
+    const suggestions = mergeMsg ? [] : [...rendered, ...this.recentCommitMessages().filter((r) => !rendered.includes(r))];
     new CommitMessageModal(
       this.app,
       {
         title: mergeMsg ? "Commit merge" : "Commit changes",
         placeholder: "Commit message\u2026",
         submitLabel: "Commit",
-        initial: mergeMsg
+        initial: mergeMsg,
+        suggestions
       },
       async (message) => {
         if (message === null) return;
+        if (message !== mergeMsg) this.rememberCommitMessage(message);
         const result = await this.runOperation("commit", {
           protectedPaths: this.effectiveProtectedPaths(),
           message
@@ -10146,12 +10343,33 @@ ${procs.join("\n")}`
     this.absorbStatusData(result.data ?? {});
     this.reportSuccess("Native Git: push", ["Push completed."], result.data?.pushOutput);
   }
+  /** The template the automatic sync commit uses, rendered for this moment. */
+  renderedAutoCommitMessage() {
+    return renderCommitTemplate(this.sharedPrefs.autoCommitTemplate, this.sharedPrefs.commitDateFormat);
+  }
+  /** This device's recently typed commit messages, newest first. */
+  recentCommitMessages() {
+    try {
+      const raw = JSON.parse(this.store.getValue(RECENT_COMMIT_MESSAGES_KEY) ?? "[]");
+      return Array.isArray(raw) ? raw.filter((r) => typeof r === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+  rememberCommitMessage(msg) {
+    const next = pushRecentMessage(
+      this.recentCommitMessages(),
+      msg,
+      this.deviceSettings.recentCommitMessagesMax
+    );
+    this.store.setValue(RECENT_COMMIT_MESSAGES_KEY, JSON.stringify(next));
+  }
   async cmdSync(message, silent = false) {
     if (!await this.guardPathLimits()) return;
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : void 0;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
-      message: message ?? mergeMsg ?? ""
+      message: message ?? mergeMsg ?? this.renderedAutoCommitMessage()
     });
     if (!result) return;
     if (!result.ok) {
@@ -11334,36 +11552,112 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
     if (companion === "") return false;
     return compareVersions(this.manifest.version, companion) > 0;
   }
+  /**
+   * Each part carries a floor and a shipped version, and the advice has four
+   * states (the user's model, 2026-08-25): below the floor — refuse and name
+   * the part actually at fault; between the floor and the current version —
+   * an update is available and everything keeps working; matched — silence;
+   * NEWER than this build knows — not an error but a CHOICE, with both exits
+   * named (update the plugin, or reinstall the other half pinned to this
+   * plugin's version). `kind` is what lets a surface pick buttons without
+   * parsing the text.
+   */
   versionAdvice() {
     const out = [];
     const plugin = this.manifest.version;
     const companion = this.lastCompanionVersion;
     if (companion !== "") {
-      const cmp = compareVersions(plugin, companion);
-      if (cmp < 0) {
-        out.push({
-          part: "plugin",
-          text: `The plugin (${plugin}) is OLDER than the companion app (${companion}). Update the plugin: download main.js, manifest.json and styles.css from the latest release into .obsidian/plugins/native-git-bridge/, then reload the plugin.`
-        });
-      } else if (cmp > 0) {
+      if (compareVersions(companion, COMPANION_MIN_VERSION) < 0) {
         out.push({
           part: "companion",
-          text: `The companion app (${companion}) is OLDER than the plugin (${plugin}). Install the newest APK from the latest release (it updates over the current one).`
+          kind: "below-floor",
+          text: `The companion app (${companion}) is older than this plugin can work with (needs at least ${COMPANION_MIN_VERSION}). Install the newest APK from the latest release \u2014 it updates over the current one.`
+        });
+      } else if (compareVersions(plugin, companion) > 0) {
+        out.push({
+          part: "companion",
+          kind: "update-available",
+          text: `A newer companion app (${plugin}) ships with this plugin; the installed one (${companion}) keeps working. Update the APK when convenient \u2014 or stay on it by installing the matching plugin (the button explains how).`
+        });
+      } else if (compareVersions(plugin, companion) < 0) {
+        out.push({
+          part: "plugin",
+          kind: "newer-half",
+          text: `The companion app (${companion}) is NEWER than this plugin (${plugin}). Either update the plugin from the latest release, or install the companion APK matching ${plugin} from that release's page \u2014 every release keeps its own APK.`
         });
       }
     }
     if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER_MIN_VERSION) {
       out.push({
         part: "runner",
+        kind: "below-floor",
         text: `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux \u2014 updating the plugin never updates the runner.`
       });
     } else if (this.lastRunnerVersion > RUNNER_SHIPPED_VERSION) {
       out.push({
         part: "runner",
-        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Update the plugin from the latest release.`
+        kind: "newer-half",
+        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Either update the plugin from the latest release, or reinstall the runner pinned to this plugin \u2014 the install command in settings does exactly that.`
       });
     }
     return out;
+  }
+  /**
+   * The manual half of the outdated-companion choice (the user's ask,
+   * 2026-08-25): staying on the installed companion means installing the
+   * PLUGIN release that matches it, by hand — the one route Obsidian cannot
+   * perform itself. Offered only for companions since 0.6.0: the wire
+   * protocol is v1 and profile files are format 1 across those releases, so
+   * the downgrade reads everything the newer plugin left behind; earlier
+   * releases predate profiles and the claim does not hold.
+   */
+  cmdStayOnCompanion() {
+    const cv = this.lastCompanionVersion;
+    const url = releaseTagUrl(cv);
+    new ResultModal(
+      this.app,
+      "Match this companion by hand",
+      [
+        `1. Open the release page for ${cv} in a real browser (Chrome/Firefox) \u2014 the button copies the link.`,
+        "2. From its assets, download main.js, manifest.json and styles.css into .obsidian/plugins/native-git-bridge/ (replacing the three files).",
+        "3. Reload the plugin (Settings -> Community plugins: toggle it off and on).",
+        "4. Re-run the install command from THAT plugin's settings \u2014 it is pinned to the same release, so the runner ends up matching too.",
+        "Profiles, tokens and the runtime folder need no changes: the wire protocol and the profile format are the same across these releases."
+      ],
+      {
+        actions: [
+          {
+            label: "Copy the release link",
+            cta: true,
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(url);
+              new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox.");
+            }
+          }
+        ]
+      }
+    ).open();
+  }
+  /**
+   * Whether the stay-on-this-companion route may be offered: the downgrade
+   * claim (profiles, tokens, runtime all readable by the older release) holds
+   * from 0.6.0 onward — profiles and the claim/pairing flow arrived there.
+   */
+  stayOnCompanionAvailable() {
+    return this.lastCompanionVersion !== "" && compareVersions(this.lastCompanionVersion, "0.6.0") >= 0;
+  }
+  /**
+   * The pinned exit of the newer-companion choice: the APK matching THIS
+   * plugin. Copied, not opened — an APK download started in Obsidian's
+   * Custom Tab is frequently discarded when the tab closes (§10's oldest
+   * companion lesson), and no companion can be asked to open it, since the
+   * companion is exactly the half being replaced.
+   */
+  copyMatchingApkLink() {
+    const url = releaseTagUrl(this.manifest.version);
+    void navigator.clipboard.writeText(url);
+    new import_obsidian15.Notice("Release link copied - open it in Chrome or Firefox and install the APK from that page.");
   }
   /** The one-line Termux install command (same one settings shows). */
   installCommand() {

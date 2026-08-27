@@ -273,7 +273,10 @@ async function loadPlugin(): Promise<Harness> {
   const plugin = new (NativeGitBridgePlugin as Any)(app, {
     id: "native-git-bridge",
     name: "Native Git Bridge",
-    version: "0.4.0",
+    // A realistic release number: the companion floor (COMPANION_MIN_VERSION)
+    // sits between the ancient releases and the current one, and a harness
+    // version BELOW the floor made a matched pair read as below-floor.
+    version: "0.6.7",
   }) as NativeGitBridgePlugin;
   // Skip status bar & ribbon: they are cosmetic and DOM-heavy.
   (plugin as Any).__setData({ showStatusBar: false, showRibbonIcon: false });
@@ -730,9 +733,12 @@ describe("one surface per question (no legacy modals)", () => {
   });
 });
 
-describe("repository bootstrap", () => {
-  /** Answer the next request with this result body (built from the request). */
-  function answerWith(h: Harness, build: (req: Any) => Any): void {
+/**
+ * Answer the next request with this result body (built from the request).
+ * Module-level: it started inside the bootstrap describe and the commit
+ * message tests needed the same seam.
+ */
+function answerWith(h: Harness, build: (req: Any) => Any): void {
     h.runner.onTrigger = (id) => {
       const req = JSON.parse(h.adapter.files.get(paths.requestFile(id))!);
       h.adapter.files.set(
@@ -746,8 +752,9 @@ describe("repository bootstrap", () => {
         })
       );
     };
-  }
+}
 
+describe("repository bootstrap", () => {
   it("tells Termux the vault still needs a repository when it pairs", async () => {
     const h = await loadPlugin();
     __setPlatformAndroid(true);
@@ -1799,26 +1806,44 @@ describe("protected paths derived from sparse", () => {
 describe("version advice across the three parts", () => {
   it("stays silent when everything matches", async () => {
     const h = await loadPlugin();
-    // manifest version in the harness is 0.4.0; make the companion match and
+    // manifest version in the harness is 0.6.7; make the companion match and
     // the runner the expected one.
-    h.plugin.onCompanionAck("run", "1", "0.4.0");
+    h.plugin.onCompanionAck("run", "1", "0.6.7");
     h.plugin.lastRunnerVersion = RUNNER_MIN_VERSION;
     expect(h.plugin.versionAdvice()).toEqual([]);
   });
 
-  it("tells the user to update the PLUGIN when the companion is newer", async () => {
+  it("a NEWER companion is a choice, not an error: both exits named, part is the plugin", async () => {
     const h = await loadPlugin();
     h.plugin.onCompanionAck("run", "1", "9.9.9");
     const advice = h.plugin.versionAdvice();
-    expect(advice.map((a) => a.part)).toContain("plugin");
-    expect(advice.find((a) => a.part === "plugin")!.text).toMatch(/OLDER than the companion/);
+    const a = advice.find((x) => x.part === "plugin")!;
+    expect(a.kind).toBe("newer-half");
+    expect(a.text).toMatch(/NEWER than this plugin/);
+    expect(a.text).toMatch(/latest release/);
+    expect(a.text).toMatch(/matching/); // the pinned-APK exit is named too
   });
 
-  it("tells the user to update the COMPANION when it is older", async () => {
+  it("a companion below the floor is the refusal case; above it, only an update offer", async () => {
     const h = await loadPlugin();
     h.plugin.onCompanionAck("run", "1", "0.1.0");
-    const advice = h.plugin.versionAdvice();
-    expect(advice.map((a) => a.part)).toContain("companion");
+    const below = h.plugin.versionAdvice().find((a) => a.part === "companion")!;
+    expect(below.kind).toBe("below-floor");
+    expect(below.text).toMatch(/needs at least/);
+    // At or above the floor but behind the plugin: everything keeps working.
+    h.plugin.onCompanionAck("run", "1", "0.6.5");
+    const soft = h.plugin.versionAdvice().find((a) => a.part === "companion")!;
+    expect(soft.kind).toBe("update-available");
+    expect(soft.text).toMatch(/keeps working/);
+  });
+
+  it("the stay-on-this-companion route is offered only from 0.6.0 (the downgrade-safe span)", async () => {
+    const h = await loadPlugin();
+    expect(h.plugin.stayOnCompanionAvailable()).toBe(false); // none seen yet
+    h.plugin.onCompanionAck("run", "1", "0.5.9");
+    expect(h.plugin.stayOnCompanionAvailable()).toBe(false); // predates profiles
+    h.plugin.onCompanionAck("run", "1", "0.6.0");
+    expect(h.plugin.stayOnCompanionAvailable()).toBe(true);
   });
 
   it("tells the user to re-run the Termux installer for a mismatched runner", async () => {
@@ -1835,6 +1860,43 @@ describe("version advice across the three parts", () => {
     const h = await loadPlugin();
     expect(h.plugin.lastRunnerVersion).toBe(0);
     expect(h.plugin.versionAdvice().some((a) => a.part === "runner")).toBe(false);
+  });
+});
+
+describe("commit messages (0.6.7 item 6)", () => {
+  it("sync without a typed message commits with the RENDERED auto template", async () => {
+    // obsidian-git's model, the user's pick: no modal, the template filled in
+    // with the device-local date. The runner's fixed fallback stays for old
+    // plugins but is no longer reachable from here.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let sentMessage: string | null = null;
+    answerWith(h, (req: Any) => {
+      if (req.action === "sync") sentMessage = req.args?.message ?? "";
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 17,
+        data: {
+          branchInfo: "# branch.head main",
+          steps: "repo-verified,fetched,staged,committed,pushed",
+          committed: "true",
+          pushed: "true",
+        },
+      };
+    });
+    await h.plugin.cmdSync();
+    expect(sentMessage).toMatch(/^Update \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it("recents are remembered newest-first and capped by the device setting", async () => {
+    const h = await loadPlugin();
+    await h.plugin.updateDeviceSettings({ recentCommitMessagesMax: 2 });
+    h.plugin.rememberCommitMessage("first");
+    h.plugin.rememberCommitMessage("second");
+    h.plugin.rememberCommitMessage("third");
+    expect(h.plugin.recentCommitMessages()).toEqual(["third", "second"]);
   });
 });
 
@@ -2001,8 +2063,8 @@ describe("sync on close (fire and forget)", () => {
 describe("companion update advice", () => {
   it("does not call a companion outdated just because it answered", async () => {
     const h = await loadPlugin();
-    // Harness manifest is 0.4.0; an ack with the SAME version is a healthy pair.
-    h.plugin.onCompanionAck("run", "1", "0.4.0");
+    // Harness manifest is 0.6.7; an ack with the SAME version is a healthy pair.
+    h.plugin.onCompanionAck("run", "1", "0.6.7");
     expect(h.plugin.companionOutdated()).toBe(false);
     expect(h.plugin.versionAdvice().map((a) => a.part)).not.toContain("companion");
   });
@@ -2144,6 +2206,7 @@ describe("teardown reaches the panels that show the state line", () => {
     const view = new HistoryView({} as Any, {
       loadPage: async () => [],
       openDiffAtCommit: () => undefined,
+      fileMenu: () => undefined,
       openFile: () => undefined,
       progressText: () => (h.plugin as Any).progressText ?? "",
       progressDetail: () => (h.plugin as Any).progressDetail ?? "",

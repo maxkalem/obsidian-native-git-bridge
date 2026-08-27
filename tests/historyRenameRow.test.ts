@@ -47,6 +47,7 @@ function actions(over: Partial<HistoryViewActions> = {}): HistoryViewActions {
     loadPage: async () => [],
     openDiffAtCommit: () => undefined,
     openFile: () => undefined,
+    fileMenu: () => undefined,
     progressText: () => "",
     progressDetail: () => "",
     treeView: () => false,
@@ -110,5 +111,29 @@ describe("history panel, the rename hint", () => {
     const body = view.contentEl.createDiv();
     view.renderFile(body, plain, ENTRY, 0);
     expect(__findByClass(body, "ngb-hist-rename")).toBeNull();
+  });
+
+  it("right click / long press on a file row opens the file-at-commit menu (item 10)", () => {
+    // The row used to offer exactly two things (go-to-file, tap = diff) while
+    // the file-history panel offered restore and view-at-commit for the same
+    // file at the same commit.
+    let menuFile: RepoLogFile | null = null;
+    let menuEntry: RepoLogEntry | null = null;
+    const view = new HistoryView(
+      leaf,
+      actions({
+        fileMenu: (f, e) => {
+          menuFile = f;
+          menuEntry = e;
+        },
+      })
+    ) as Any;
+    view.renderShell();
+    const body = view.contentEl.createDiv();
+    view.renderFile(body, FILE, ENTRY, 0);
+    const row = __findByClass(body, "ngb-sv-file");
+    expect(__fire(row, "contextmenu")).toBe(true);
+    expect(menuFile).toBe(FILE);
+    expect(menuEntry).toBe(ENTRY);
   });
 });

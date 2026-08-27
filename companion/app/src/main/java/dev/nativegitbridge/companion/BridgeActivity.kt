@@ -61,6 +61,12 @@ class BridgeActivity : Activity() {
                         .putExtra(SetupActivity.EXTRA_PLUGIN_VERSION, uri.getQueryParameter("pv"))
                         .putExtra(SetupActivity.EXTRA_RUNNER_VERSION, uri.getQueryParameter("rv"))
                         .putExtra(SetupActivity.EXTRA_RUNNER_MIN, uri.getQueryParameter("rmin"))
+                        // What the plugin SHIPS (not only its floor) and the
+                        // companion floor it accepts: without the shipped
+                        // number this screen once branded every up-to-date
+                        // runner stale and the plugin lagging.
+                        .putExtra(SetupActivity.EXTRA_RUNNER_SHIPPED, uri.getQueryParameter("rship"))
+                        .putExtra(SetupActivity.EXTRA_COMPANION_MIN, uri.getQueryParameter("cmin"))
                 )
             }
             // One-tap fix path: bring Termux to the foreground so the user can

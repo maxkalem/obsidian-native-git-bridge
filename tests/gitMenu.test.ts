@@ -42,6 +42,61 @@ describe("git context menu, one description for every surface", () => {
     expect(group).toContain("abort-merge");
   });
 
+  it("a file at a commit answers the file-history panel's questions, and no working-tree ones", () => {
+    // Open item 10: a repo-history row offered two things while the same file
+    // in the file-history panel offered restore and view-at-commit — same
+    // file, same commit, different answers.
+    const at = (code: string): MenuScope => ({
+      kind: "file-at-commit",
+      path: "Notes/a.md",
+      hash: "0123abcd4567",
+      date: "2026-08-26T10:00:00Z",
+      subject: "a subject",
+      code,
+    });
+    const a = actions(at("M"));
+    expect(a).toEqual([
+      "open-diff-at-commit",
+      "show-at-commit",
+      "restore-from-commit",
+      "open-history",
+      "copy-path",
+    ]);
+    // None of the working-tree families leak in: staging, discard, config
+    // rules — a commit is not a working-tree state.
+    for (const x of ["stage", "discard", "gitignore-add", "sparse-add", "exclude-add", "untrack"]) {
+      expect(a).not.toContain(x);
+    }
+    // The restore route is marked destructive, like every discard.
+    const entries = buildMenuEntries(at("M"), allOn);
+    expect(entries.find((e) => e.action === "restore-from-commit")!.danger).toBe(true);
+  });
+
+  it("open-on-remote appears only when the remote actually maps to a web host", () => {
+    const at: MenuScope = {
+      kind: "file-at-commit",
+      path: "Notes/a.md",
+      hash: "0123abcd4567",
+      date: "2026-08-26T10:00:00Z",
+      subject: "a subject",
+      code: "M",
+    };
+    expect(actions(at)).not.toContain("open-remote"); // flag absent = unmappable
+    expect(actions(at, { remoteMappable: true })).toContain("open-remote");
+  });
+
+  it("a file DELETED by the commit has no content there: only the diff and the path", () => {
+    const a = actions({
+      kind: "file-at-commit",
+      path: "Notes/gone.md",
+      hash: "0123abcd4567",
+      date: "2026-08-26T10:00:00Z",
+      subject: "delete it",
+      code: "D",
+    });
+    expect(a).toEqual(["open-diff-at-commit", "copy-path"]);
+  });
+
   it("opening things is offered for single files only", () => {
     for (const a of [
       actions({ kind: "folder", path: "d", group: "unstaged", count: 4 }),

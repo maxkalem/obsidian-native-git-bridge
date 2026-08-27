@@ -7,7 +7,19 @@ export class CommitMessageModal extends Modal {
 
   constructor(
     app: App,
-    private opts: { title: string; placeholder: string; submitLabel: string; initial?: string },
+    private opts: {
+      title: string;
+      placeholder: string;
+      submitLabel: string;
+      initial?: string;
+      /**
+       * One-tap fillers under the input: rendered templates first, then this
+       * device's recents (the caller decides). A tap FILLS the textarea and
+       * leaves submitting to the user — a chip that committed directly would
+       * make the destructive tap and the choosing tap the same gesture.
+       */
+      suggestions?: string[];
+    },
     /** May be async. See the note on ConfirmModal's `onDecision`. */
     private onDone: (message: string | null) => void | Promise<void>
   ) {
@@ -22,6 +34,16 @@ export class CommitMessageModal extends Modal {
     ta.rows = 3;
     ta.placeholder = this.opts.placeholder;
     ta.value = this.opts.initial ?? "";
+    if (this.opts.suggestions !== undefined && this.opts.suggestions.length > 0) {
+      const box = c.createDiv({ cls: "ngb-msg-suggestions" });
+      for (const s of this.opts.suggestions) {
+        const chip = box.createEl("button", { cls: "ngb-msg-chip", text: s });
+        chip.addEventListener("click", () => {
+          ta.value = s;
+          ta.focus();
+        });
+      }
+    }
     const note = c.createDiv({ cls: "ngb-invalid" });
     const doSubmit = () => {
       const msg = ta.value.trim();

@@ -11,7 +11,23 @@ import type { Group } from "./StatusView";
 export type MenuScope =
   | { kind: "file"; path: string; group: Group }
   | { kind: "folder"; path: string; group: Group; count: number }
-  | { kind: "group"; group: Group; count: number };
+  | { kind: "group"; group: Group; count: number }
+  /**
+   * A file AT ONE COMMIT — the repository-history panel's rows (0.6.7, open
+   * item 10). The same file in the file-history panel offered restore and
+   * view-at-commit while the repository history offered neither: same file,
+   * same commit, different list, different answers — the §9 drift. `path` is
+   * the path AT the commit; `code` is git's change letter, which decides
+   * whether the content even exists at this commit.
+   */
+  | {
+      kind: "file-at-commit";
+      path: string;
+      hash: string;
+      date: string;
+      subject: string;
+      code: string;
+    };
 
 export interface GitMenuFlags {
   /** Settings toggles for the three config-editing families. */
@@ -27,6 +43,13 @@ export interface GitMenuFlags {
    * only when acting on it can succeed; an older runner would refuse by name.
    */
   untrack: boolean;
+  /**
+   * Whether the remote maps to a known web host (remoteFileUrl answered for
+   * this path and commit). The open-on-remote entry appears only then: a
+   * wrong link is worse than no link, and an entry that opens nothing is a
+   * bug report waiting to be written.
+   */
+  remoteMappable?: boolean;
 }
 
 /**
@@ -50,9 +73,12 @@ export function menuHeader(scope: MenuScope): MenuHeader | null {
   const trimmed = scope.path.endsWith("/") ? scope.path.slice(0, -1) : scope.path;
   const cut = trimmed.lastIndexOf("/");
   const base = cut >= 0 ? trimmed.slice(cut + 1) : trimmed;
+  // An at-commit menu is about the file AT that commit; the short hash in the
+  // header is what keeps "Restore the file" from reading as "restore to HEAD".
+  const name = scope.kind === "file-at-commit" ? `${base} @ ${scope.hash.slice(0, 8)}` : base;
   return {
     dir: cut >= 0 ? trimmed.slice(0, cut) : "",
-    name: isDir ? `${base}/` : base,
+    name: isDir ? `${name}/` : name,
   };
 }
 
@@ -74,7 +100,11 @@ export type MenuAction =
   | "sparse-remove"
   | "exclude-add"
   | "exclude-remove"
-  | "untrack";
+  | "untrack"
+  | "open-diff-at-commit"
+  | "show-at-commit"
+  | "restore-from-commit"
+  | "open-remote";
 
 export interface MenuEntry {
   action: MenuAction;
@@ -85,15 +115,42 @@ export interface MenuEntry {
 
 /** "" for a single path, " (12)" for a folder or group, so bulk is never a surprise. */
 function suffix(scope: MenuScope): string {
-  return scope.kind === "file" ? "" : ` (${scope.count})`;
+  return scope.kind === "folder" || scope.kind === "group" ? ` (${scope.count})` : "";
 }
 
 function noun(scope: MenuScope): string {
-  if (scope.kind === "file") return "";
-  return scope.kind === "folder" ? " in folder" : " in group";
+  if (scope.kind === "folder") return " in folder";
+  return scope.kind === "group" ? " in group" : "";
 }
 
 export function buildMenuEntries(scope: MenuScope, f: GitMenuFlags): MenuEntry[] {
+  // A file at one commit answers a different question from a working-tree
+  // row, so it gets its own entry set and none of the config family. The
+  // entries mirror what the file-history panel's rows offer (view, restore —
+  // same icons), so the two surfaces give the same answers; per-block restore
+  // stays with the file-history panel, which already holds the commit's diff.
+  if (scope.kind === "file-at-commit") {
+    const out: MenuEntry[] = [
+      { action: "open-diff-at-commit", title: "Open this commit's diff", icon: "file-diff" },
+    ];
+    // A file DELETED by this commit has no content at it: nothing to view,
+    // nothing to restore from, and no history under the path it no longer has.
+    if (scope.code !== "D") {
+      out.push({ action: "show-at-commit", title: "Show the file as of this commit", icon: "eye" });
+      out.push({
+        action: "restore-from-commit",
+        title: "Restore the file from this commit",
+        icon: "rotate-ccw",
+        danger: true,
+      });
+      out.push({ action: "open-history", title: "Open file history", icon: "history" });
+      if (f.remoteMappable === true) {
+        out.push({ action: "open-remote", title: "Open on the remote (browser)", icon: "globe" });
+      }
+    }
+    out.push({ action: "copy-path", title: "Copy path", icon: "copy" });
+    return out;
+  }
   const out: MenuEntry[] = [];
   const single = scope.kind === "file";
   const bulk = !single;

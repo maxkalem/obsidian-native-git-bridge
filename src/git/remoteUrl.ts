@@ -95,6 +95,41 @@ export function redactRemoteUrl(url: string): string {
   return url.replace(/^([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^/@]+@/, "$1***@");
 }
 
+/**
+ * The web page of one file at one commit on the remote, or null when the
+ * remote cannot be mapped. Deliberately narrow (open item 8's rule: a wrong
+ * link is worse than no link): only github.com and gitlab.com, whose URL
+ * shapes are published — a self-hosted instance cannot be told apart from an
+ * arbitrary git server, so it gets no guess. Accepts the https form, the
+ * scp-like ssh form, and the runner's REDACTED form (`***@`), whose userinfo
+ * is dropped along with any other: the built URL is handed to another app,
+ * so the no-credentials rule holds on the way out exactly as it does on the
+ * way in.
+ */
+export function remoteFileUrl(remote: string, path: string, commit: string): string | null {
+  if (!/^[0-9a-f]{7,40}$/i.test(commit)) return null;
+  let host = "";
+  let repo = "";
+  const https = /^https:\/\/(?:[^/@]+@)?([A-Za-z0-9._-]+)\/(.+)$/.exec(remote.trim());
+  const scp = /^[A-Za-z0-9._-]+@([A-Za-z0-9._-]+):(.+)$/.exec(remote.trim());
+  if (https) {
+    host = https[1]!.toLowerCase();
+    repo = https[2]!;
+  } else if (scp) {
+    host = scp[1]!.toLowerCase();
+    repo = scp[2]!;
+  } else {
+    return null;
+  }
+  repo = repo.replace(/\.git$/, "").replace(/\/+$/, "");
+  // owner/repo exactly: a deeper path is a shape this mapper does not know.
+  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) return null;
+  const encPath = path.split("/").map(encodeURIComponent).join("/");
+  if (host === "github.com") return `https://github.com/${repo}/blob/${commit}/${encPath}`;
+  if (host === "gitlab.com") return `https://gitlab.com/${repo}/-/blob/${commit}/${encPath}`;
+  return null;
+}
+
 /** Branch names accepted by the bootstrap actions (a safe subset of git's rules). */
 export function isValidBranchName(name: string): boolean {
   if (name === "" || name.length > 100) return false;

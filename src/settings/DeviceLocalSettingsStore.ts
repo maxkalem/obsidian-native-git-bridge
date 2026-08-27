@@ -67,6 +67,13 @@ export interface DeviceLocalSettings {
    */
   rowsPerGroup: number;
   /**
+   * How many recently typed commit messages the commit window remembers and
+   * offers. Device-local: the list itself is this device's typing history
+   * (kept in localStorage beside the other per-device state), and the cap
+   * decides how much of it this device stores. 0 turns the recents off.
+   */
+  recentCommitMessagesMax: number;
+  /**
    * Epoch ms of the last "you still have an old repository set aside" reminder.
    * Device-local: the copy sits on THIS device's disk, and so does the decision
    * about it.
@@ -150,6 +157,7 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   menuExclude: true,
   deleteUntrackedPermanently: false,
   rowsPerGroup: DEFAULT_ROWS_PER_GROUP_SETTING,
+  recentCommitMessagesMax: 10,
   statusRefreshSeconds: 0,
   diffLimitKb: DEFAULT_DIFF_LIMIT_KB,
   previousRepoRemindedAt: 0,

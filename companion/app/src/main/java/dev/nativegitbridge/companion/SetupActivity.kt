@@ -481,44 +481,60 @@ class SetupActivity : Activity() {
         val pv = intent?.getStringExtra(EXTRA_PLUGIN_VERSION)
         val rv = intent?.getStringExtra(EXTRA_RUNNER_VERSION)
         val rmin = intent?.getStringExtra(EXTRA_RUNNER_MIN)
+        val rship = intent?.getStringExtra(EXTRA_RUNNER_SHIPPED)
+        val cmin = intent?.getStringExtra(EXTRA_COMPANION_MIN)
         if (pv.isNullOrEmpty() && rv.isNullOrEmpty()) return
         prefs().edit()
             .putString(KEY_PLUGIN_VERSION, pv ?: "")
             .putString(KEY_RUNNER_VERSION, rv ?: "")
             .putString(KEY_RUNNER_MIN, rmin ?: "")
+            .putString(KEY_RUNNER_SHIPPED, rship ?: "")
+            .putString(KEY_COMPANION_MIN, cmin ?: "")
             .apply()
     }
 
+    /**
+     * Version verdicts follow the floor model on every part: red means BELOW
+     * a declared floor (something actually refuses to work), a plain mismatch
+     * means an update exists while everything keeps working, and a missing
+     * floor number (an older plugin that never sent it) claims nothing. The
+     * old three-way comparison had one number per part and no floors, so it
+     * branded a correct runner "stale" (it compared against the FLOOR as if
+     * that were the expected version) and colored the plugin red for it —
+     * the wrong row, on a healthy install (the user's device, 2026-08-25).
+     */
     private fun renderVersions() {
         val pv = prefs().getString(KEY_PLUGIN_VERSION, "") ?: ""
         val rv = prefs().getString(KEY_RUNNER_VERSION, "") ?: ""
         val rmin = prefs().getString(KEY_RUNNER_MIN, "") ?: ""
+        val rship = prefs().getString(KEY_RUNNER_SHIPPED, "") ?: ""
+        val cmin = prefs().getString(KEY_COMPANION_MIN, "") ?: ""
         val pluginText = if (pv.isEmpty()) getString(R.string.ver_unknown) else pv
         val runnerNum = rv.toIntOrNull() ?: 0
         val runnerMin = rmin.toIntOrNull() ?: 0
+        val runnerShipped = rship.toIntOrNull() ?: 0
+        val runnerIsLagging = runnerNum != 0 && runnerMin != 0 && runnerNum < runnerMin
+        val runnerNewer = runnerNum != 0 && runnerShipped != 0 && runnerNum > runnerShipped
         val runnerText = when {
             runnerNum == 0 -> getString(R.string.ver_unknown)
-            runnerMin != 0 && runnerNum != runnerMin -> getString(R.string.ver_runner_stale, rv, rmin)
+            runnerIsLagging -> getString(R.string.ver_runner_stale, rv, rmin)
             else -> "v$rv"
         }
 
-        // The same three-way check the plugin does, repeated here because the
-        // user may open this screen directly from the launcher and expects the
-        // verdict where the numbers are shown.
         val cmp = if (pv.isEmpty()) 0 else compareVersions(pv, appVersion())
-        val companionLags = cmp > 0
-        // A runner NEWER than the plugin expects also means the PLUGIN lags.
-        val pluginLags = cmp < 0 || (runnerNum != 0 && runnerMin != 0 && runnerNum > runnerMin)
-        val runnerIsLagging = runnerNum != 0 && runnerMin != 0 && runnerNum < runnerMin
+        val pluginBelowFloor = pv.isNotEmpty() && compareVersions(pv, PLUGIN_MIN_VERSION) < 0
+        val companionBelowFloor = cmin.isNotEmpty() && compareVersions(appVersion(), cmin) < 0
+        val companionLags = cmp > 0 || companionBelowFloor
 
         companionLine.text = getString(R.string.ver_companion_line, appVersion())
         pluginLine.text = getString(R.string.ver_plugin_line, pluginText)
         runnerLine.text = getString(R.string.ver_runner_line, runnerText)
-        companionLine.setTextColor(c(if (companionLags) R.color.danger else R.color.text_muted))
-        pluginLine.setTextColor(c(if (pluginLags) R.color.danger else R.color.text_muted))
+        // Red = below a floor, nothing else: an available update is not a fault.
+        companionLine.setTextColor(c(if (companionBelowFloor) R.color.danger else R.color.text_muted))
+        pluginLine.setTextColor(c(if (pluginBelowFloor) R.color.danger else R.color.text_muted))
         runnerLine.setTextColor(c(if (runnerIsLagging) R.color.danger else R.color.text_muted))
 
-        // This app is the outdated part: offer the download right here. It can
+        // This app is the older half: offer the download right here. It can
         // open the real default browser, which Obsidian's in-app tab cannot do
         // reliably (its downloads are discarded when the tab closes).
         updateButton.visibility =
@@ -527,11 +543,12 @@ class SetupActivity : Activity() {
         updateRunnerButton.visibility =
             if (runnerIsLagging) android.view.View.VISIBLE else android.view.View.GONE
         mismatch.text = when {
-            cmp < 0 -> getString(R.string.ver_update_plugin, pv, appVersion())
-            companionLags -> getString(R.string.ver_update_companion, appVersion(), pv)
+            pluginBelowFloor -> getString(R.string.ver_plugin_below_floor, pv, PLUGIN_MIN_VERSION)
+            companionBelowFloor -> getString(R.string.ver_companion_below_floor, appVersion(), cmin)
+            cmp < 0 -> getString(R.string.ver_update_plugin_soft, pv, appVersion())
+            companionLags -> getString(R.string.ver_update_companion_soft, appVersion(), pv)
             runnerIsLagging -> getString(R.string.ver_update_runner, rv, rmin)
-            runnerNum != 0 && runnerMin != 0 && runnerNum > runnerMin ->
-                getString(R.string.ver_update_plugin_for_runner, rv, rmin)
+            runnerNewer -> getString(R.string.ver_update_plugin_for_runner, rv, rship)
             else -> ""
         }
     }
@@ -556,10 +573,21 @@ class SetupActivity : Activity() {
         private const val KEY_PLUGIN_VERSION = "pluginVersion"
         private const val KEY_RUNNER_VERSION = "runnerVersion"
         private const val KEY_RUNNER_MIN = "runnerMin"
+        private const val KEY_RUNNER_SHIPPED = "runnerShipped"
+        private const val KEY_COMPANION_MIN = "companionMin"
+
+        /**
+         * The oldest PLUGIN this companion works with — this app's own floor,
+         * mirroring the plugin's COMPANION_MIN_VERSION. 0.6.0 is where
+         * profiles and the pairing flow this app's trigger serves arrived.
+         */
+        const val PLUGIN_MIN_VERSION = "0.6.0"
 
         /** Display-only metadata forwarded by BridgeActivity from the setup URI. */
         const val EXTRA_PLUGIN_VERSION = "pluginVersion"
         const val EXTRA_RUNNER_VERSION = "runnerVersion"
         const val EXTRA_RUNNER_MIN = "runnerMin"
+        const val EXTRA_RUNNER_SHIPPED = "runnerShipped"
+        const val EXTRA_COMPANION_MIN = "companionMin"
     }
 }

@@ -3,6 +3,7 @@ import type { RepoLogEntry, RepoLogFile } from "../git/historyParsers";
 import { buildPathTree, type PathTreeNode } from "./pathTree";
 import { renderCountBadge } from "./countBadge";
 import { describeMove, revealOnTap } from "./revealOnTap";
+import { attachContextMenu } from "./contextMenu";
 
 export const NGB_HISTORY_VIEW = "native-git-bridge-history";
 /** One icon for the panel AND the strip button that opens it. */
@@ -15,6 +16,13 @@ export interface HistoryViewActions {
   openDiffAtCommit(file: RepoLogFile, entry: RepoLogEntry): void;
   /** Open the file itself (current working-tree version). */
   openFile(path: string): void;
+  /**
+   * The file-at-commit context menu (long press / right click on a file row):
+   * restore from this commit, view as of it, its diff, file history, copy.
+   * The file-history panel's rows answer the same questions; this is what
+   * keeps the two surfaces from answering differently (open item 10).
+   */
+  fileMenu(file: RepoLogFile, entry: RepoLogEntry, pos: { x: number; y: number }): void;
   /** Progress line of the operation in flight ("" when idle), for the wait indicator. */
   progressText(): string;
   /** What the runner said it is doing, for the reserved detail line. */
@@ -518,6 +526,8 @@ export class HistoryView extends ItemView {
     }
     // Tap on the row = the diff this commit introduced for the file, in a pane.
     main.addEventListener("click", () => this.actions.openDiffAtCommit(f, e));
+    // Long press / right click = the file-at-commit menu.
+    attachContextMenu(row, (pos) => this.actions.fileMenu(f, e, pos));
     const acts = row.createDiv({ cls: "ngb-sv-file-actions" });
     const openBtn = acts.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     openBtn.setAttribute("aria-label", "Open file (current version)");

@@ -90,7 +90,13 @@ import { overrideWarning } from "./git/diffBudget";
 import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
 import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
 import { runSelfCheck } from "./bridge/selfCheck";
-import { isValidBranchName, redactRemoteUrl, validateRemoteUrl } from "./git/remoteUrl";
+import { isValidBranchName, redactRemoteUrl, remoteFileUrl, validateRemoteUrl } from "./git/remoteUrl";
+import {
+  DEFAULT_COMMIT_DATE_FORMAT,
+  DEFAULT_COMMIT_TEMPLATE,
+  pushRecentMessage,
+  renderCommitTemplate,
+} from "./git/commitMessage";
 import {
   describePreviousRepo,
   formatSize,
@@ -115,6 +121,8 @@ import {
   bootstrapCommandLocal,
   RUNNER_MIN_VERSION,
   RUNNER_SHIPPED_VERSION,
+  COMPANION_MIN_VERSION,
+  releaseTagUrl,
   RUNNER_OUTDATED_HINT,
   TERMUX_FDROID_URL,
   TERMUX_SITE_URL,
@@ -207,6 +215,20 @@ interface SharedUiPrefs {
   inlineDiffUnit: InlineDiffUnit;
   /** Conflict pane: show raw <<<<<<< markers with separate action rows. */
   showConflictMarkers: boolean;
+  /**
+   * Commit message templates offered as one-tap chips in the commit window,
+   * and the one the automatic sync commit uses when nothing was typed.
+   * `{{date}}` renders in device-local time with `commitDateFormat`
+   * (moment-style tokens; the supported subset is in commitMessage.ts) —
+   * obsidian-git's model, the user's pick (2026-08-26). Shared through
+   * data.json: a template is a preference about how the history READS, the
+   * same on every device. The typed-message RECENTS are not here — they are
+   * this device's typing history and live in localStorage, with their cap in
+   * the device settings.
+   */
+  commitTemplates: string[];
+  autoCommitTemplate: string;
+  commitDateFormat: string;
   /** Render file lists as a folder tree (status + history panels). */
   treeView: boolean;
   /**
@@ -230,6 +252,9 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   openOutputForLongOps: false,
   inlineDiffUnit: "word",
   showConflictMarkers: false,
+  commitTemplates: [DEFAULT_COMMIT_TEMPLATE],
+  autoCommitTemplate: DEFAULT_COMMIT_TEMPLATE,
+  commitDateFormat: DEFAULT_COMMIT_DATE_FORMAT,
   treeView: false,
   customColors: false,
   colorsLight: { ...DEFAULT_COLORS.light },
@@ -292,6 +317,8 @@ const MARKER_KEY = "active-op";
  */
 const REPAIR_JOB_KEY = "repair-job";
 const LAST_SYNC_KEY = "last-sync";
+/** This device's typed commit messages (JSON array, newest first). */
+const RECENT_COMMIT_MESSAGES_KEY = "recent-commit-messages";
 
 export default class NativeGitBridgePlugin extends Plugin {
   store!: DeviceLocalSettingsStore;
@@ -467,6 +494,21 @@ export default class NativeGitBridgePlugin extends Plugin {
           loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
           openDiffAtCommit: (file, entry) => void this.openCommitDiff(file, entry),
           openFile: (p) => this.openVaultFile(p),
+          // Long press / right click on a file row: the file-at-commit menu
+          // (restore, view as of the commit, diff, history, copy) — the same
+          // answers the file-history panel gives for the same file (item 10).
+          fileMenu: (file, entry, pos) => {
+            const menu = new Menu();
+            this.addMenuEntries(menu, {
+              kind: "file-at-commit",
+              path: file.path,
+              hash: entry.hash,
+              date: entry.date,
+              subject: entry.subject,
+              code: file.code,
+            });
+            menu.showAtPosition(pos);
+          },
           progressText: () => this.progressText ?? "",
           progressDetail: () => this.progressDetail ?? "",
           openOutput: () => void this.openOutputPanel(),
@@ -653,7 +695,12 @@ export default class NativeGitBridgePlugin extends Plugin {
   private addMenuEntries(menu: Menu, scope: MenuScope): void {
     const single = scope.kind === "file";
     const path = scope.kind === "group" ? "" : scope.path;
-    const targets = () => (single ? [path] : this.pathsUnder(path, scope.group));
+    // Bulk targets exist only for the working-tree scopes; an at-commit menu
+    // is always about one file and never reaches a bulk action.
+    const targets = () =>
+      scope.kind === "folder" || scope.kind === "group"
+        ? this.pathsUnder(path, scope.group)
+        : [path];
     const entries = buildMenuEntries(scope, {
       menuGitignore: this.deviceSettings.menuGitignore,
       menuSparse: this.deviceSettings.menuSparse,
@@ -664,6 +711,9 @@ export default class NativeGitBridgePlugin extends Plugin {
       // The entry is only honest when the runner can serve it; 0 (never heard
       // from a runner) also stays silent rather than offering a refusal.
       untrack: this.lastRunnerVersion >= 14,
+      remoteMappable:
+        scope.kind === "file-at-commit" &&
+        remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash) !== null,
     });
     // What the menu is about, above what it can do. A panel row truncates its
     // name to fit one line and the file explorer shows no path at all, so this
@@ -690,6 +740,52 @@ export default class NativeGitBridgePlugin extends Plugin {
 
   private runMenuAction(action: MenuAction, scope: MenuScope, targets: () => string[]): void {
     const path = scope.kind === "group" ? "." : scope.path;
+    // The at-commit actions carry their commit in the scope and share nothing
+    // with the group-based ones, so they exit before `group` is even read.
+    if (scope.kind === "file-at-commit") {
+      switch (action) {
+        case "open-diff-at-commit":
+          void this.openDiffPane({
+            path: scope.path,
+            from: `${scope.hash}^`,
+            to: scope.hash,
+            label: `${scope.hash.slice(0, 8)}^ → ${scope.hash.slice(0, 8)}`,
+          });
+          return;
+        case "show-at-commit":
+          void this.showFileAtCommit(scope.path, scope.hash, scope.date);
+          return;
+        case "restore-from-commit":
+          // The same confirmed route the file-history panel uses; the path AT
+          // the commit doubles as the current path, which the confirmation
+          // window names before anything is written.
+          this.confirmRestore(scope.path, {
+            hash: scope.hash,
+            date: scope.date,
+            author: "",
+            subject: scope.subject,
+            pathAtCommit: scope.path,
+          });
+          return;
+        case "open-history":
+          void this.openFileHistoryPanel(scope.path);
+          return;
+        case "open-remote": {
+          // Recomputed rather than carried: the entry existed because this
+          // answered, and the URL never contains userinfo (remoteFileUrl
+          // drops it, the runner redacted it before that).
+          const url = remoteFileUrl(this.lastRemoteUrl, scope.path, scope.hash);
+          if (url !== null) this.openExternalUri(url);
+          return;
+        }
+        case "copy-path":
+          void navigator.clipboard.writeText(scope.path);
+          new Notice("Path copied.");
+          return;
+        default:
+          return;
+      }
+    }
     const group = scope.group;
     switch (action) {
       case "stage":
@@ -2694,7 +2790,16 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Version metadata for display only: the companion has no access to the
     // vault, so it cannot learn the plugin/runner versions any other way.
     // Numbers only — no paths, no token, nothing the companion acts upon.
-    const q = `?pv=${encodeURIComponent(this.manifest.version)}&rv=${this.lastRunnerVersion}&rmin=${RUNNER_MIN_VERSION}`;
+    // `rship` (what this build ships) joined `rmin` because the companion,
+    // given only the floor, treated it as THE correct runner version and
+    // branded every up-to-date runner stale and the plugin lagging — the
+    // user's own device showed both. `cmin` is the companion floor, so the
+    // setup screen can tell "below what the plugin works with" from "an
+    // update exists".
+    const q =
+      `?pv=${encodeURIComponent(this.manifest.version)}&rv=${this.lastRunnerVersion}` +
+      `&rmin=${RUNNER_MIN_VERSION}&rship=${RUNNER_SHIPPED_VERSION}` +
+      `&cmin=${encodeURIComponent(COMPANION_MIN_VERSION)}`;
     this.openExternalUri(COMPANION_SETUP_URI + q);
     if (await this.probeCompanion()) return;
     this.log.add("warn", "companion", "Setup URI opened nothing - companion app likely not installed.");
@@ -4702,6 +4807,16 @@ export default class NativeGitBridgePlugin extends Plugin {
     // Committing a resolved merge: prefill git's own prepared message
     // ("Merge branch … # Conflicts: …") so the history reads like any merge.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
+    // One-tap suggestions: the templates, rendered for this moment, then this
+    // device's recents. Deduped so a template that was also typed recently
+    // appears once. Not offered mid-merge: git's prepared message is the one
+    // that belongs there.
+    const rendered = this.sharedPrefs.commitTemplates.map((t) =>
+      renderCommitTemplate(t, this.sharedPrefs.commitDateFormat)
+    );
+    const suggestions = mergeMsg
+      ? []
+      : [...rendered, ...this.recentCommitMessages().filter((r) => !rendered.includes(r))];
     new CommitMessageModal(
       this.app,
       {
@@ -4709,9 +4824,13 @@ export default class NativeGitBridgePlugin extends Plugin {
         placeholder: "Commit message…",
         submitLabel: "Commit",
         initial: mergeMsg,
+        suggestions,
       },
       async (message) => {
         if (message === null) return;
+        // Remember what was TYPED (or picked), never the merge prefill: that
+        // one is git's, one-off, and would crowd the list.
+        if (message !== mergeMsg) this.rememberCommitMessage(message);
         const result = await this.runOperation("commit", {
           protectedPaths: this.effectiveProtectedPaths(),
           message,
@@ -4743,14 +4862,41 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.reportSuccess("Native Git: push", ["Push completed."], result.data?.pushOutput);
   }
 
+  /** The template the automatic sync commit uses, rendered for this moment. */
+  renderedAutoCommitMessage(): string {
+    return renderCommitTemplate(this.sharedPrefs.autoCommitTemplate, this.sharedPrefs.commitDateFormat);
+  }
+
+  /** This device's recently typed commit messages, newest first. */
+  recentCommitMessages(): string[] {
+    try {
+      const raw = JSON.parse(this.store.getValue(RECENT_COMMIT_MESSAGES_KEY) ?? "[]") as unknown;
+      return Array.isArray(raw) ? raw.filter((r): r is string => typeof r === "string") : [];
+    } catch {
+      return [];
+    }
+  }
+
+  rememberCommitMessage(msg: string): void {
+    const next = pushRecentMessage(
+      this.recentCommitMessages(),
+      msg,
+      this.deviceSettings.recentCommitMessagesMax
+    );
+    this.store.setValue(RECENT_COMMIT_MESSAGES_KEY, JSON.stringify(next));
+  }
+
   async cmdSync(message?: string, silent = false): Promise<void> {
     if (!(await this.guardPathLimits())) return;
     // A sync that completes a manual merge resolution commits with git's own
-    // prepared merge message automatically — no modal, as requested.
+    // prepared merge message automatically — no modal, as requested. An
+    // ordinary sync commits with the RENDERED template (obsidian-git's model,
+    // the user's pick): the runner's fixed fallback stops being reachable
+    // from here, but stays for old plugins.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
-      message: message ?? mergeMsg ?? "",
+      message: message ?? mergeMsg ?? this.renderedAutoCommitMessage(),
     });
     if (!result) return;
     if (!result.ok) {
@@ -6130,21 +6276,46 @@ export default class NativeGitBridgePlugin extends Plugin {
     return compareVersions(this.manifest.version, companion) > 0;
   }
 
-  versionAdvice(): Array<{ text: string; part: "plugin" | "companion" | "runner" }> {
-    const out: Array<{ text: string; part: "plugin" | "companion" | "runner" }> = [];
+  /**
+   * Each part carries a floor and a shipped version, and the advice has four
+   * states (the user's model, 2026-08-25): below the floor — refuse and name
+   * the part actually at fault; between the floor and the current version —
+   * an update is available and everything keeps working; matched — silence;
+   * NEWER than this build knows — not an error but a CHOICE, with both exits
+   * named (update the plugin, or reinstall the other half pinned to this
+   * plugin's version). `kind` is what lets a surface pick buttons without
+   * parsing the text.
+   */
+  versionAdvice(): Array<{
+    text: string;
+    part: "plugin" | "companion" | "runner";
+    kind: "below-floor" | "update-available" | "newer-half";
+  }> {
+    const out: Array<{
+      text: string;
+      part: "plugin" | "companion" | "runner";
+      kind: "below-floor" | "update-available" | "newer-half";
+    }> = [];
     const plugin = this.manifest.version;
     const companion = this.lastCompanionVersion;
     if (companion !== "") {
-      const cmp = compareVersions(plugin, companion);
-      if (cmp < 0) {
-        out.push({
-          part: "plugin",
-          text: `The plugin (${plugin}) is OLDER than the companion app (${companion}). Update the plugin: download main.js, manifest.json and styles.css from the latest release into .obsidian/plugins/native-git-bridge/, then reload the plugin.`,
-        });
-      } else if (cmp > 0) {
+      if (compareVersions(companion, COMPANION_MIN_VERSION) < 0) {
         out.push({
           part: "companion",
-          text: `The companion app (${companion}) is OLDER than the plugin (${plugin}). Install the newest APK from the latest release (it updates over the current one).`,
+          kind: "below-floor",
+          text: `The companion app (${companion}) is older than this plugin can work with (needs at least ${COMPANION_MIN_VERSION}). Install the newest APK from the latest release — it updates over the current one.`,
+        });
+      } else if (compareVersions(plugin, companion) > 0) {
+        out.push({
+          part: "companion",
+          kind: "update-available",
+          text: `A newer companion app (${plugin}) ships with this plugin; the installed one (${companion}) keeps working. Update the APK when convenient — or stay on it by installing the matching plugin (the button explains how).`,
+        });
+      } else if (compareVersions(plugin, companion) < 0) {
+        out.push({
+          part: "plugin",
+          kind: "newer-half",
+          text: `The companion app (${companion}) is NEWER than this plugin (${plugin}). Either update the plugin from the latest release, or install the companion APK matching ${plugin} from that release's page — every release keeps its own APK.`,
         });
       }
     }
@@ -6155,15 +6326,77 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (this.lastRunnerVersion > 0 && this.lastRunnerVersion < RUNNER_MIN_VERSION) {
       out.push({
         part: "runner",
+        kind: "below-floor",
         text: `The Termux runner (v${this.lastRunnerVersion}) is older than this plugin needs (v${RUNNER_MIN_VERSION}). Re-run the install command in Termux — updating the plugin never updates the runner.`,
       });
     } else if (this.lastRunnerVersion > RUNNER_SHIPPED_VERSION) {
       out.push({
         part: "runner",
-        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Update the plugin from the latest release.`,
+        kind: "newer-half",
+        text: `The Termux runner (v${this.lastRunnerVersion}) is NEWER than this plugin knows (it ships v${RUNNER_SHIPPED_VERSION}). Either update the plugin from the latest release, or reinstall the runner pinned to this plugin — the install command in settings does exactly that.`,
       });
     }
     return out;
+  }
+
+  /**
+   * The manual half of the outdated-companion choice (the user's ask,
+   * 2026-08-25): staying on the installed companion means installing the
+   * PLUGIN release that matches it, by hand — the one route Obsidian cannot
+   * perform itself. Offered only for companions since 0.6.0: the wire
+   * protocol is v1 and profile files are format 1 across those releases, so
+   * the downgrade reads everything the newer plugin left behind; earlier
+   * releases predate profiles and the claim does not hold.
+   */
+  cmdStayOnCompanion(): void {
+    const cv = this.lastCompanionVersion;
+    const url = releaseTagUrl(cv);
+    new ResultModal(
+      this.app,
+      "Match this companion by hand",
+      [
+        `1. Open the release page for ${cv} in a real browser (Chrome/Firefox) — the button copies the link.`,
+        "2. From its assets, download main.js, manifest.json and styles.css into .obsidian/plugins/native-git-bridge/ (replacing the three files).",
+        "3. Reload the plugin (Settings -> Community plugins: toggle it off and on).",
+        "4. Re-run the install command from THAT plugin's settings — it is pinned to the same release, so the runner ends up matching too.",
+        "Profiles, tokens and the runtime folder need no changes: the wire protocol and the profile format are the same across these releases.",
+      ],
+      {
+        actions: [
+          {
+            label: "Copy the release link",
+            cta: true,
+            keepOpen: true,
+            onClick: () => {
+              void navigator.clipboard.writeText(url);
+              new Notice("Release link copied - open it in Chrome or Firefox.");
+            },
+          },
+        ],
+      }
+    ).open();
+  }
+
+  /**
+   * Whether the stay-on-this-companion route may be offered: the downgrade
+   * claim (profiles, tokens, runtime all readable by the older release) holds
+   * from 0.6.0 onward — profiles and the claim/pairing flow arrived there.
+   */
+  stayOnCompanionAvailable(): boolean {
+    return this.lastCompanionVersion !== "" && compareVersions(this.lastCompanionVersion, "0.6.0") >= 0;
+  }
+
+  /**
+   * The pinned exit of the newer-companion choice: the APK matching THIS
+   * plugin. Copied, not opened — an APK download started in Obsidian's
+   * Custom Tab is frequently discarded when the tab closes (§10's oldest
+   * companion lesson), and no companion can be asked to open it, since the
+   * companion is exactly the half being replaced.
+   */
+  copyMatchingApkLink(): void {
+    const url = releaseTagUrl(this.manifest.version);
+    void navigator.clipboard.writeText(url);
+    new Notice("Release link copied - open it in Chrome or Firefox and install the APK from that page.");
   }
 
   /** The one-line Termux install command (same one settings shows). */

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isValidBranchName,
   redactRemoteUrl,
+  remoteFileUrl,
   validateRemoteUrl,
   MAX_REMOTE_URL_LENGTH,
 } from "../src/git/remoteUrl";
@@ -12,6 +13,55 @@ import {
  * Every rejection here must also be a rejection there — the e2e suite checks
  * the runner against the same cases.
  */
+/**
+ * Open item 8's rule, verbatim: a wrong link is worse than no link. The
+ * mapper answers only for the two hosts whose URL shapes are published, and
+ * refuses everything else instead of guessing.
+ */
+describe("remoteFileUrl", () => {
+  const HASH = "0123abcd4567ef89";
+
+  it("maps the four spellings of a github.com remote to the same blob URL", () => {
+    const want = `https://github.com/me/vault/blob/${HASH}/Notes/a.md`;
+    for (const remote of [
+      "https://github.com/me/vault.git",
+      "https://github.com/me/vault",
+      "git@github.com:me/vault.git",
+      // The runner redacts userinfo to ***@; the mapper drops it entirely,
+      // so no URL handed to another app can carry even the marker.
+      "https://***@github.com/me/vault.git",
+    ]) {
+      expect(remoteFileUrl(remote, "Notes/a.md", HASH), remote).toBe(want);
+    }
+  });
+
+  it("maps gitlab.com with its own /-/blob/ shape", () => {
+    expect(remoteFileUrl("https://gitlab.com/me/vault.git", "a.md", HASH)).toBe(
+      `https://gitlab.com/me/vault/-/blob/${HASH}/a.md`
+    );
+  });
+
+  it("encodes path segments without touching the slashes", () => {
+    expect(remoteFileUrl("https://github.com/me/vault.git", "П/є ї.md", HASH)).toBe(
+      `https://github.com/me/vault/blob/${HASH}/%D0%9F/%D1%94%20%D1%97.md`
+    );
+  });
+
+  it("refuses what it cannot map, rather than guessing", () => {
+    for (const remote of [
+      "https://gitlab.example.com/group/vault.git", // self-hosted: shape unknown
+      "https://github.com/me/group/vault.git", // deeper than owner/repo
+      "ssh://git@github.com/me/vault.git", // ssh:// form not mapped (scp form is)
+      "file:///storage/emulated/0/backup/vault.git",
+      "",
+    ]) {
+      expect(remoteFileUrl(remote, "a.md", HASH), remote).toBeNull();
+    }
+    // A commit that is not a hash never builds a URL.
+    expect(remoteFileUrl("https://github.com/me/vault.git", "a.md", "WORKTREE")).toBeNull();
+  });
+});
+
 describe("validateRemoteUrl", () => {
   it("accepts the four forms a phone user actually has", () => {
     for (const url of [
