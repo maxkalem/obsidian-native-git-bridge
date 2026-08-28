@@ -124,6 +124,12 @@ export interface RepairTriageFacts {
   };
   /** A credential.helper in the global or system scope (shadows the profile's file). */
   globalCredHelper: boolean;
+  /**
+   * A credential.helper in the LOCAL scope: this repository has a credential
+   * source of its own. Presence, never a value — the scopes are all the
+   * triage reports. It gates the removal of the global one and nothing else.
+   */
+  localCredHelper: boolean;
   sparse: {
     enabled: boolean;
     cone: boolean;
@@ -157,6 +163,8 @@ export type RepairPlanItem =
   | { step: "identity"; act: "offer-drop-global" }
   /** A global helper answers before the profile's file: offer the local reset. */
   | { step: "cred-helper"; act: "offer-reset" }
+  /** …and this repository has a helper of its own, so the global one can go. */
+  | { step: "cred-helper"; act: "offer-drop-global" }
   /** Non-cone sparse missing its base or carrying the emptying default: fixable. */
   | { step: "sparse"; act: "repair-definition" }
   /** Cone mode is somebody's setup; switching modes is the user's decision. */
@@ -184,7 +192,14 @@ export function planRepair(f: RepairTriageFacts): RepairPlanItem[] {
   } else if (f.identity.global) {
     plan.push({ step: "identity", act: "offer-drop-global" });
   }
-  if (f.globalCredHelper) plan.push({ step: "cred-helper", act: "offer-reset" });
+  if (f.globalCredHelper) {
+    plan.push({ step: "cred-helper", act: "offer-reset" });
+    // The identity's ordering rule, mirrored: never offer to strip the global
+    // helper while this repository has no credential source of its own. The
+    // reset above is what creates one, so the two arrive in that order and
+    // the removal appears on the next walk.
+    if (f.localCredHelper) plan.push({ step: "cred-helper", act: "offer-drop-global" });
+  }
   if (f.sparse.enabled) {
     if (f.sparse.cone) plan.push({ step: "sparse", act: "cone-needs-decision" });
     else if (f.sparse.foreign) {

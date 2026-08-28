@@ -182,6 +182,7 @@ describe("planRepair", () => {
     lock: { lockExists: false, lockAgeSeconds: null, liveGit: false, liveProcesses: [] },
     identity: { local: true, global: false, any: true },
     globalCredHelper: false,
+    localCredHelper: true,
     sparse: { enabled: true, cone: false, hasBase: true, hasEmptyingDefault: false, foreign: false },
     rescueBranches: [],
     previousGitDirs: [],
@@ -267,10 +268,30 @@ describe("planRepair", () => {
       "lock:remove-corpse",
       "identity:offer-set",
       "cred-helper:offer-reset",
+      "cred-helper:offer-drop-global",
       "sparse:repair-definition",
       "leftovers:rescue-branches",
       "leftovers:previous-git",
     ]);
+  });
+
+  it("offers the global helper's removal ONLY beside a local one", () => {
+    // The identity's ordering rule, mirrored. A repository with no helper of
+    // its own would lose the only thing authenticating it: helpers are asked
+    // global-first and the first that ANSWERS wins, so the global one is
+    // serving this repository too until the reset writes a local source.
+    expect(
+      planRepair(base({ globalCredHelper: true, localCredHelper: false })).map(
+        (p) => `${p.step}:${p.act}`
+      )
+    ).toEqual(["cred-helper:offer-reset"]);
+    expect(
+      planRepair(base({ globalCredHelper: true, localCredHelper: true })).map(
+        (p) => `${p.step}:${p.act}`
+      )
+    ).toEqual(["cred-helper:offer-reset", "cred-helper:offer-drop-global"]);
+    // No global helper: nothing to remove, and the reset has nothing to fix.
+    expect(planRepair(base({ globalCredHelper: false, localCredHelper: true }))).toEqual([]);
   });
 
   it("a running git command stops the plan at the lock step", () => {

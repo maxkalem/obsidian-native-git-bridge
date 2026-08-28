@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { identitySetupCommand, safeDirectoryCommand } from "../src/git/termuxCommands";
+import {
+  credentialsSetupCommand,
+  dropGlobalCredHelperCommand,
+  identitySetupCommand,
+  safeDirectoryCommand,
+} from "../src/git/termuxCommands";
 
 /**
  * These commands are handed to a person, so every piece has to be right the
@@ -59,6 +64,105 @@ describe("safeDirectoryCommand", () => {
   it("is exactly the one-line fix the runner's refusal names", () => {
     expect(safeDirectoryCommand(REPO)).toBe(
       `git config --global --add safe.directory "${REPO}"`
+    );
+  });
+});
+
+describe("dropGlobalCredHelperCommand", () => {
+  const cmd = dropGlobalCredHelperCommand();
+
+  it("unsets by name and never reads a value", () => {
+    expect(cmd).toContain("git config --global --unset-all credential.helper");
+    expect(cmd).toContain("--name-only --get-regexp");
+    // A --get without --name-only would print the helper's value.
+    expect(cmd).not.toMatch(/--get (?!-regexp)/);
+  });
+
+  it("survives its own success: --get-regexp exits 1 when nothing is left", () => {
+    // Without the `|| echo` the command ends non-zero exactly when it worked,
+    // which at a terminal reads as the removal having failed.
+    expect(cmd).toMatch(/\|\| echo /);
+  });
+
+  it("pages nothing: a broken core.pager would kill the listing after the removal", () => {
+    expect(cmd).toContain("git --no-pager config --global");
+  });
+
+  it("is global-only: it addresses no repository and needs no path", () => {
+    expect(cmd).not.toContain("cd ");
+    expect(cmd).not.toContain("--local");
+  });
+});
+
+describe("credentialsSetupCommand", () => {
+  const PROFILE = "p-0123456789abcdef";
+  const HTTPS = "https://github.com/maxkalem/obsidian-native-git-bridge.git";
+  const base = { repoPathHint: REPO, profileId: PROFILE, remoteUrl: HTTPS };
+
+  it("refuses an unknown or relative path", () => {
+    expect(credentialsSetupCommand({ ...base, repoPathHint: "" })).toBeNull();
+    expect(credentialsSetupCommand({ ...base, repoPathHint: "Documents/Kalem" })).toBeNull();
+  });
+
+  it("rewrites the helper, erases the dead entry, and ends at a prompt", () => {
+    const cmd = credentialsSetupCommand(base) ?? "";
+    expect(cmd).toContain(`cd "${REPO}"`);
+    // The empty value first: the helper list accumulates across scopes and the
+    // first helper that answers wins, so a global one would keep serving the
+    // same dead token.
+    expect(cmd).toContain("git config --local --add credential.helper ''");
+    expect(cmd).toContain(
+      `git config --local --add credential.helper "store --file=$HOME/.config/native-git-bridge/creds/${PROFILE}"`
+    );
+    // `;` after the unset: it exits 5 when the key was never there, which is
+    // exactly the repository that needs the adds.
+    expect(cmd).toContain("git config --local --unset-all credential.helper; ");
+    // The reject is what makes git ask instead of reusing what it has.
+    expect(cmd).toContain(`printf 'url=%s\\n\\n' "${HTTPS}" | git credential reject`);
+    expect(cmd.endsWith("git fetch")).toBe(true);
+  });
+
+  it("is the fetch alone for ssh: no helper serves an ssh key", () => {
+    const scp = credentialsSetupCommand({ ...base, remoteUrl: "git@github.com:maxkalem/x.git" });
+    const ssh = credentialsSetupCommand({ ...base, remoteUrl: "ssh://git@github.com/maxkalem/x" });
+    expect(scp).toBe(`cd "${REPO}" && git fetch`);
+    expect(ssh).toBe(`cd "${REPO}" && git fetch`);
+  });
+
+  it("falls back to the fetch when the remote or the profile is not known", () => {
+    expect(credentialsSetupCommand({ ...base, remoteUrl: "" })).toBe(`cd "${REPO}" && git fetch`);
+    expect(credentialsSetupCommand({ ...base, profileId: "" })).toBe(`cd "${REPO}" && git fetch`);
+    expect(credentialsSetupCommand({ ...base, profileId: "p-not-hex" })).toBe(
+      `cd "${REPO}" && git fetch`
+    );
+  });
+
+  it("never lets a remote URL out of git's hands and into the shell's", () => {
+    // lastRemoteUrl comes from `git config`, not from a field this plugin
+    // validated, so a URL carrying $(…), a backtick, a quote or a backslash
+    // would be read by the shell. Such a URL loses the https branch instead of
+    // being quoted more cleverly.
+    for (const bad of [
+      'https://github.com/a/"b".git',
+      "https://github.com/a/$(id).git",
+      "https://github.com/a/`id`.git",
+      "https://github.com/a/b\\.git",
+      "https://github.com/a/b .git",
+    ]) {
+      expect(credentialsSetupCommand({ ...base, remoteUrl: bad })).toBe(
+        `cd "${REPO}" && git fetch`
+      );
+    }
+  });
+
+  it("carries no credential of its own — the token is typed in Termux", () => {
+    const cmd = credentialsSetupCommand(base) ?? "";
+    expect(cmd).not.toMatch(/password|token|--get credential/i);
+  });
+
+  it("trims a trailing slash so the quoted path stays canonical", () => {
+    expect(credentialsSetupCommand({ ...base, repoPathHint: `${REPO}/` })).toContain(
+      `cd "${REPO}"`
     );
   });
 });

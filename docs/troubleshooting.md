@@ -38,7 +38,7 @@ The runner knows a profile for this vault, but the directory it points at no lon
 - **After a clone, files show as deleted** — the repository has files that could not be written into the working tree (a name that collides with a directory, or storage that filled up). The repository itself is fine: *discard* restores them from the index.
 - **The repository was created, but the first commit failed** — usually `user.name` / `user.email` are not configured. The failure window offers **Set the git identity…** (see "git has no name and email" below); set it, then commit from the panel. The repository itself is there and needs no repair.
 - **"refusing to merge unrelated histories"** — the vault was made a repository here *and* committed, and the remote it was later pointed at has its own history. They share no commit, so git will not join them. The clean way out is a new empty vault with the repository cloned into it; the deliberate ways (`git pull --allow-unrelated-histories`, or resetting onto the remote branch) are yours to run in Termux. To avoid it entirely: create the repository without the first commit, set the remote, then *Get the repository's content*.
-- **"A previous repository is still taking up space"** — a re-clone set the old repository aside instead of deleting it, and it is still there. Delete it from that window (or Settings → *Previous repository copies* → Review) once you are sure nothing in it is needed; "stop reminding" keeps it silently. To look inside first, attach it to the current repository as a remote — the window shows the two commands. Your notes are not involved either way: only history lives in that copy.
+- **"A previous repository is still taking up space"** — a re-clone set the old repository aside instead of deleting it, and it is still there. Delete it from that window, from Settings → *Previous repository copies* → Review, or from the repair's final window, which names it and carries **Delete the previous repository…**; all three open the same description. Do it once you are sure nothing in it is needed; "stop reminding" keeps it silently. To look inside first, attach it to the current repository as a remote — the window shows the two commands. Your notes are not involved either way: only history lives in that copy.
 - **A clone that seems to hang** — the plugin gives a clone an hour, not the ordinary 90 seconds. Cancelling does not stop the clone inside Termux, but because the repository is only moved into place on success, the vault is either untouched or complete; run *Status* afterwards to see which.
 
 ## AUTH after pairing a second vault
@@ -65,7 +65,7 @@ Every commit records an author, and a freshly cloned or re-cloned repository has
 
 Changing an identity later is the same command: `git config` overwrites, so **Set or change the git identity** in the palette (or **Change the git identity…** in the identity check window) reruns the same Termux prompt with new values.
 
-The palette command **Check git identity** shows where the keys are set (local, global, and so on — never the values). Two warnings it can raise: a global identity with no local one means every commit silently uses the global name, including in vaults where you meant another; and a global `credential.helper` answers BEFORE this repository's own credential file, so operations here can quietly use another account's saved credentials. The first is fixed by setting the local identity (after which the window offers to remove the global one — never before, since with no local identity the global one is what lets commits happen at all). The second is fixed by **Prefer this repository's credentials…**, which makes the repository's own credential file authoritative without touching the global configuration.
+The palette command **Check git identity** shows where the keys are set (local, global, and so on — never the values). Two warnings it can raise: a global identity with no local one means every commit silently uses the global name, including in vaults where you meant another; and a global `credential.helper` answers BEFORE this repository's own credential file, so operations here can quietly use another account's saved credentials. The first is fixed by setting the local identity (after which the window offers to remove the global one — never before, since with no local identity the global one is what lets commits happen at all). The second is fixed by **Prefer this repository's credentials…**, which makes the repository's own credential file authoritative without touching the global configuration. That settles this vault; it does not settle the device, because the global helper keeps answering for every other repository that has none, including ones cloned later. Once this repository carries its own helper, the window also offers **Remove the global credential helper…** — a Termux command rather than a button, since it reaches beyond the vault, and offered only in that order for the same reason the global identity is: with no local helper, the global one is what authenticates this repository too.
 
 ## A long clone or fetch dies with `Killed`
 
@@ -77,7 +77,11 @@ A killed clone changes nothing in the vault (the repository is only moved into p
 
 ## GIT_FAILED on fetch/push: authentication
 
-The runner never answers a prompt on an ordinary run (`GIT_TERMINAL_PROMPT=0`), so a credential problem fails fast instead of hanging. Check it in Termux, where the credentials live:
+The runner never answers a prompt on an ordinary run (`GIT_TERMINAL_PROMPT=0`), so a credential problem fails fast instead of hanging.
+
+The failure window offers **Enter the credentials in Termux…**, which copies a command built for this repository and opens Termux: it points the repository at its own credential file, drops the entry the remote just refused, and fetches, which is where git asks for the new token. An ssh remote gets the fetch alone — a credential helper has nothing to do with a key, and the case that reaches this window is a host key that was never accepted, which the fetch itself asks about. What you type stays in Termux.
+
+To check it by hand instead:
 
 ```
 GIT_TERMINAL_PROMPT=0 git -C /path/to/vault ls-remote --heads origin
@@ -229,7 +233,7 @@ An unfinished rebase gets the same banner with *Continue rebase* and *Abort reba
 
 The result carries git's stdout/stderr (Copy button in the modal). Common cases and their meaning:
 
-- `Authentication failed` / `could not read Username`: expired or missing PAT. Fix credentials in Termux (e.g. `git pull` once interactively to re-enter the PAT into the credential store, or `bash ~/.config/native-git-bridge/runner.sh interactive` to let a queued operation ask for them — see "A clone asks for credentials" above). The runner never prompts on its own; it fails fast.
+- `Authentication failed` / `could not read Username`: expired or missing PAT. The window carries **Enter the credentials in Termux…**, which copies the command that asks for a new one — see "GIT_FAILED on fetch/push: authentication" above. The runner never prompts on its own; it fails fast.
 - `[rejected] ... fetch first` / `non-fast-forward`: the remote moved ahead. Run *Sync* (fetch + merge + push) instead of a bare push. Force push does not exist in this bridge.
 - `Detached HEAD; refusing to push`: check out a branch in Termux. The bridge never guesses which branch you meant.
 - `user.name / user.email are not configured`: run the two `git config --global` commands shown in the message, in Termux.

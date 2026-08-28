@@ -72,7 +72,12 @@ import {
   needsTermuxCredentials,
   summarizeGitError,
 } from "./git/gitErrors";
-import { identitySetupCommand, safeDirectoryCommand } from "./git/termuxCommands";
+import {
+  credentialsSetupCommand,
+  dropGlobalCredHelperCommand,
+  identitySetupCommand,
+  safeDirectoryCommand,
+} from "./git/termuxCommands";
 import { cloneRoute, manualCloneCommand } from "./git/cloneRoute";
 import { describeRestore, restoreBlockInFile } from "./git/restoreBlock";
 import { ignoreEntryMatches, parseIgnoreEntries, trackedPathsAmong } from "./git/ignoreFile";
@@ -1485,6 +1490,32 @@ export default class NativeGitBridgePlugin extends Plugin {
       },
     ];
     new ResultModal(this.app, title, lines, { actions }).open();
+  }
+
+  /**
+   * The repair's route into that window. The triage names DIRECTORIES; the
+   * window describes MANIFESTS, and the two can disagree — a manifest deleted
+   * by hand, or one the runner never wrote. Only the copies that can be
+   * described are offered for deletion here, because the confirmation quotes a
+   * size and a commit count, and inventing either for a directory nobody can
+   * read would put a fabricated "0 commits" in front of a permanent deletion.
+   */
+  private async openPreviousRepoModalFromRepair(dirs: readonly string[]): Promise<void> {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    const known = (await this.listPreviousRepos()).filter((r) => dirs.includes(r.dir));
+    if (known.length === 0) {
+      new ResultModal(
+        this.app,
+        "The set-aside copy cannot be described",
+        [
+          `${dirs.join(", ")} is in ${root}/, but the manifest that records its size, branch and commit count is not — so there is nothing to show before a deletion that cannot be undone.`,
+          `Look at it in Termux, and delete it there once you are sure nothing is lost: rm -rf "<vault>/${root}/${dirs[0] ?? ""}"`,
+        ],
+        { isError: true }
+      ).open();
+      return;
+    }
+    this.showPreviousRepoModal(known, "A previous repository is still set aside");
   }
 
   private confirmDeletePreviousRepos(repos: PreviousRepo[]): void {
@@ -4377,6 +4408,14 @@ export default class NativeGitBridgePlugin extends Plugin {
     const ownership =
       !corrupt && !staleLock && !identity &&
       looksLikeDubiousOwnership(`${err?.message ?? ""}\n${err?.stderr ?? ""}`, err?.stdout);
+    // An expired or revoked token reaches the user through whatever operation
+    // needed the remote, and its message names the host rather than the fix.
+    // The runner cannot ask for a new one — a prompt it can never answer is
+    // exactly what GIT_TERMINAL_PROMPT=0 exists to prevent — so the window
+    // carries the terminal instead of leaving the user to find it.
+    const credentials =
+      !corrupt && !staleLock && !identity && !ownership &&
+      needsTermuxCredentials(`${err?.message ?? ""}\n${err?.stderr ?? ""}`, err?.stdout);
     const lines = [err?.message ?? "Unknown error.", ...reason];
     if (corrupt) {
       lines.push(
@@ -4412,20 +4451,51 @@ export default class NativeGitBridgePlugin extends Plugin {
           "directory; the button copies it and opens Termux."
       );
     }
+    if (credentials) {
+      lines.push(
+        "",
+        "The remote refused the credentials this repository has saved — what a token that expired " +
+          "or was revoked looks like from here. Nothing but a terminal can fix it: the runner is " +
+          "never allowed to prompt, because a prompt nobody can answer is an operation that hangs. " +
+          "The button copies the command that asks again in Termux and opens it; what you type " +
+          "there is saved there and never reaches the plugin."
+      );
+    }
     new ResultModal(this.app, title, lines, {
       stdout: err?.stdout,
       stderr: err?.stderr,
       isError: true,
-      actions: corrupt
-        ? [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }]
-        : staleLock
-          ? [{ label: "Delete the stale lock…", cta: true, onClick: () => this.cmdRepairStaleLock() }]
-          : identity
-            ? [{ label: "Set the git identity…", cta: true, keepOpen: true, onClick: () => this.cmdSetGitIdentity() }]
-            : ownership
-              ? [{ label: "Copy the safe.directory fix…", cta: true, keepOpen: true, onClick: () => this.cmdFixSafeDirectory() }]
-              : undefined,
+      // One cause, one button. The flags above are already mutually
+      // exclusive, so the first match is the only match; a chain of five
+      // ternaries was where that stopped being readable.
+      actions: this.mutationErrorAction({ corrupt, staleLock, identity, ownership, credentials }),
     }).open();
+  }
+
+  /** The single button a recognised failure carries, or none. */
+  private mutationErrorAction(cause: {
+    corrupt: boolean;
+    staleLock: boolean;
+    identity: boolean;
+    ownership: boolean;
+    credentials: boolean;
+  }): ResultModalAction[] | undefined {
+    if (cause.corrupt) {
+      return [{ label: "Repair the repository", cta: true, onClick: () => void this.cmdRepairObjects() }];
+    }
+    if (cause.staleLock) {
+      return [{ label: "Delete the stale lock…", cta: true, onClick: () => this.cmdRepairStaleLock() }];
+    }
+    if (cause.identity) {
+      return [{ label: "Set the git identity…", cta: true, keepOpen: true, onClick: () => this.cmdSetGitIdentity() }];
+    }
+    if (cause.ownership) {
+      return [{ label: "Copy the safe.directory fix…", cta: true, keepOpen: true, onClick: () => this.cmdFixSafeDirectory() }];
+    }
+    if (cause.credentials) {
+      return [{ label: "Enter the credentials in Termux…", cta: true, keepOpen: true, onClick: () => this.cmdEnterCredentials() }];
+    }
+    return undefined;
   }
 
   /**
@@ -4614,6 +4684,51 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /**
+   * Remove the global credential helper, in Termux and by hand.
+   *
+   * The local reset beside it is the fix for THIS repository and touches
+   * nothing outside the vault; this one reaches every repository on the
+   * device, which is the point of it and also the reason it is not a one-tap
+   * action. The user runs it themselves, at a terminal, and the listing that
+   * follows shows what is left — key names only, never a value. Offered only
+   * while this repository has a helper of its own: stripping the global one
+   * from a repository with nothing else to authenticate with is the same
+   * mistake the identity's ordering rule exists to prevent.
+   */
+  cmdDropGlobalCredHelper(): void {
+    this.openTermuxCommandModal({
+      command: dropGlobalCredHelperCommand(),
+      title: "Remove the global credential helper",
+      body: [
+        "1. The command is copied. In Termux: paste, Enter. It removes credential.helper from the GLOBAL git configuration and then lists what credential.* keys are left there — names only, no values.",
+        "2. This affects every repository on the device, not only this vault. Repositories with a helper of their own keep working; any that relied on the global one asks for credentials again the next time it reaches its remote.",
+      ],
+    });
+  }
+
+  /**
+   * Enter working credentials again, at the one place that can ask for them.
+   * The command is built for THIS repository — its path, its profile's
+   * credential file, its remote — so the answer is saved where every later
+   * operation reads it. The token is typed at the terminal and stays in
+   * Termux, like every other secret in this design (rule 11).
+   */
+  cmdEnterCredentials(): void {
+    this.openTermuxCommandModal({
+      command: credentialsSetupCommand({
+        repoPathHint: this.deviceSettings.repoPathHint,
+        profileId: this.deviceSettings.profileId,
+        remoteUrl: this.lastRemoteUrl,
+      }),
+      title: "Enter the credentials in Termux",
+      body: [
+        "1. The command is copied. In Termux: paste, Enter, then answer git's prompts — username and token for https, or the host-key question for ssh. The fetch that follows is the check: it either completes or says what is still wrong.",
+        "2. Come back and run the operation again. What you typed is saved for this repository, in Termux, and the plugin needs no prompt.",
+      ],
+    });
+  }
+
+  /**
    * Presence and scope, never a value: which scopes hold user.name,
    * user.email and credential.helper, read from the status fields a v16
    * runner reports, with the two one-tap exits where they apply. The ordering
@@ -4647,6 +4762,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     const hasGlobal = nameScopes.includes("global") || emailScopes.includes("global");
     const hasAny = nameScopes.length > 0 && emailScopes.length > 0;
     const globalHelper = helperScopes.includes("global") || helperScopes.includes("system");
+    const localHelper = helperScopes.includes("local");
     const lines = [
       hasAny
         ? "git has an identity to commit with. Where each key is set (values are never read):"
@@ -4673,6 +4789,11 @@ export default class NativeGitBridgePlugin extends Plugin {
         "",
         "A global credential helper exists, and helpers are asked global-first: it answers BEFORE this repository's own credential file. The reset makes the local file authoritative; the global configuration is not touched."
       );
+      if (localHelper) {
+        lines.push(
+          "This repository already has a helper of its own, so the global one can also be removed outright — which is the only thing that stops it answering in every OTHER repository on this device, including ones cloned later. That is a Termux command, not a button: it reaches beyond this vault."
+        );
+      }
     }
     const actions: { label: string; cta?: boolean; keepOpen?: boolean; onClick: () => void }[] = [];
     // The set command is idempotent (git config overwrites), so it doubles as
@@ -4697,6 +4818,16 @@ export default class NativeGitBridgePlugin extends Plugin {
         label: "Prefer this repository's credentials…",
         onClick: () => this.cmdResetCredHelper(),
       });
+      // The ordering rule, the same one the identity carries: the global
+      // helper is never offered for removal while this repository has no
+      // credential source of its own. The reset above is what creates one.
+      if (localHelper) {
+        actions.push({
+          label: "Remove the global credential helper…",
+          keepOpen: true,
+          onClick: () => this.cmdDropGlobalCredHelper(),
+        });
+      }
     }
     new ResultModal(this.app, "Git identity check", lines, {
       actions: actions.length > 0 ? actions : undefined,
@@ -5125,6 +5256,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         any: nameScopes.length > 0 && emailScopes.length > 0,
       },
       globalCredHelper: helperScopes.includes("global") || helperScopes.includes("system"),
+      localCredHelper: helperScopes.includes("local"),
       sparse: {
         enabled: d.sparseEnabled === "true",
         cone: d.sparseCone === "true",
@@ -5200,7 +5332,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         });
         continue;
       }
-      if (item.step === "cred-helper") {
+      if (item.step === "cred-helper" && item.act === "offer-reset") {
         summary.push(
           "A global credential helper answers before this repository's own credential file."
         );
@@ -5208,6 +5340,17 @@ export default class NativeGitBridgePlugin extends Plugin {
           label: "Prefer this repository's credentials…",
           keepOpen: true,
           onClick: () => this.cmdResetCredHelper(),
+        });
+        continue;
+      }
+      if (item.step === "cred-helper" && item.act === "offer-drop-global") {
+        summary.push(
+          "This repository has a credential helper of its own, so the global one is only shadowing it — here and in every other repository on this device that has none."
+        );
+        actions.push({
+          label: "Remove the global credential helper…",
+          keepOpen: true,
+          onClick: () => this.cmdDropGlobalCredHelper(),
         });
         continue;
       }
@@ -5251,8 +5394,18 @@ export default class NativeGitBridgePlugin extends Plugin {
       }
       if (item.step === "leftovers" && item.act === "previous-git") {
         summary.push(
-          `A previous repository is still set aside (${facts.previousGitDirs.join(", ")}); the daily reminder offers to delete it once you are sure nothing is lost.`
+          `A previous repository is still set aside (${facts.previousGitDirs.join(", ")}) and holds disk until it is deleted.`
         );
+        // The same window the daily reminder and the settings entry open, and
+        // for the same reason: it is where the size, the commit count and the
+        // way to look inside first are written down, and one question gets one
+        // surface. Telling the user to wait for tomorrow's reminder while they
+        // are looking at the sentence that describes the problem was the gap.
+        actions.push({
+          label: "Delete the previous repository…",
+          keepOpen: true,
+          onClick: () => void this.openPreviousRepoModalFromRepair(facts.previousGitDirs),
+        });
         continue;
       }
     }

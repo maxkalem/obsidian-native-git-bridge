@@ -197,7 +197,7 @@ git -C <vault> remote add previous <vault>/<runtime>/previous-git-<timestamp>
 git -C <vault> fetch previous
 ```
 
-Nothing removes it automatically. The plugin reminds the user about the disk it uses once a day (device-local: the copy is on this device and so is the decision), offers to delete it with an explicit confirmation, and offers "stop reminding about this one". The reminder never fires when there is nothing set aside.
+Nothing removes it automatically. The plugin reminds the user about the disk it uses once a day (device-local: the copy is on this device and so is the decision), offers to delete it with an explicit confirmation, and offers "stop reminding about this one". The reminder never fires when there is nothing set aside. The settings entry and the repair's final window reach the same description and the same confirmation, so the decision is never a day away from the window that raised it; a directory whose manifest is missing is described rather than offered for deletion, since the confirmation quotes a size and a commit count that would otherwise be invented.
 
 ### The two ways in end in the same place
 
@@ -371,6 +371,8 @@ The rule that shapes all of it: the git identity's VALUES never enter the runner
 Two facts about git config decide the two actions. Identity precedence is local over global (and worktree over local), so the hazard is not an override: it is that a repository with NO local identity commits under the global one silently — which is exactly what a re-clone produces, because a fresh `.git` takes the local config with the old one. `identity-drop-global` removes the global identity value-free, and it refuses — as does the plugin, before ever offering it — while the repository has no local identity, because with no local one the global identity is the only thing letting commits happen anywhere on the device.
 
 `credential.helper` behaves the opposite way: it is multi-valued, ACCUMULATES across scopes, and the first helper that answers wins — system, then global, then local — so a global helper silently shadows the profile's own credential file. An empty value in the local config resets the inherited list, which makes `cred-helper-local-reset` two `--add` lines: the empty reset, then the profile's `store --file=…` helper. The installer writes the same pair, and the manual clone command carries the same empty `-c credential.helper=` ahead of its store helper so a cloned config is born protected.
+
+The reset ends the shadowing for one repository. Removing the global helper is what ends it for the device, and that stays a clipboard command run in Termux: it changes how every other repository on the phone authenticates, which is not a change to make from inside one vault's plugin with one tap. It is offered only while this repository has a helper of its own, mirroring the identity's ordering rule — with no local helper, the global one is the source this repository is using too.
 
 ### The stale-lock triage (runner 16)
 

@@ -889,6 +889,107 @@ describe("repository bootstrap", () => {
     expect(__modalActionLabels).toContain("Copy the safe.directory fix…");
   });
 
+  it("a push refused for stale credentials carries the Termux credentials button", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 128,
+      error: {
+        code: "GIT_FAILED",
+        message: "git push failed.",
+        stderr: "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/maxkalem/x.git/'",
+      },
+    }));
+    await (h.plugin as Any).cmdPush();
+    expect(__modalTitles).toContain("Native Git: push failed");
+    expect(__modalActionLabels).toContain("Enter the credentials in Termux…");
+    // One cause, one button: the other four fixes have nothing to do with a
+    // token, and a window offering all of them says none of them.
+    expect(__modalActionLabels).not.toContain("Set the git identity…");
+    expect(__modalActionLabels).not.toContain("Repair the repository");
+  });
+
+  it("a set-aside repository named by the repair carries its delete button", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 16;
+    const dir = "previous-git-20260807T101500Z";
+    h.adapter.files.set(
+      `${paths.root}/${dir}.json`,
+      JSON.stringify({
+        dir,
+        createdAt: "2026-08-07T10:15:00Z",
+        sizeKb: 188416,
+        commits: 4211,
+        branch: "main",
+        lastCommit: "1a2b3c4 2026-08-07 last one",
+      })
+    );
+    answerWith(h, (req: Any) => {
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "global\nlocal",
+            userEmailScopes: "global\nlocal",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            previousGitDirs: dir,
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(__modalTitles).toContain("Repository repaired");
+    // The sentence used to end at "the daily reminder offers to delete it",
+    // which is a whole day away from the window describing the problem.
+    expect(__modalActionLabels).toContain("Delete the previous repository…");
+    // And the button reaches the window that can describe what goes.
+    await (h.plugin as Any).openPreviousRepoModalFromRepair([dir]);
+    expect(__modalTitles).toContain("A previous repository is still set aside");
+    expect(__modalActionLabels).toContain("Delete it");
+  });
+
+  it("a set-aside repository with no manifest is described, not offered for deletion", async () => {
+    // The triage names DIRECTORIES and the window describes MANIFESTS. With
+    // nothing to read, a confirmation quoting "0 commits" in front of a
+    // permanent deletion would be a fabrication.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await (h.plugin as Any).openPreviousRepoModalFromRepair(["previous-git-20260807T101500Z"]);
+    expect(__modalTitles).toContain("The set-aside copy cannot be described");
+    expect(__modalActionLabels).not.toContain("Delete it");
+  });
+
   it("the identity check reports scopes and never offers the global removal without a local identity", async () => {
     const h = await loadPlugin();
     await enableBridge(h);
@@ -912,6 +1013,33 @@ describe("repository bootstrap", () => {
     expect(__modalActionLabels).not.toContain("Remove the global identity…");
     // A global helper shadows the profile's file; the reset is offered.
     expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
+    // credHelperScopes says global AND local, so this repository has a source
+    // of its own and the ordering rule allows the removal as well.
+    expect(__modalActionLabels).toContain("Remove the global credential helper…");
+  });
+
+  it("never offers the global helper's removal to a repository with no helper of its own", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 16,
+      data: {
+        branchInfo: "# branch.head main",
+        userNameScopes: "global\nlocal",
+        userEmailScopes: "global\nlocal",
+        credHelperScopes: "global",
+      },
+    }));
+    await (h.plugin as Any).cmdCheckIdentity();
+    // Helpers are asked global-first and the first that ANSWERS wins, so the
+    // global one is authenticating THIS repository too. Removing it with
+    // nothing local in place takes away the only credential source there is —
+    // the identity's ordering rule, applied to the other key.
+    expect(__modalActionLabels).toContain("Prefer this repository's credentials…");
+    expect(__modalActionLabels).not.toContain("Remove the global credential helper…");
   });
 
   it("the identity check offers the global removal once a local identity exists", async () => {
