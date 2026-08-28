@@ -10,10 +10,13 @@
     <string name="runner_outdated_detail">The Termux runner is OUTDATED. Tap "Update runner" below: the install command is copied to the clipboard — paste it into Termux and press Enter. Updating the plugin never updates the runner.</string>
     <string name="ver_plugin_below_floor">⚠ The Obsidian plugin (%1$s) is older than this app supports (needs at least %2$s). Update the plugin from the latest GitHub release (main.js, manifest.json, styles.css), then reload it in Obsidian.</string>
     <string name="ver_companion_below_floor">⚠ This app (%1$s) is older than the plugin can work with (needs at least %2$s). Install the newest APK from the latest GitHub release — it updates over this one.</string>
-    <string name="ver_update_plugin_soft">The plugin (%1$s) is older than this app (%2$s); everything keeps working. Update the plugin from the latest GitHub release — or install this app's %1$s APK from that release's page to match the plugin instead.</string>
+    <!-- Apostrophes are escaped: aapt2 refuses a bare ' in a string resource,
+         with an error message that talks about unicode escapes (the 0.6.7
+         tag's companion build failed on exactly that). -->
+    <string name="ver_update_plugin_soft">The plugin (%1$s) is older than this app (%2$s); everything keeps working. Update the plugin from the latest GitHub release — or install this app\'s %1$s APK from that release\'s page to match the plugin instead.</string>
     <string name="ver_update_companion_soft">A newer version of this app ships with the plugin (%2$s); this one (%1$s) keeps working. Update the APK when convenient.</string>
     <string name="ver_update_runner">⚠ The Termux runner (v%1$s) is older than the plugin needs (v%2$s). Tap "Update runner" below and run the copied command in Termux — updating the plugin never updates the runner.</string>
-    <string name="ver_update_plugin_for_runner">The Termux runner (v%1$s) is newer than this plugin ships (v%2$s); everything at or above the floor keeps working. Update the Obsidian plugin from the latest GitHub release, or re-run the plugin's own install command to pin the runner back to it.</string>
+    <string name="ver_update_plugin_for_runner">The Termux runner (v%1$s) is newer than this plugin ships (v%2$s); everything at or above the floor keeps working. Update the Obsidian plugin from the latest GitHub release, or re-run the plugin\'s own install command to pin the runner back to it.</string>
     <string name="section_actions">Actions</string>
     <string name="check_termux">Termux is installed</string>
     <string name="check_permission">Permission “Run commands in Termux environment” granted</string>
