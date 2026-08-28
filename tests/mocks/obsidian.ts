@@ -61,6 +61,12 @@ function fakeEl(tag = "div", cls = "", text = ""): Any {
     tagName: tag.toUpperCase(),
     className: cls,
     style: { setProperty: () => undefined, removeProperty: () => undefined },
+    // CommitMessageModal focuses its textarea on a 10 ms timer; without this
+    // member the timer fired AFTER a test finished and CI (not the sandbox,
+    // whose runs exited faster) failed the whole suite with an unhandled
+    // "ta.focus is not a function" — §10's stub trap, caught on the 0.6.7
+    // tag's first run.
+    focus: () => undefined,
     disabled: false,
     children: [] as Any[],
     parent: null as Any,
