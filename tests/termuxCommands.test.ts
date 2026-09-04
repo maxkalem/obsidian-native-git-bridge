@@ -72,20 +72,19 @@ describe("dropGlobalCredHelperCommand", () => {
   const cmd = dropGlobalCredHelperCommand();
 
   it("unsets by name and never reads a value", () => {
-    expect(cmd).toContain("git config --global --unset-all credential.helper");
-    expect(cmd).toContain("--name-only --get-regexp");
-    // A --get without --name-only would print the helper's value.
-    expect(cmd).not.toMatch(/--get (?!-regexp)/);
+    expect(cmd).toBe("git config --global --unset-all credential.helper");
+    // A --get of any kind would print the helper's value into the terminal.
+    expect(cmd).not.toContain("--get");
   });
 
-  it("survives its own success: --get-regexp exits 1 when nothing is left", () => {
-    // Without the `|| echo` the command ends non-zero exactly when it worked,
-    // which at a terminal reads as the removal having failed.
-    expect(cmd).toMatch(/\|\| echo /);
-  });
-
-  it("pages nothing: a broken core.pager would kill the listing after the removal", () => {
-    expect(cmd).toContain("git --no-pager config --global");
+  it("says nothing about itself: one action needs no echo", () => {
+    // The user's rule (2026-08-28): an echo earns its place when a command
+    // runs in several steps, takes long enough that silence reads as a hang,
+    // or waits for the user to type. None of that is true here, and the
+    // window that offered the removal carries "Check again" for the proof.
+    expect(cmd).not.toContain("echo");
+    expect(cmd).not.toContain(";");
+    expect(cmd).not.toContain("&&");
   });
 
   it("is global-only: it addresses no repository and needs no path", () => {

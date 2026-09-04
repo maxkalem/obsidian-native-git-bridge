@@ -107,6 +107,9 @@ export type BridgeAction =
    * global helper stops shadowing the profile's own store file.
    */
   | "cred-helper-local-reset"
+  | "gitignore-list"
+  | "gitignore-add"
+  | "gitignore-remove"
   /**
    * Read-only triage for the unified repair (v16): the stale-lock facts (the
    * lock's existence and age, live processes with their names), the set-aside
@@ -160,6 +163,9 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["identity-drop-global", 16],
   ["cred-helper-local-reset", 16],
   ["repair-triage", 16],
+  ["gitignore-list", 18],
+  ["gitignore-add", 18],
+  ["gitignore-remove", 18],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -203,6 +209,10 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "repair-sparse-definition",
   "identity-drop-global",
   "cred-helper-local-reset",
+  // .gitignore is a TRACKED file, so a change to it travels to every other
+  // device — a mutation in every sense the operation lock exists for.
+  "gitignore-add",
+  "gitignore-remove",
 ]);
 
 export interface BridgeRequest {

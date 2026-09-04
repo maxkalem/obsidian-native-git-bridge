@@ -30,6 +30,16 @@
     <string name="btn_grant_done">Permission granted</string>
     <string name="btn_setup_termux">Tap here: copy the install command &amp; open Termux</string>
     <string name="btn_setup_termux_done">Termux configured</string>
+    <!-- Step 4 is advisory: the foreground path works without it. It exists
+         because the runner is started as Obsidian LEAVES the foreground
+         (sync-on-close) and a fetch takes a minute, which is exactly what
+         battery optimisation and Samsung's sleeping-apps lists cut short. -->
+    <string name="check_battery">Tap here: let Termux run in the background (battery)</string>
+    <string name="check_battery_done">Termux may run in the background</string>
+    <string name="battery_hint">The bridge answered, but Termux is still under battery optimisation, so Android may stop it while a sync runs after Obsidian closes. Tap step 4: on the Termux page choose Battery → Unrestricted.</string>
+    <string name="battery_hint_samsung">The bridge answered, but Termux is still under battery optimisation, so this Samsung may put it to sleep while a sync runs after Obsidian closes. Tap step 4: on the Termux page choose Battery → Unrestricted. Then in Settings → Battery → Background usage limits make sure Termux is not in Sleeping apps or Deep sleeping apps — add it to Never sleeping apps.</string>
+    <string name="battery_toast">Opening the Termux page: Battery → Unrestricted.</string>
+    <string name="battery_toast_samsung">Opening the Termux page: Battery → Unrestricted. Also check Background usage limits → Never sleeping apps.</string>
     <string name="probe_running">Checking the bridge: asking Termux to run the runner…</string>
     <string name="probe_ok_toast">Test passed ✅ — Termux ran the runner and answered.</string>
     <string name="probe_fail_toast">Test failed — see the message below the checklist.</string>

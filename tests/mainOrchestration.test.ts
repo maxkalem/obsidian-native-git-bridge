@@ -2,6 +2,8 @@ import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   __findByClass,
   __modalActionLabels,
+  __modalBodies,
+  __autoConfirm,
   __modalTitles,
   __notices,
   __openedModals,
@@ -889,6 +891,81 @@ describe("repository bootstrap", () => {
     expect(__modalActionLabels).toContain("Copy the safe.directory fix…");
   });
 
+  // ---- the two roots: the conversion at the adapter boundary ---------------
+
+  it("excludes Obsidian's trash before the first file is moved into it", async () => {
+    // `.trash` is excluded nowhere and staging is `git add -A`, so anything
+    // moved there comes back in the next commit — including a file the sparse
+    // repair took out of a PROTECTED path, which sparse hides precisely so it
+    // never travels.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const sent: { action: string; path?: string }[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push({ action: req.action, path: req.args?.path });
+      return { ok: true, exitCode: 0, runnerVersion: 17, data: { branchInfo: "# branch.head main" } };
+    });
+    h.adapter.files.set("a.md", "x");
+    const out = await (h.plugin as Any).trashAll(["a.md"]);
+    expect(out.moved).toBe(1);
+    expect(h.adapter.trashed).toContain("a.md");
+    expect(sent).toContainEqual({ action: "exclude-add", path: ".trash/" });
+    // Once per session: the second move asks for nothing.
+    h.adapter.files.set("b.md", "y");
+    await (h.plugin as Any).trashAll(["b.md"]);
+    expect(sent.filter((s) => s.action === "exclude-add")).toHaveLength(1);
+  });
+
+  it("converts repository paths to vault paths once the roots differ", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 18,
+      data: { branchInfo: "# branch.head main", vaultInRepo: "docs" },
+    }));
+    await h.plugin.cmdStatus(true, true);
+    // The vault sits at docs/ inside the repository, so a repository path
+    // under it addresses the vault file with the prefix removed…
+    expect((h.plugin as Any).vaultPathOf("docs/notes/a.md")).toBe("notes/a.md");
+    // …and one ABOVE the vault has no vault name at all. Guessing here is a
+    // write to a different real file that reports success.
+    expect((h.plugin as Any).vaultPathOf("src/main.ts")).toBeNull();
+    // The reverse direction, which the file explorer and the active note use.
+    expect((h.plugin as Any).repoPathOf("notes/a.md")).toBe("docs/notes/a.md");
+    // And the trash line follows the vault, not the repository root.
+    const sent: { action: string; path?: string }[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push({ action: req.action, path: req.args?.path });
+      return { ok: true, exitCode: 0, runnerVersion: 18, data: { branchInfo: "# branch.head main" } };
+    });
+    h.adapter.files.set("notes/a.md", "x");
+    const out = await (h.plugin as Any).trashAll(["docs/notes/a.md", "src/main.ts"]);
+    expect(sent).toContainEqual({ action: "exclude-add", path: "docs/.trash/" });
+    expect(h.adapter.trashed).toContain("notes/a.md");
+    // The file outside the vault is a failure with a reason, never a silent
+    // skip reported as a move that happened.
+    expect(out.failed).toContain("src/main.ts");
+  });
+
+  it("keeps today's behaviour when the runner reports no offset", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 17,
+      data: { branchInfo: "# branch.head main" },
+    }));
+    await h.plugin.cmdStatus(true, true);
+    expect((h.plugin as Any).vaultPathOf("a/b.md")).toBe("a/b.md");
+    expect((h.plugin as Any).repoPathOf("a/b.md")).toBe("a/b.md");
+  });
+
   it("a push refused for stale credentials carries the Termux credentials button", async () => {
     const h = await loadPlugin();
     await enableBridge(h);
@@ -970,24 +1047,69 @@ describe("repository bootstrap", () => {
     await (h.plugin as Any).runRepairJob();
     expect(__modalTitles).toContain("Repository repaired");
     // The sentence used to end at "the daily reminder offers to delete it",
-    // which is a whole day away from the window describing the problem.
-    expect(__modalActionLabels).toContain("Delete the previous repository…");
-    // And the button reaches the window that can describe what goes.
-    await (h.plugin as Any).openPreviousRepoModalFromRepair([dir]);
-    expect(__modalTitles).toContain("A previous repository is still set aside");
-    expect(__modalActionLabels).toContain("Delete it");
+    // which is a whole day away from the window describing the problem. The
+    // label carries the size, because a button that says only "delete" is a
+    // button nobody presses.
+    expect(__modalActionLabels).toContain("Delete the previous repository (184 MB)…");
   });
 
-  it("a set-aside repository with no manifest is described, not offered for deletion", async () => {
-    // The triage names DIRECTORIES and the window describes MANIFESTS. With
-    // nothing to read, a confirmation quoting "0 commits" in front of a
-    // permanent deletion would be a fabrication.
+  it("offers NO delete button for a set-aside directory whose manifest is gone", async () => {
+    // The device showed the failure this prevents: the triage named the
+    // directory, the button appeared, and pressing it said there was nothing
+    // to delete. The manifests are read before anything is offered now, and
+    // a confirmation quoting "0 commits" in front of a permanent deletion
+    // would be a fabrication anyway.
     const h = await loadPlugin();
     await enableBridge(h);
     h.useFastClient();
-    await (h.plugin as Any).openPreviousRepoModalFromRepair(["previous-git-20260807T101500Z"]);
-    expect(__modalTitles).toContain("The set-aside copy cannot be described");
-    expect(__modalActionLabels).not.toContain("Delete it");
+    (h.plugin as Any).lastRunnerVersion = 16;
+    answerWith(h, (req: Any) => {
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 16,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "global\nlocal",
+            userEmailScopes: "global\nlocal",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            // No manifest is written into the fake vault for this one.
+            previousGitDirs: "previous-git-20260807T101500Z",
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 16,
+        data: {
+          branchInfo: "# branch.head main",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(__modalTitles).toContain("Repository repaired");
+    expect(
+      __modalActionLabels.some((l: string) => l.startsWith("Delete the previous repository"))
+    ).toBe(false);
+    // …and the window says where it is and how to deal with it instead.
+    expect(__modalBodies.join("\n")).toContain("previous-git-20260807T101500Z");
   });
 
   it("the identity check reports scopes and never offers the global removal without a local identity", async () => {
@@ -1334,7 +1456,7 @@ describe("repository bootstrap", () => {
     expect(__modalTitles).toContain("Repository repaired");
     // One tap, the measured number, no hunting through the settings: the
     // label carries what the FILTER allows shedding, not the raw store size.
-    expect(__modalActionLabels.some((l: string) => /^Free up 4\.[0-9] GB…$/.test(l))).toBe(true);
+    expect(__modalActionLabels.some((l: string) => /^Free up to 4\.[0-9] GB…$/.test(l))).toBe(true);
   });
 
   it("a lightweight repository within its allowance gets no cleanup offer", async () => {
@@ -1401,6 +1523,163 @@ describe("repository bootstrap", () => {
     await (h.plugin as Any).runRepairJob();
     expect(__modalTitles).toContain("Repository repaired");
     expect(__modalActionLabels.some((l: string) => l.startsWith("Free up"))).toBe(false);
+  });
+
+  it("a v18 repair-scan's counts reach the final window with no extra round trip", async () => {
+    // The device carried 6.3 GB while both lightweight toggles read "small",
+    // and step 7 never looked because it only ran for a partial-clone filter.
+    // v18 attaches count-objects to repair-scan, which only stats the object
+    // directory — so the report costs nothing and needs no maintenance-scan.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 18;
+    const sent: string[] = [];
+    answerWith(h, (req: Any) => {
+      sent.push(req.action);
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 18,
+          data: {
+            branchInfo: "# branch.head main",
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "global\nlocal",
+            userEmailScopes: "global\nlocal",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            previousGitDirs: "",
+          },
+        };
+      }
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 18,
+        data: {
+          branchInfo: "# branch.head main",
+          removedCount: "0",
+          removedObjects: "",
+          fsckMissing: "",
+          fsckRemaining: "",
+          aheadCount: "0",
+          cacheTreeBroken: "false",
+          hasUpstream: "true",
+          // The device's shape: no filter, a big pack and gigabytes loose.
+          countObjects:
+            "count: 41000\nsize: 3200000\nin-pack: 15000\npacks: 3\nsize-pack: 3100000\ngarbage: 0\nsize-garbage: 0",
+        },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    // No third request: the counts rode along.
+    expect(sent).toEqual(["repair-triage", "repair-scan"]);
+    expect(__modalTitles).toContain("Repository repaired");
+    expect(__modalActionLabels.some((l: string) => l.startsWith("Free up to 3."))).toBe(true);
+    expect(__modalBodies.join("\n")).toContain("loose objects");
+  });
+
+  it("the identity check reports scopes as a column and can re-run itself", async () => {
+    // The first cut was five even-weight paragraphs; on the phone the answer
+    // (which scope holds each key) was buried in the prose. The rich lines
+    // are a report now, and "Check again" exists because every button in the
+    // window changes what the window says (the user, 2026-08-28).
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: true,
+      exitCode: 0,
+      runnerVersion: 18,
+      data: {
+        branchInfo: "# branch.head main",
+        userNameScopes: "local",
+        userEmailScopes: "local",
+        credHelperScopes: "local",
+      },
+    }));
+    await (h.plugin as Any).cmdCheckIdentity();
+    const body = __modalBodies.join("\n");
+    expect(body).toContain("user.name: local");
+    expect(body).toContain("credential.helper: local");
+    expect(body).toContain("Scopes only — no value is ever read.");
+    // Shorter than the wall it replaced: the healthy case is five lines.
+    expect(body.split("\n").length).toBeLessThanOrEqual(6);
+    expect(__modalActionLabels).toContain("Check again");
+  });
+
+  it("a shortened history offers the BOUNDED re-request, not the full download", async () => {
+    // The shipped ending here was "Repository still incomplete — the remote
+    // does not have these objects either, cloning the vault again is the way
+    // out", in red, on a repository where commit, push, pull and sync all
+    // work. Two things were wrong: the inference (a refetch asks for the depth
+    // window, so its silence says nothing about the remote) and the frame (the
+    // user keeps a shortened history ON PURPOSE, so "download everything" is
+    // an answer they would immediately undo — their objection, 2026-08-30).
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    (h.plugin as Any).lastRunnerVersion = 18;
+    // The walk passes through the refetch confirmation to reach the ending.
+    __autoConfirm.answer = true;
+    const missing = "missing blob 5ae15b81841cb822aac335600a8a3ba67f6771f3";
+    answerWith(h, (req: Any) => {
+      const base = {
+        branchInfo: "# branch.head main",
+        shallow: "true",
+        removedCount: "0",
+        removedObjects: "",
+        aheadCount: "0",
+        cacheTreeBroken: "false",
+        hasUpstream: "true",
+      };
+      if (req.action === "repair-triage") {
+        return {
+          ok: true,
+          exitCode: 0,
+          runnerVersion: 18,
+          data: {
+            ...base,
+            lockExists: "false",
+            lockAgeSeconds: "",
+            liveGit: "false",
+            liveProcesses: "",
+            userNameScopes: "local",
+            userEmailScopes: "local",
+            credHelperScopes: "local",
+            sparseEnabled: "false",
+            sparseCone: "false",
+            sparseList: "",
+            rescueBranches: "",
+            previousGitDirs: "",
+          },
+        };
+      }
+      // Every object step keeps reporting the same missing object, so the
+      // walk runs scan → fetch-missing → refetch and lands on the ending.
+      return {
+        ok: true,
+        exitCode: 0,
+        runnerVersion: 18,
+        data: { ...base, fsckMissing: missing, fsckRemaining: missing },
+      };
+    });
+    await (h.plugin as Any).runRepairJob();
+    expect(__modalTitles).toContain("History here is shortened");
+    expect(__modalTitles).not.toContain("Repository still incomplete");
+    // The bounded download is the CTA; the full one is offered second.
+    expect(__modalActionLabels.some((l: string) => l.startsWith("Re-request the newest"))).toBe(true);
+    expect(__modalActionLabels).toContain("Download the full history instead…");
+    // And it never advises a re-clone about a repository that works.
+    expect(__modalBodies.join("\n")).not.toContain("Cloning the vault again");
+    expect(__modalBodies.join("\n")).toContain("Nothing you do needs these objects");
   });
 
   it("the unified repair stops at ownership: nothing else can run, the fix is the clipboard", async () => {
@@ -2461,7 +2740,23 @@ describe("an ignore-rule change refreshes the panel", () => {
   const answering = (h: Harness) => {
     h.runner.onTrigger = (id) => {
       const req = JSON.parse(h.adapter.files.get(paths.requestFile(id))!) as Any;
-      if (req.action === "exclude-add" || req.action === "exclude-remove") {
+      if (req.action === "gitignore-add" || req.action === "gitignore-remove") {
+        h.adapter.files.set(
+          paths.resultFile(id),
+          JSON.stringify({
+            protocolVersion: 1,
+            id,
+            action: req.action,
+            ok: true,
+            exitCode: 0,
+            runnerVersion: 18,
+            data: {
+              branchInfo: "# branch.head main",
+              gitignoreList: req.action === "gitignore-add" ? String(req.args?.pattern ?? "") : "",
+            },
+          })
+        );
+      } else if (req.action === "exclude-add" || req.action === "exclude-remove") {
         h.adapter.files.set(
           paths.resultFile(id),
           JSON.stringify({
@@ -2500,9 +2795,28 @@ describe("an ignore-rule change refreshes the panel", () => {
     await enableBridge(h);
     h.useFastClient();
     answering(h);
+    (h.plugin as Any).lastRunnerVersion = 18;
     await h.plugin.gitignoreAdd("/Notes/x.md");
-    expect(h.adapter.files.get(".gitignore")).toContain("/Notes/x.md");
-    expect(sentActions(h)).toEqual(["status"]);
+    // Through the RUNNER now, never the adapter: `.gitignore` is at the
+    // repository root, which the vault adapter cannot reach once that is not
+    // the vault root — and the file it would reach instead is a different one.
+    expect(h.adapter.files.has(".gitignore")).toBe(false);
+    // And it costs no follow-up status: the action collects the fields itself.
+    expect(sentActions(h)).toEqual(["gitignore-add"]);
+    expect(h.plugin.currentGitignoreLines()).toContain("/Notes/x.md");
+  });
+
+  it("refuses the .gitignore routes on a runner that has no such action", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    answering(h);
+    (h.plugin as Any).lastRunnerVersion = 17;
+    await h.plugin.gitignoreAdd("/Notes/x.md");
+    // Not a silent fall back to the adapter: that writes the wrong file
+    // exactly in the arrangement the action exists for.
+    expect(__modalTitles).toContain("Termux runner is too old for this");
+    expect(sentActions(h)).toEqual([]);
   });
 
   it("says so when the rule targets a TRACKED path, which no ignore rule hides", async () => {
@@ -2523,8 +2837,14 @@ describe("an ignore-rule change refreshes the panel", () => {
       sparse: { enabled: false, coneMode: undefined, patterns: [], skipWorktreeCount: 0 },
       fetchedAt: "now",
     };
+    (h.plugin as Any).lastRunnerVersion = 18;
     await h.plugin.gitignoreAdd("/.obsidian/workspace-mobile.json");
-    expect(__notices.some((n) => n.includes("tracked by git"))).toBe(true);
+    // On any runner that can untrack (v14+) the warning arrives as the OFFER
+    // rather than a bare notice — the plugin fixes what it just explained.
+    // The notice-only branch is what an older runner gets, and this test used
+    // to reach it only because its fixture answered v4.
+    expect(__modalTitles).toContain("Stop tracking this file?");
+    expect(__modalBodies.join("\n")).toContain("is tracked by git");
   });
 
   it("stays quiet about an untracked path: that rule works as it reads", async () => {
@@ -2566,8 +2886,10 @@ describe("untrack-file flow", () => {
     const h = await loadPlugin();
     await enableBridge(h);
     h.useFastClient();
-    h.adapter.files.set(".gitignore", "/.obsidian/workspace-mobile.json\n");
-    await (h.plugin as Any).loadGitignore();
+    // `.gitignore` reaches the plugin through the runner now, riding along
+    // with status, so the cache is seeded the way the runner seeds it.
+    (h.plugin as Any).lastRunnerVersion = 18;
+    (h.plugin as Any).absorbGitignoreList("/.obsidian/workspace-mobile.json\n");
     h.runner.onTrigger = (id) => {
       h.adapter.files.set(
         paths.resultFile(id),
@@ -2729,7 +3051,7 @@ describe("runner version advice", () => {
   });
 
   it("flags a runner above the shipped version as the plugin being behind", async () => {
-    const advice = await adviceFor(18);
+    const advice = await adviceFor(19);
     expect(advice).toHaveLength(1);
     expect(advice[0]!.text).toContain("NEWER than this plugin knows");
   });

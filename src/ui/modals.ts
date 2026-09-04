@@ -106,11 +106,44 @@ export interface ResultModalAction {
   keepOpen?: boolean;
 }
 
+/**
+ * How much a line matters, in the stylesheet's own four colours. Reported
+ * state, never decoration: a window whose every line is coloured says the
+ * same as one where none is.
+ */
+export type ResultTone = "ok" | "warn" | "bad" | "accent";
+
+/**
+ * A body line. A plain string is what almost every window uses and what every
+ * existing caller passes; the two structured forms exist because a REPORT of
+ * several keys read as a wall of prose on the phone — the user's words about
+ * the identity check, 2026-08-28.
+ *
+ * - `fact`: one key and its value, the value carrying the colour. This is the
+ *   shape a report wants: the eye finds the values in a column instead of
+ *   parsing sentences for them.
+ * - `note`: one sentence that matters more than its neighbours.
+ */
+export type ResultLine =
+  | string
+  | { fact: string; value: string; tone?: ResultTone }
+  | { note: string; tone?: ResultTone };
+
+function toneClass(tone?: ResultTone): string {
+  return tone === undefined ? "" : ` ngb-tone-${tone}`;
+}
+
+/** The plain-text form of a body line, for Copy details. */
+function lineText(line: ResultLine): string {
+  if (typeof line === "string") return line;
+  return "fact" in line ? `${line.fact}: ${line.value}` : line.note;
+}
+
 export class ResultModal extends Modal {
   constructor(
     app: App,
     private title: string,
-    private lines: string[],
+    private lines: ResultLine[],
     private opts: {
       stdout?: string;
       stderr?: string;
@@ -142,6 +175,17 @@ export class ResultModal extends Modal {
     const c = this.contentEl;
     const sec = c.createDiv({ cls: "ngb-section" });
     for (const line of this.lines) {
+      if (typeof line !== "string" && "fact" in line) {
+        const row = sec.createDiv({ cls: "ngb-res-fact" });
+        row.createSpan({ cls: "ngb-res-fact-k", text: line.fact });
+        row.createSpan({ cls: `ngb-res-fact-v${toneClass(line.tone)}`, text: line.value });
+        continue;
+      }
+      if (typeof line !== "string") {
+        const div = sec.createDiv({ cls: `ngb-res-note${toneClass(line.tone)}` });
+        linkifyInto(div, line.note);
+        continue;
+      }
       const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
       linkifyInto(div, line);
     }
@@ -165,7 +209,7 @@ export class ResultModal extends Modal {
   }
 
   private fullText(): string {
-    const parts = [this.title, ...this.lines];
+    const parts = [this.title, ...this.lines.map(lineText)];
     if (this.opts.collapsed) parts.push("", `--- ${this.opts.collapsed.label} ---`, this.opts.collapsed.text);
     if (this.opts.stdout) parts.push("", "--- stdout ---", this.opts.stdout);
     if (this.opts.stderr) parts.push("", "--- stderr ---", this.opts.stderr);

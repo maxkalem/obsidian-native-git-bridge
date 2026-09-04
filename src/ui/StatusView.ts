@@ -135,6 +135,12 @@ export interface StatusViewActions {
    * plugin's push cannot reach a panel that did not exist when it fired.
    */
   syncState: () => void;
+  /**
+   * The panel became visible again. The plugin decides whether that is worth a
+   * Termux round trip; this only reports the event, because the view has no
+   * idea what a round trip costs on this device.
+   */
+  panelShown: () => void;
   /** Open the live output panel — what Termux is saying while it says it. */
   openOutput: () => void;
   /**
@@ -390,6 +396,11 @@ export class StatusView extends ItemView {
     // animations), so the refresh icon stayed still for the whole operation
     // while the progress line ticked beside it.
     this.actions.syncState();
+    // A panel that was open before the user went to the history tab comes back
+    // showing whatever it last read, and says "Working tree clean" about a
+    // repository nobody has looked at since. The plugin decides whether the
+    // snapshot is old enough to be worth re-reading.
+    this.actions.panelShown();
   }
 
   onPaneMenu(menu: Menu): void {

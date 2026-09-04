@@ -36,7 +36,7 @@ var import_obsidian16 = require("obsidian");
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
 var RUNNER_MIN_VERSION = 12;
-var RUNNER_SHIPPED_VERSION = 17;
+var RUNNER_SHIPPED_VERSION = 18;
 var COMPANION_MIN_VERSION = "0.4.1";
 var EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 var DEFAULT_PROTECTED_PATHS = [];
@@ -156,7 +156,10 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repair-sparse-definition", 16],
   ["identity-drop-global", 16],
   ["cred-helper-local-reset", 16],
-  ["repair-triage", 16]
+  ["repair-triage", 16],
+  ["gitignore-list", 18],
+  ["gitignore-add", 18],
+  ["gitignore-remove", 18]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -197,7 +200,11 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "repair-stale-lock",
   "repair-sparse-definition",
   "identity-drop-global",
-  "cred-helper-local-reset"
+  "cred-helper-local-reset",
+  // .gitignore is a TRACKED file, so a change to it travels to every other
+  // device — a mutation in every sense the operation lock exists for.
+  "gitignore-add",
+  "gitignore-remove"
 ]);
 
 // src/git/commitMessage.ts
@@ -819,6 +826,13 @@ function linkifyInto(parent, text) {
   }
   if (last < text.length) parent.appendText(text.slice(last));
 }
+function toneClass(tone) {
+  return tone === void 0 ? "" : ` ngb-tone-${tone}`;
+}
+function lineText(line) {
+  if (typeof line === "string") return line;
+  return "fact" in line ? `${line.fact}: ${line.value}` : line.note;
+}
 var ResultModal = class extends import_obsidian2.Modal {
   constructor(app, title, lines, opts = {}) {
     super(app);
@@ -832,6 +846,17 @@ var ResultModal = class extends import_obsidian2.Modal {
     const c = this.contentEl;
     const sec = c.createDiv({ cls: "ngb-section" });
     for (const line of this.lines) {
+      if (typeof line !== "string" && "fact" in line) {
+        const row = sec.createDiv({ cls: "ngb-res-fact" });
+        row.createSpan({ cls: "ngb-res-fact-k", text: line.fact });
+        row.createSpan({ cls: `ngb-res-fact-v${toneClass(line.tone)}`, text: line.value });
+        continue;
+      }
+      if (typeof line !== "string") {
+        const div2 = sec.createDiv({ cls: `ngb-res-note${toneClass(line.tone)}` });
+        linkifyInto(div2, line.note);
+        continue;
+      }
       const div = sec.createDiv({ cls: this.opts.isError ? "ngb-status-error" : "" });
       linkifyInto(div, line);
     }
@@ -852,7 +877,7 @@ var ResultModal = class extends import_obsidian2.Modal {
     addCopyButton(btns, () => this.fullText(), "Copy details", "Details copied.");
   }
   fullText() {
-    const parts = [this.title, ...this.lines];
+    const parts = [this.title, ...this.lines.map(lineText)];
     if (this.opts.collapsed) parts.push("", `--- ${this.opts.collapsed.label} ---`, this.opts.collapsed.text);
     if (this.opts.stdout) parts.push("", "--- stdout ---", this.opts.stdout);
     if (this.opts.stderr) parts.push("", "--- stderr ---", this.opts.stderr);
@@ -3139,13 +3164,13 @@ function describeInProgressOp(s) {
   const kind = s.rebaseInProgress ? "rebase" : s.mergeInProgress ? "merge" : null;
   if (kind === null) return null;
   const n = Math.max(0, s.conflictCount);
-  const clean = n === 0;
+  const clean2 = n === 0;
   const noun2 = kind === "merge" ? "Merge" : "Rebase";
   const undoes = kind === "merge" ? "Aborting puts the branch back where it was before the pull." : "Aborting puts the branch back where it was before the rebase started.";
-  const title = clean ? `${noun2} in progress \u2014 everything is resolved` : `${noun2} in progress \u2014 ${plural(n, "file is", "files are")} still conflicted`;
-  const detail = clean ? kind === "merge" ? `Nothing is left to resolve. Commit the merge to finish it. ${undoes}` : `Nothing is left to resolve. Continue to replay the remaining commits. ${undoes}` : kind === "merge" ? `Resolve the conflicted files listed below, then commit the merge. ${undoes}` : `Resolve the conflicted files listed below, then continue. ${undoes}`;
-  const shortTitle = clean ? kind === "merge" ? "Merge ready to commit" : "Rebase ready to continue" : `${noun2}: ${plural(n, "conflict", "conflicts")} left`;
-  const shortDetail = clean ? kind === "merge" ? "Commit to finish, or abort to undo the pull." : "Continue to replay the rest, or abort." : kind === "merge" ? "Resolve them below, then commit." : "Resolve them below, then continue.";
+  const title = clean2 ? `${noun2} in progress \u2014 everything is resolved` : `${noun2} in progress \u2014 ${plural(n, "file is", "files are")} still conflicted`;
+  const detail = clean2 ? kind === "merge" ? `Nothing is left to resolve. Commit the merge to finish it. ${undoes}` : `Nothing is left to resolve. Continue to replay the remaining commits. ${undoes}` : kind === "merge" ? `Resolve the conflicted files listed below, then commit the merge. ${undoes}` : `Resolve the conflicted files listed below, then continue. ${undoes}`;
+  const shortTitle = clean2 ? kind === "merge" ? "Merge ready to commit" : "Rebase ready to continue" : `${noun2}: ${plural(n, "conflict", "conflicts")} left`;
+  const shortDetail = clean2 ? kind === "merge" ? "Commit to finish, or abort to undo the pull." : "Continue to replay the rest, or abort." : kind === "merge" ? "Resolve them below, then commit." : "Resolve them below, then continue.";
   return {
     kind,
     title,
@@ -3158,7 +3183,7 @@ function describeInProgressOp(s) {
     // runner has no terminal for.
     finish: {
       label: kind === "merge" ? "Commit merge" : "Continue rebase",
-      enabled: clean
+      enabled: clean2
     },
     abort: { label: kind === "merge" ? "Abort merge" : "Abort rebase", enabled: true }
   };
@@ -3316,6 +3341,7 @@ var StatusView = class extends import_obsidian9.ItemView {
   async onOpen() {
     this.render();
     this.actions.syncState();
+    this.actions.panelShown();
   }
   onPaneMenu(menu) {
     menu.addItem(
@@ -4037,7 +4063,7 @@ function safeDirectoryCommand(repoPathHint) {
   return `git config --global --add safe.directory "${repo}"`;
 }
 function dropGlobalCredHelperCommand() {
-  return `git config --global --unset-all credential.helper; git --no-pager config --global --name-only --get-regexp '^credential\\.' || echo "no credential.* left in the global configuration"`;
+  return "git config --global --unset-all credential.helper";
 }
 var PROFILE_ID_RE = /^p-[0-9a-f]{8,32}$/;
 var QUOTABLE_HTTPS = /^https:\/\/[A-Za-z0-9._~:/?#[\]@!&'()*+,;=%-]+$/;
@@ -4270,7 +4296,31 @@ function parseCountObjects(raw) {
 function totalKb(s) {
   return s.looseKb + s.packKb + s.garbageKb;
 }
-function maintenanceReportLines(s, rescueBranches) {
+var OFFER_FLOOR_KB = 100 * 1024;
+function decideStorageOffer(opts) {
+  const { stats, blobKb, partial } = opts;
+  if (partial && blobKb >= OFFER_FLOOR_KB) {
+    return {
+      reclaimKb: blobKb,
+      reason: "packs hold file content the filter allows shedding"
+    };
+  }
+  const wasted = stats.looseKb + stats.garbageKb;
+  if (wasted >= OFFER_FLOOR_KB) {
+    return {
+      reclaimKb: wasted,
+      reason: stats.garbageKb > stats.looseKb ? "leftover temporary files from an interrupted fetch" : "loose objects no branch, tag or reflog reaches"
+    };
+  }
+  if (stats.packCount >= 3 && stats.packKb >= 5 * OFFER_FLOOR_KB) {
+    return {
+      reclaimKb: stats.packKb,
+      reason: `${stats.packCount} separate packs, which a repack merges into one`
+    };
+  }
+  return null;
+}
+function maintenanceReportLines(s, rescueBranches, shallow = false) {
   const lines = [
     `Object database: ${formatSize(totalKb(s))} (${s.packCount} pack${s.packCount === 1 ? "" : "s"} ${formatSize(
       s.packKb
@@ -4279,6 +4329,11 @@ function maintenanceReportLines(s, rescueBranches) {
     "Cleanup removes stale temporary files and unreachable loose objects older than two weeks, then repacks everything reachable into one pack. Nothing any branch, tag, reflog or the index can reach is touched.",
     "The repack is the long step and needs free space roughly the size of the repacked history while it runs."
   ];
+  if (shallow) {
+    lines.push(
+      "This repository keeps a SHALLOW history. On one device, a cleanup of a shallow repository was followed by objects going missing from its history \u2014 the cause is not established, and everything was recoverable from the remote because it had all been pushed. Push anything unpushed before running this here."
+    );
+  }
   if (rescueBranches.length > 0) {
     lines.push(
       `Rescue branch${rescueBranches.length === 1 ? "" : "es"} ${rescueBranches.join(
@@ -6190,6 +6245,59 @@ function isValidBranchName(name) {
   return true;
 }
 
+// src/git/repoRoot.ts
+var ROOTS_COINCIDE = { kind: "same" };
+function validOffset(raw) {
+  const s = raw.trim().replace(/^\/+|\/+$/g, "");
+  if (s === "") return null;
+  const parts = s.split("/");
+  if (parts.some((p) => p === "" || p === "." || p === "..")) return null;
+  return parts.join("/");
+}
+function parseRootOffset(fields) {
+  const vaultInRepo = validOffset(fields.vaultInRepo ?? "");
+  const repoInVault = validOffset(fields.repoInVault ?? "");
+  if (vaultInRepo !== null && repoInVault !== null) return ROOTS_COINCIDE;
+  if (vaultInRepo !== null) return { kind: "vault-in-repo", offset: vaultInRepo };
+  if (repoInVault !== null) return { kind: "repo-in-vault", offset: repoInVault };
+  return ROOTS_COINCIDE;
+}
+function stripPrefix(path, prefix) {
+  if (path === prefix) return "";
+  if (path.startsWith(`${prefix}/`)) return path.slice(prefix.length + 1);
+  return null;
+}
+function clean(path) {
+  return path.trim().replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+}
+function toVault(offset, repoPath) {
+  const p = clean(repoPath);
+  switch (offset.kind) {
+    case "same":
+      return p;
+    case "repo-in-vault":
+      return p === "" ? offset.offset : `${offset.offset}/${p}`;
+    case "vault-in-repo":
+      return stripPrefix(p, offset.offset);
+  }
+}
+function toRepo(offset, vaultPath) {
+  const p = clean(vaultPath);
+  switch (offset.kind) {
+    case "same":
+      return p;
+    case "vault-in-repo":
+      return p === "" ? offset.offset : `${offset.offset}/${p}`;
+    case "repo-in-vault":
+      return stripPrefix(p, offset.offset);
+  }
+}
+var VAULT_TRASH_DIR = ".trash";
+function trashExcludePattern(offset) {
+  const p = toRepo(offset, VAULT_TRASH_DIR);
+  return p === null ? null : `${p}/`;
+}
+
 // src/main.ts
 var import_obsidian17 = require("obsidian");
 
@@ -6320,8 +6428,8 @@ function lastProgressLine(raw, maxChars = 64) {
   const lines = collapseProgress(raw).split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
   const last = lines[lines.length - 1];
   if (last === void 0) return null;
-  const clean = redact(last);
-  return clean.length > maxChars ? clean.slice(0, maxChars - 1) + "\u2026" : clean;
+  const clean2 = redact(last);
+  return clean2.length > maxChars ? clean2.slice(0, maxChars - 1) + "\u2026" : clean2;
 }
 function progressForBundle(raw, maxBytes = 8 * 1024) {
   const text = redact(collapseProgress(raw)).replace(/\n{3,}/g, "\n\n").trim();
@@ -6384,6 +6492,7 @@ function decideRepair(stage, findings, ctx) {
   if (stage === "scan") return { kind: "fetch-missing", oids };
   if (stage === "fetch-missing") return { kind: "ask-refetch" };
   if (ctx.hasUpstream && (ctx.ahead > 0 || ctx.cacheTreeBroken)) return { kind: "offer-reset" };
+  if (ctx.shallow) return { kind: "missing-shallow" };
   return { kind: "missing-remote" };
 }
 function summarizeFsckMissing(text) {
@@ -6822,6 +6931,15 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     /** Remote URL of the repository as of the last status (already redacted by the runner). */
     this.lastRemoteUrl = "";
     /**
+     * Where the vault sits relative to the repository, as the runner reports it.
+     * Absent means they coincide, which is every installation before this and
+     * every runner too old to report it — so the default is not a placeholder,
+     * it is the correct answer for the overwhelming majority of vaults.
+     */
+    this.rootOffset = ROOTS_COINCIDE;
+    /** One `exclude-add` per session at most; the runner's own add is idempotent. */
+    this.trashExcludeChecked = false;
+    /**
      * Warn once per session when the Termux-side runner predates this plugin
      * build. Updating main.js in the vault does not touch the runner script, so a
      * stale runner is a genuinely common failure mode (it shows up as
@@ -6916,13 +7034,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         finishInProgressOp: (kind) => kind === "merge" ? void this.cmdCommit() : void this.cmdContinueRebase(),
         abortInProgressOp: (kind) => kind === "merge" ? void this.cmdAbortMerge() : void this.cmdAbortRebase(),
         cancel: () => void this.cmdCancel(),
-        openFile: (p) => this.openVaultFile(p),
+        openFile: (p) => this.openRepoFile(p),
         openDiff: (p, group) => void this.openStatusDiff(p, group),
         openConflict: (p, pos) => void this.openConflict(p, pos),
         stage: (p) => void this.cmdStageFile(p),
         unstage: (p) => void this.cmdUnstageFile(p),
         discard: (p, group) => this.discardPath(p, group),
         syncState: () => this.pushStatusToView(),
+        panelShown: () => void this.refreshStatusIfStale(),
         openOutput: () => void this.openOutputPanel(),
         showChangeWords: () => this.sharedPrefs.showChangeWords,
         fileMenu: (p, group, pos) => {
@@ -6943,7 +7062,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       (leaf) => new HistoryView(leaf, {
         loadPage: (skip, limit) => this.loadRepoLogPage(skip, limit),
         openDiffAtCommit: (file, entry2) => void this.openCommitDiff(file, entry2),
-        openFile: (p) => this.openVaultFile(p),
+        openFile: (p) => this.openRepoFile(p),
         // Long press / right click on a file row: the file-at-commit menu
         // (restore, view as of the commit, diff, history, copy) — the same
         // answers the file-history panel gives for the same file (item 10).
@@ -7008,7 +7127,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         progressText: () => this.progressText ?? "",
         restoreBlock: (path, hunk, commitish) => this.restoreBlockFromCommit(path, hunk, commitish),
         openFileAt: (path, commitish) => {
-          if (commitish === "WORKTREE") this.openVaultFile(path);
+          if (commitish === "WORKTREE") this.openRepoFile(path);
           else void this.showFileAtCommit(path, commitish);
         }
       })
@@ -7018,10 +7137,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       (leaf) => new FileHistoryView(leaf, {
         loadPage: (path, skip, limit) => this.loadFileLogPage(path, skip, limit),
         loadCommitDiff: (e) => this.loadDiffText(e.pathAtCommit, `${e.hash}^`, e.hash),
-        readFile: (p) => this.readVaultTextFile(p),
-        writeFile: async (p, text) => {
-          await this.app.vault.adapter.write(p, text);
-        },
+        readFile: (p) => this.readRepoTextFile(p),
+        writeFile: (p, text) => this.writeRepoTextFile(p, text),
         stagePatch: (patch) => this.applyHunkPatch(patch, "index", false),
         restoreWholeFile: (p, e) => this.confirmRestore(p, e),
         viewAtCommit: (e) => void this.showFileAtCommit(e.pathAtCommit, e.hash, e.date),
@@ -7053,10 +7170,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.registerView(
       NGB_CONFLICT_VIEW,
       (leaf) => new ConflictView(leaf, {
-        readFile: (p) => this.readVaultTextFile(p),
-        writeFile: async (p, content) => {
-          await this.app.vault.adapter.write(p, content);
-        },
+        readFile: (p) => this.readRepoTextFile(p),
+        writeFile: (p, content) => this.writeRepoTextFile(p, content),
         stageFile: (p) => this.cmdStageFile(p),
         markersVisible: () => this.sharedPrefs.showConflictMarkers,
         showInvisibles: () => this.sharedPrefs.showInvisibles,
@@ -7083,7 +7198,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   registerFileMenu() {
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        this.buildGitMenu(menu, file.path);
+        const inRepo = this.repoPathOf(file.path);
+        if (inRepo === null) return;
+        this.buildGitMenu(menu, inRepo);
       })
     );
   }
@@ -7246,9 +7363,12 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       case "open-history":
         void this.openFileHistoryPanel(path);
         return;
-      case "open-external":
-        this.openWithDefaultApp(path);
+      case "open-external": {
+        const inVault = this.vaultPathOf(path);
+        if (inVault === null) new import_obsidian16.Notice(this.outsideVaultMessage(path));
+        else this.openWithDefaultApp(inVault);
         return;
+      }
       case "copy-path":
         void navigator.clipboard.writeText(path);
         new import_obsidian16.Notice("Path copied.");
@@ -7333,6 +7453,38 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       void this.maybeAutoStatus();
     }, secs * 1e3);
     this.registerInterval(this.statusPollId);
+  }
+  /**
+   * Re-read the status when the panel comes back and its snapshot has aged.
+   *
+   * The user's report: open the history panel, come back, and the git panel
+   * says the tree is clean over a file that changed while they were away. It
+   * is not a rendering fault — the panel is faithfully showing the last status
+   * it read, and nothing had read one since.
+   *
+   * Refreshing on EVERY panel open, which is the obvious fix, costs a full
+   * Termux round trip — ten to fifteen seconds on the device this was reported
+   * from — for every sidebar tab switch, including the ones where nothing
+   * could possibly have changed. So it is gated on age instead: a snapshot
+   * younger than the floor is still the answer, and one older than it is a
+   * claim nobody has checked.
+   *
+   * `statusRefreshSeconds` (device-local, 0 = off by default) is the user's own
+   * statement of how often this device should wake Termux, so it wins when it
+   * is set. The floor exists for the far more common case where it is off:
+   * without one, "off" would mean the panel never corrects itself at all,
+   * which is the state being fixed.
+   */
+  async refreshStatusIfStale() {
+    const s = this.deviceSettings;
+    if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled || !s.authToken) return;
+    if (this.lock.active || this.runningAction !== null) return;
+    if (!this.lastStatus) return;
+    const configured = Math.floor(s.statusRefreshSeconds);
+    const maxAgeMs = (Number.isFinite(configured) && configured > 0 ? configured : 60) * 1e3;
+    const age = Date.now() - this.lastStatus.fetchedAtMs;
+    if (!Number.isFinite(age) || age < maxAgeMs) return;
+    await this.cmdStatus(true);
   }
   async maybeAutoStatus() {
     const s = this.deviceSettings;
@@ -7463,7 +7615,6 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     await this.tryImportPairing();
     await this.reconcileAfterRestart();
     this.offerInterruptedRepair();
-    await this.loadGitignore();
     if (import_obsidian16.Platform.isAndroidApp && !this.deviceSettings.authToken && !this.store.getValue("setup-guide-shown")) {
       this.store.setValue("setup-guide-shown", "1");
       this.openSetupGuide("First run: this device is not set up yet.");
@@ -7768,31 +7919,6 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       }
     ];
     new ResultModal(this.app, title, lines, { actions }).open();
-  }
-  /**
-   * The repair's route into that window. The triage names DIRECTORIES; the
-   * window describes MANIFESTS, and the two can disagree — a manifest deleted
-   * by hand, or one the runner never wrote. Only the copies that can be
-   * described are offered for deletion here, because the confirmation quotes a
-   * size and a commit count, and inventing either for a directory nobody can
-   * read would put a fabricated "0 commits" in front of a permanent deletion.
-   */
-  async openPreviousRepoModalFromRepair(dirs) {
-    const root = new RuntimePaths(this.app.vault.configDir).root;
-    const known = (await this.listPreviousRepos()).filter((r) => dirs.includes(r.dir));
-    if (known.length === 0) {
-      new ResultModal(
-        this.app,
-        "The set-aside copy cannot be described",
-        [
-          `${dirs.join(", ")} is in ${root}/, but the manifest that records its size, branch and commit count is not \u2014 so there is nothing to show before a deletion that cannot be undone.`,
-          `Look at it in Termux, and delete it there once you are sure nothing is lost: rm -rf "<vault>/${root}/${dirs[0] ?? ""}"`
-        ],
-        { isError: true }
-      ).open();
-      return;
-    }
-    this.showPreviousRepoModal(known, "A previous repository is still set aside");
   }
   confirmDeletePreviousRepos(repos) {
     const total = repos.reduce((n, r) => n + r.sizeKb, 0);
@@ -9033,9 +9159,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
    * the trailing slash git prints is not a path the adapter recognises. The
    * old loop therefore trashed the first entry and quietly logged failures for
    * the rest, which looked like "only one file was deleted".
+   *
+   * Takes REPOSITORY paths and works in VAULT paths from the first line: the
+   * expansion stats and lists through the adapter, so every path has to be
+   * converted before any of it, not at the `trashLocal` call.
    */
   async trashAll(paths) {
     const adapter = this.app.vault.adapter;
+    await this.ensureTrashExcluded();
     let moved = 0;
     let absent = 0;
     const failed = [];
@@ -9063,7 +9194,13 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     };
     const targets = [];
     for (const raw of paths) {
-      for (const t of await expand(raw)) if (!targets.includes(t)) targets.push(t);
+      const inVault = this.vaultPathOf(raw);
+      if (inVault === null) {
+        failed.push(raw);
+        this.log.add("error", "sparse", this.outsideVaultMessage(raw));
+        continue;
+      }
+      for (const t of await expand(inVault)) if (!targets.includes(t)) targets.push(t);
     }
     for (const t of targets) {
       try {
@@ -9393,7 +9530,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       this.app,
       {
         title: `Free up ${formatSize(totalKb(before))}?`,
-        body: maintenanceReportLines(before, rescue),
+        body: maintenanceReportLines(before, rescue, this.footprintState()?.shallow === true),
         confirmLabel: "Clean up now",
         icon: "eraser"
       },
@@ -9535,6 +9672,41 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       () => new import_obsidian16.Notice("Full history restored on this device.")
     );
   }
+  /**
+   * Re-request the depth window on a repository that is ALREADY shallow.
+   *
+   * `repo-shallow` runs `git fetch --depth=<N>`, which asks the remote for
+   * exactly the newest N commits and rewrites `.git/shallow` as it lands. On a
+   * shallow repository missing objects, that is the whole targeted repair: one
+   * bounded download of the window this device is set to keep, instead of the
+   * full history a re-clone or an unshallow would pull.
+   *
+   * It exists because the first answer offered for that state was "download
+   * the full history", and the user's objection was the right one: it is a
+   * large download, it can break halfway, and the point of the setting is that
+   * they do not want the result — they would delete it again. Same runner
+   * action as the toggle, no new action, no reinstall.
+   *
+   * `cmdShallowEnable` refuses when the repository is already shallow, which
+   * is correct for a toggle and wrong for a repair, so this is its own route.
+   */
+  async cmdShallowRefresh() {
+    const depth = this.deviceSettings.shallowDepth;
+    await this.footprintChange(
+      `Re-request the newest ${depth} commits?`,
+      [
+        `One bounded download: git asks the remote for the newest ${depth} commits, which is the window this device already keeps, and rewrites the shallow boundary as it lands.`,
+        "Anything missing INSIDE that window comes back. Anything older was never on this device and still will not be \u2014 which is what the setting is for.",
+        "Nothing is deleted and the history stays shortened."
+      ],
+      `Re-request ${depth} commits`,
+      "Native Git: could not re-request the history",
+      "repo-shallow",
+      { depth },
+      false,
+      () => new import_obsidian16.Notice(`Re-requested the newest ${depth} commits. Run the repair again to see what is left.`)
+    );
+  }
   async cmdPartialEnable() {
     const fp = await this.ensureFootprintState();
     if (fp === null) return;
@@ -9605,45 +9777,102 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     return ignoreEntryMatches(this.excludeLines, path);
   }
   // .gitignore is a plain tracked file in the vault: edited directly, no Termux.
+  /**
+   * `.gitignore` through the runner, always (ADR-003, decision 5).
+   *
+   * It lives at the REPOSITORY root, and the plugin used to read and write it
+   * through Obsidian's vault adapter — which works only while the repository
+   * root IS the vault root. With the vault inside the repository the file is
+   * above it and the adapter cannot reach it at all; worse, the file the
+   * adapter WOULD reach at the same name is a different file, and writing it
+   * would report success. Routing through the runner unconditionally rather
+   * than only when it is out of reach is deliberate: two behaviours for one
+   * question is what the one-surface rule refuses everywhere else, and this
+   * removes the last direct write the plugin performed on a tracked file.
+   *
+   * The runner is where `ensure_trailing_newline` lives, which is the guard
+   * against the corruption this project already shipped once (§4 rule 10).
+   *
+   * A runner below v18 has no such action. Rather than falling back to the
+   * adapter — which is the wrong file exactly when it matters — the routes
+   * say what is needed, in the shape every other version floor uses.
+   */
+  gitignoreAvailable() {
+    return this.lastRunnerVersion >= 18 || this.lastRunnerVersion === 0;
+  }
+  gitignoreNeedsNewerRunner() {
+    new ResultModal(
+      this.app,
+      "Termux runner is too old for this",
+      [
+        `Editing .gitignore needs runner v18; this device answers with v${this.lastRunnerVersion}. It moved into the runner because the file lives at the repository root, which the plugin cannot reach once that is not the vault root.`,
+        RUNNER_OUTDATED_HINT
+      ],
+      {
+        isError: true,
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            cta: true,
+            keepOpen: true,
+            onClick: () => this.copyCommandAndOpenTermux()
+          }
+        ]
+      }
+    ).open();
+  }
   async loadGitignore() {
-    try {
-      const raw = await this.app.vault.adapter.read(".gitignore");
-      this.gitignoreLines = raw.split(/\r?\n/);
-    } catch {
+    if (!this.gitignoreAvailable()) {
       this.gitignoreLines = [];
+      return [];
     }
+    const result = await this.runOperation("gitignore-list", {});
+    if (!result?.ok) {
+      this.gitignoreLines = [];
+      return [];
+    }
+    this.absorbGitignoreList(result.data?.gitignoreList);
     return parseIgnoreEntries(this.gitignoreLines.join("\n"));
+  }
+  absorbGitignoreList(raw) {
+    if (typeof raw !== "string") return;
+    this.gitignoreLines = raw.split(/\r?\n/);
   }
   isGitignored(path) {
     return ignoreEntryMatches(parseIgnoreEntries(this.gitignoreLines.join("\n")), path);
   }
+  /** The cached `.gitignore`, for the settings tab and for tests. */
+  currentGitignoreLines() {
+    return [...this.gitignoreLines];
+  }
   /** `standalone = false`: bulk route; it warns and refreshes once itself. */
   async gitignoreAdd(entry2, standalone = true) {
-    if (entry2.trim() === "" || hasControlChars(entry2)) {
+    const pattern = entry2.trim();
+    if (pattern === "" || hasControlChars(pattern)) {
       new import_obsidian16.Notice("Invalid .gitignore entry.");
       return;
     }
-    await this.loadGitignore();
-    if (this.gitignoreLines.some((l) => l.trim() === entry2.trim())) return;
-    while (this.gitignoreLines.length > 0 && this.gitignoreLines[this.gitignoreLines.length - 1] === "") {
-      this.gitignoreLines.pop();
-    }
-    this.gitignoreLines.push(entry2.trim());
-    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
-    new import_obsidian16.Notice(`Added to .gitignore: ${entry2.trim()}`);
+    if (!this.gitignoreAvailable()) return this.gitignoreNeedsNewerRunner();
+    const result = await this.runOperation("gitignore-add", { pattern });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: .gitignore change failed", result);
+    this.absorbGitignoreList(result.data?.gitignoreList);
+    new import_obsidian16.Notice(`Added to .gitignore: ${pattern}`);
     if (standalone) {
-      this.warnIfRuleTargetsTracked([entry2.trim().replace(/^\//, "").replace(/\/$/, "")]);
-      await this.refreshAfterRuleChange();
+      this.warnIfRuleTargetsTracked([pattern.replace(/^\//, "").replace(/\/$/, "")]);
+      await this.refreshAfterRuleChange(result.data);
     }
   }
   async gitignoreRemove(entry2, standalone = true) {
-    await this.loadGitignore();
-    const before = this.gitignoreLines.length;
-    this.gitignoreLines = this.gitignoreLines.filter((l) => l.trim() !== entry2.trim());
-    if (this.gitignoreLines.length === before) return;
-    await this.app.vault.adapter.write(".gitignore", this.gitignoreLines.join("\n") + "\n");
-    new import_obsidian16.Notice(`Removed from .gitignore: ${entry2.trim()}`);
-    if (standalone) await this.refreshAfterRuleChange();
+    const pattern = entry2.trim();
+    if (pattern === "") return;
+    if (!this.gitignoreAvailable()) return this.gitignoreNeedsNewerRunner();
+    const result = await this.runOperation("gitignore-remove", { pattern });
+    if (!result) return;
+    if (!result.ok) return this.renderMutationError("Native Git: .gitignore change failed", result);
+    this.absorbGitignoreList(result.data?.gitignoreList);
+    new import_obsidian16.Notice(`Removed from .gitignore: ${pattern}`);
+    if (standalone) await this.refreshAfterRuleChange(result.data);
   }
   isSparseExcluded(path) {
     return this.deviceSettings.derivedProtectedPaths.includes(path);
@@ -10026,6 +10255,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   /** Parse the status fields every mutating action returns and refresh UI. */
   absorbStatusData(d) {
     if (typeof d.remoteUrl === "string") this.lastRemoteUrl = d.remoteUrl;
+    this.rootOffset = parseRootOffset({
+      vaultInRepo: d.vaultInRepo,
+      repoInVault: d.repoInVault
+    });
+    this.absorbGitignoreList(d.gitignoreList);
     if (typeof d.rescueBranches === "string") this.offerRescueCleanup(d.rescueBranches);
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);
@@ -10044,6 +10278,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       sparse,
       lastCommit: parseLastCommit(d.lastCommit ?? ""),
       fetchedAt: (/* @__PURE__ */ new Date()).toLocaleString(),
+      fetchedAtMs: Date.now(),
       mergeInProgress: d.mergeInProgress === "true",
       mergeMsg: d.mergeMsg?.trim() ? d.mergeMsg : void 0,
       // Absent on runners older than this one, which is exactly "no rebase":
@@ -10195,7 +10430,7 @@ ${err?.stderr ?? ""}`,
       const conflicts = (d.conflicts ?? "").split("\n").map((l) => l.trim()).filter((l) => l !== "");
       this.statusBar?.set("conflict", `(${conflicts.length})`);
       new ConflictModal(this.app, conflicts, {
-        openFile: (path) => this.openVaultFile(path),
+        openFile: (path) => this.openRepoFile(path),
         abortMerge: () => this.cmdAbortMerge()
       }).open();
       return;
@@ -10450,8 +10685,8 @@ ${procs.join("\n")}`
       command: dropGlobalCredHelperCommand(),
       title: "Remove the global credential helper",
       body: [
-        "1. The command is copied. In Termux: paste, Enter. It removes credential.helper from the GLOBAL git configuration and then lists what credential.* keys are left there \u2014 names only, no values.",
-        "2. This affects every repository on the device, not only this vault. Repositories with a helper of their own keep working; any that relied on the global one asks for credentials again the next time it reaches its remote."
+        "1. The command is copied. In Termux: paste, Enter. One line, no output \u2014 it removes credential.helper from the GLOBAL git configuration and reads no value.",
+        "2. Come back and press Check again: the helper is gone from the scope list. This affects every repository on the device, not only this vault \u2014 ones with a helper of their own keep working; any that relied on the global one asks for credentials again next time it reaches its remote."
       ]
     });
   }
@@ -10510,32 +10745,50 @@ ${procs.join("\n")}`
     const hasAny = nameScopes.length > 0 && emailScopes.length > 0;
     const globalHelper = helperScopes.includes("global") || helperScopes.includes("system");
     const localHelper = helperScopes.includes("local");
+    const scopeTone = (scopes) => scopes.includes("local") ? "ok" : scopes.length === 0 ? "bad" : "warn";
     const lines = [
-      hasAny ? "git has an identity to commit with. Where each key is set (values are never read):" : "git has NO identity to commit with \u2014 the next commit or sync will fail. Where each key is set:",
-      `user.name: ${nameScopes.join(", ") || "not set in any scope"}`,
-      `user.email: ${emailScopes.join(", ") || "not set in any scope"}`,
-      `credential.helper: ${helperScopes.join(", ") || "not set in any scope"}`
+      {
+        note: hasAny ? "git can commit here." : "git has NO identity \u2014 the next commit or sync fails.",
+        tone: hasAny ? "ok" : "bad"
+      },
+      {
+        fact: "user.name",
+        value: nameScopes.join(", ") || "not set",
+        tone: scopeTone(nameScopes)
+      },
+      {
+        fact: "user.email",
+        value: emailScopes.join(", ") || "not set",
+        tone: scopeTone(emailScopes)
+      },
+      {
+        fact: "credential.helper",
+        value: helperScopes.join(", ") || "not set",
+        tone: globalHelper ? "warn" : helperScopes.length === 0 ? "bad" : "ok"
+      },
+      "Scopes only \u2014 no value is ever read."
     ];
     if (!hasLocal) {
-      lines.push(
-        "",
-        hasGlobal ? "This repository has no LOCAL identity, so commits fall back to the global one \u2014 silently, and again after every re-clone. Set a local identity first; only then is removing the global one safe." : "This repository has no LOCAL identity. Set one with the button below; the values are typed in Termux and stay there."
-      );
+      lines.push({
+        note: hasGlobal ? "No LOCAL identity: commits use the global one, and will again after every re-clone. Set a local one first \u2014 only then is removing the global one safe." : "No LOCAL identity. Set one below; the values are typed in Termux and stay there.",
+        tone: hasGlobal ? "warn" : "bad"
+      });
     } else if (hasGlobal) {
-      lines.push(
-        "",
-        "A global identity also exists. Any repository on this device WITHOUT a local identity commits under it; now that this repository carries its own, the global one can be removed."
-      );
+      lines.push({
+        note: "A global identity also exists: every repository here WITHOUT a local one commits under it.",
+        tone: "warn"
+      });
     }
     if (globalHelper) {
-      lines.push(
-        "",
-        "A global credential helper exists, and helpers are asked global-first: it answers BEFORE this repository's own credential file. The reset makes the local file authoritative; the global configuration is not touched."
-      );
+      lines.push({
+        note: "Helpers are asked global-first, so the global one answers BEFORE this repository's file.",
+        tone: "warn"
+      });
       if (localHelper) {
-        lines.push(
-          "This repository already has a helper of its own, so the global one can also be removed outright \u2014 which is the only thing that stops it answering in every OTHER repository on this device, including ones cloned later. That is a Termux command, not a button: it reaches beyond this vault."
-        );
+        lines.push({
+          note: "This repository has its own, so the global one can go \u2014 that ends it for every other repository too.",
+          tone: "warn"
+        });
       }
     }
     const actions = [];
@@ -10564,6 +10817,7 @@ ${procs.join("\n")}`
         });
       }
     }
+    actions.push({ label: "Check again", onClick: () => void this.cmdCheckIdentity() });
     new ResultModal(this.app, "Git identity check", lines, {
       actions: actions.length > 0 ? actions : void 0
     }).open();
@@ -10836,10 +11090,8 @@ ${procs.join("\n")}`
    */
   async restoreBlockFromCommit(path, hunk, commitish) {
     const outcome = await restoreBlockInFile(path, hunk, {
-      readFile: (p) => this.readVaultTextFile(p),
-      writeFile: async (p, content) => {
-        await this.app.vault.adapter.write(p, content);
-      },
+      readFile: (p) => this.readRepoTextFile(p),
+      writeFile: (p, content) => this.writeRepoTextFile(p, content),
       stagePatch: (patch) => this.applyHunkPatch(patch, "index", false)
     });
     new import_obsidian16.Notice(describeRestore(outcome, commitish.replace(/\^+$/, "").slice(0, 8)));
@@ -11065,13 +11317,24 @@ ${procs.join("\n")}`,
         continue;
       }
       if (item.step === "leftovers" && item.act === "previous-git") {
+        const dirs = facts.previousGitDirs.filter((d2) => isPreviousRepoDir(d2));
+        if (dirs.length === 0) continue;
+        const known = (await this.listPreviousRepos()).filter((r) => dirs.includes(r.dir));
+        if (known.length === 0) {
+          const root = new RuntimePaths(this.app.vault.configDir).root;
+          summary.push(
+            `${dirs.join(", ")} is set aside in ${root}/, but the manifest that records its size and commit count is not there, so nothing here can say what is in it. Look at it in Termux and delete it there once you are sure nothing is lost: rm -rf "<vault>/${root}/${dirs[0]}"`
+          );
+          continue;
+        }
+        const total = known.reduce((n, r) => n + r.sizeKb, 0);
         summary.push(
-          `A previous repository is still set aside (${facts.previousGitDirs.join(", ")}) and holds disk until it is deleted.`
+          `A previous repository is still set aside (${known.map((r) => r.dir).join(", ")}), holding ${formatSize(total)} until it is deleted.`
         );
         actions.push({
-          label: "Delete the previous repository\u2026",
+          label: `Delete the previous repository (${formatSize(total)})\u2026`,
           keepOpen: true,
-          onClick: () => void this.openPreviousRepoModalFromRepair(facts.previousGitDirs)
+          onClick: () => this.showPreviousRepoModal(known, "A previous repository is still set aside")
         });
         continue;
       }
@@ -11091,6 +11354,7 @@ ${procs.join("\n")}`,
       `${stepLabel} finished ok=${result.ok}.`,
       [
         d.removedCount !== void 0 ? `removed: ${d.removedCount}` : "",
+        d.commitGraphDropped === "true" ? "commit-graph cache: dropped (stale)" : "",
         (d.recoveredBy ?? "") !== "" ? `recovered by: ${d.recoveredBy}` : "",
         d.recoveredCount !== void 0 ? `recovered: ${d.recoveredCount}` : "",
         (d.fsckMissing ?? "").trim() !== "" ? `still missing:
@@ -11141,9 +11405,14 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
       const ctx = {
         ahead: Number(sd.aheadCount ?? "0"),
         cacheTreeBroken: sd.cacheTreeBroken === "true",
-        hasUpstream: sd.hasUpstream === "true"
+        hasUpstream: sd.hasUpstream === "true",
+        // From the status fields the scan carries, not from a setting: the
+        // toggle mirrors `.git/shallow`, and this decides whether a failed
+        // refetch is allowed to conclude anything about the remote.
+        shallow: this.footprintState()?.shallow === true
       };
-      const removedLine = removed === 0 ? "No empty object files were found; nothing needed removing." : `Removed ${removed} empty object file${removed === 1 ? "" : "s"}.`;
+      const graphLine = sd.commitGraphDropped === "true" ? " Dropped a stale commit-graph cache; git rebuilds it once the history is whole." : "";
+      const removedLine = (removed === 0 ? "No empty object files were found; nothing needed removing." : `Removed ${removed} empty object file${removed === 1 ? "" : "s"}.`) + graphLine;
       let stage = "scan";
       let findings = {
         fsckMissing: (sd.fsckMissing ?? "").trim(),
@@ -11214,26 +11483,31 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
         if (decision.kind === "clean") {
           lines.push("", "The object store is complete: git can read everything it references.");
           const fp7 = this.footprintState();
-          if (fp7?.partial === true && (this.lastRunnerVersion >= 14 || this.lastRunnerVersion === 0)) {
+          const v14 = this.lastRunnerVersion >= 14 || this.lastRunnerVersion === 0;
+          let stats = parseCountObjects(sd.countObjects ?? "");
+          let blobKb = 0;
+          if (fp7?.partial === true && v14) {
             const meas = await this.repairStep("maintenance-scan", {}, "repair 7/7: footprint check");
             if (meas !== null && meas.ok) {
               const d7 = meas.data ?? {};
-              const before = parseCountObjects(d7.countObjects ?? "");
-              const blobKb = Number(d7.blobDiskKb ?? "0");
-              if (blobKb >= 100 * 1024) {
-                lines.push(
-                  "",
-                  `This repository is set to stay lightweight, but its packs hold ${formatSize(blobKb)} of file content the filter allows shedding${recoveredBy === "refetch" || recoveredBy === "recovery copy" ? " \u2014 the refetch brought back what had been shed" : ""}. The cleanup takes it back.`
-                );
-                finalActions = [
-                  ...finalActions,
-                  {
-                    label: `Free up ${formatSize(blobKb)}\u2026`,
-                    onClick: () => void this.runMaintenanceSteps(before)
-                  }
-                ];
-              }
+              stats = parseCountObjects(d7.countObjects ?? "");
+              blobKb = Number(d7.blobDiskKb ?? "0");
             }
+          }
+          const offer = decideStorageOffer({ stats, blobKb, partial: fp7?.partial === true });
+          if (offer !== null) {
+            const exact = offer.reclaimKb === blobKb && blobKb > 0;
+            lines.push(
+              "",
+              `The object store is ${formatSize(totalKb(stats))} and ${exact ? "holds" : "carries"} ${formatSize(offer.reclaimKb)} of ${offer.reason}${recoveredBy === "refetch" || recoveredBy === "recovery copy" ? " \u2014 a refetch downloads the whole history again and leaves the previous copy behind" : ""}.${exact ? " The cleanup takes it back." : " How much the cleanup actually frees is measured while it runs; this is the upper bound."}`
+            );
+            finalActions = [
+              ...finalActions,
+              {
+                label: `Free up to ${formatSize(offer.reclaimKb)}\u2026`,
+                onClick: () => void this.runMaintenanceSteps(stats)
+              }
+            ];
           }
           new ResultModal(this.app, "Repository repaired", lines, {
             stdout: sd.removedObjects,
@@ -11269,6 +11543,34 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
                 label: "Rebuild on the remote state",
                 cta: true,
                 onClick: () => void this.cmdRepairResetUpstream(ctx.ahead)
+              },
+              ...finalActions,
+              this.repairRunAgainAction()
+            ]
+          }).open();
+          return;
+        }
+        if (decision.kind === "missing-shallow") {
+          const depth = this.deviceSettings.shallowDepth;
+          lines.push(
+            "",
+            "Nothing you do needs these objects. Commit, push, pull, sync, the diffs and the history inside the window all walk refs and the index, and they are all working \u2014 the check that names these walks further than any operation does, which on a shortened history means it can reach objects this device was never meant to hold.",
+            "Why the refetch changed nothing: it asks the remote for the depth this repository is set to, so older objects were never requested. That says nothing about whether the remote still has them.",
+            `The bounded fix is to re-request the newest ${depth} commits \u2014 one download of the window you already keep, which also rewrites the shallow boundary. Anything missing inside the window comes back; anything older stays absent, which is what the setting is for.`,
+            "Leaving it exactly as it is remains a legitimate answer while everything works.",
+            summarizeFsckMissing(findings.fsckMissing)
+          );
+          new ResultModal(this.app, "History here is shortened", lines, {
+            stderr: findings.fsckRemaining,
+            actions: [
+              {
+                label: `Re-request the newest ${depth} commits\u2026`,
+                cta: true,
+                onClick: () => void this.cmdShallowRefresh()
+              },
+              {
+                label: "Download the full history instead\u2026",
+                onClick: () => void this.cmdUnshallow()
               },
               ...finalActions,
               this.repairRunAgainAction()
@@ -11514,13 +11816,19 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
     this.notify("Rebase continued.");
   }
   // ---------------------------------------------------- phase 4: history/diff
+  /** The active note as GIT names it, or null with the reason already shown. */
   activeFilePath() {
     const f = this.app.workspace.getActiveFile();
     if (!f) {
       new import_obsidian16.Notice("No active file.");
       return null;
     }
-    return f.path;
+    const inRepo = this.repoPathOf(f.path);
+    if (inRepo === null) {
+      new import_obsidian16.Notice(`${f.path} is in the vault but outside the repository, so git knows nothing about it.`);
+      return null;
+    }
+    return inRepo;
   }
   /**
    * History / view-at-commit / restore for the active file. All three commands
@@ -11590,7 +11898,7 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           if (!result2) return;
           if (!result2.ok) return this.renderMutationError("Native Git: restore failed", result2);
           const bytes = decodeBase64ToBytes(result2.data?.contentBase64 ?? "");
-          await this.app.vault.adapter.writeBinary(
+          await this.writeRepoBinary(
             currentPath,
             bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
           );
@@ -11697,7 +12005,38 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
     });
     await this.app.workspace.revealLeaf(leaf);
   }
-  // ------------------------------------------------- conflict resolution
+  // --------------------------------------------- the adapter boundary
+  /*
+   * Everything below converts between git's paths and Obsidian's, and it is
+   * the ONLY place in the plugin that does. Paths out of git are
+   * repository-relative; Obsidian's adapter is vault-relative by definition.
+   * While the two roots coincide the conversion is the identity function and
+   * these wrappers cost nothing, which is exactly why the assumption survived
+   * this long: with two roots, every one of these calls would address a
+   * different real file and report success.
+   *
+   * A path with no counterpart answers `null` rather than being guessed at.
+   * That case is real and not an error: with the vault inside the repository,
+   * repository files above it are listed, diffed and staged perfectly well
+   * through the runner — Obsidian simply has no name for them.
+   */
+  /** Obsidian's name for a repository path, or null when it is outside the vault. */
+  vaultPathOf(repoPath) {
+    return toVault(this.rootOffset, repoPath);
+  }
+  /** git's name for a vault path, or null when it is outside the repository. */
+  repoPathOf(vaultPath) {
+    return toRepo(this.rootOffset, vaultPath);
+  }
+  /** One sentence for every "Obsidian cannot reach this file" ending. */
+  outsideVaultMessage(repoPath) {
+    return `${repoPath} is in the repository but outside this vault, so Obsidian cannot open or write it. Use Termux for that file; everything the panel shows about it still works.`;
+  }
+  /** Repository file as text, or null when it is binary, missing or out of reach. */
+  async readRepoTextFile(repoPath) {
+    const p = this.vaultPathOf(repoPath);
+    return p === null ? null : this.readVaultTextFile(p);
+  }
   /** Vault file as text, or null when it looks binary (NUL byte probe). */
   async readVaultTextFile(path) {
     try {
@@ -11706,6 +12045,72 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
     } catch {
       return null;
     }
+  }
+  /**
+   * Write a repository file through Obsidian. Throws rather than returning a
+   * flag: every caller already sits inside a try that reports the failure to
+   * the user, and a silent no-op here is a "restored" notice over a file that
+   * was never touched.
+   */
+  async writeRepoTextFile(repoPath, text) {
+    const p = this.vaultPathOf(repoPath);
+    if (p === null) throw new Error(this.outsideVaultMessage(repoPath));
+    await this.app.vault.adapter.write(p, text);
+  }
+  async writeRepoBinary(repoPath, data) {
+    const p = this.vaultPathOf(repoPath);
+    if (p === null) throw new Error(this.outsideVaultMessage(repoPath));
+    await this.app.vault.adapter.writeBinary(p, data);
+  }
+  /**
+   * Move a repository file to Obsidian's trash. The trash is always `.trash`
+   * at the VAULT root, so a file outside the vault cannot go there at all —
+   * and `trashExcludePattern` is what keeps whatever does land there from
+   * being committed straight back by `git add -A`.
+   */
+  async trashRepoPath(repoPath) {
+    const p = this.vaultPathOf(repoPath);
+    if (p === null) throw new Error(this.outsideVaultMessage(repoPath));
+    await this.app.vault.adapter.trashLocal(p);
+  }
+  /** Open a repository file in Obsidian, or say why it cannot be opened. */
+  openRepoFile(repoPath) {
+    const p = this.vaultPathOf(repoPath);
+    if (p === null) {
+      new import_obsidian16.Notice(this.outsideVaultMessage(repoPath));
+      return;
+    }
+    this.openVaultFile(p);
+  }
+  /**
+   * Keep Obsidian's trash out of git, once per vault.
+   *
+   * `.trash` is excluded nowhere in this project and staging is `git add -A`,
+   * so anything that lands there is committed: a note the user deleted in
+   * Obsidian, a file this plugin moved out of the way, and — the bad one — a
+   * file the sparse repair moved out of a PROTECTED path, which sparse hides
+   * precisely so it never travels. The exclude file rather than `.gitignore`:
+   * per clone, never committed, so it stays a decision about this device and
+   * cannot arrive on another one as a change. Idempotent on both sides, and
+   * silent: it is a repair of the plugin's own footprint, not a rule the user
+   * asked for, and it appears in the ignore-rule list where they can remove it.
+   */
+  async ensureTrashExcluded() {
+    const pattern = trashExcludePattern(this.rootOffset);
+    if (pattern === null || this.trashExcludeChecked) return;
+    if (this.excludeLines.some((l) => l.trim().replace(/^\//, "") === pattern)) {
+      this.trashExcludeChecked = true;
+      return;
+    }
+    const result = await this.runOperation("exclude-add", { path: pattern });
+    if (!result?.ok) return;
+    this.trashExcludeChecked = true;
+    this.absorbExcludeList(result.data?.excludeList);
+    this.log.add(
+      "info",
+      "exclude-add",
+      `${pattern} excluded from git on this device: Obsidian's trash is staged by 'git add -A' otherwise, including files moved out of a sparse-protected path.`
+    );
   }
   /**
    * Tap on a conflicted file: text files get the per-block resolution pane;
@@ -12428,11 +12833,12 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
           this.notify(`Deleted ${count}.`);
           return;
         }
+        await this.ensureTrashExcluded();
         let moved = 0;
         for (const t of targets) {
           const p = t.endsWith("/") ? t.slice(0, -1) : t;
           try {
-            await this.app.vault.adapter.trashLocal(p);
+            await this.trashRepoPath(p);
             moved += 1;
           } catch (e) {
             this.log.add("error", "discard-file", `Trash failed for ${p}: ${String(e)}`);

@@ -11,9 +11,9 @@ The request never got an answer. The plugin writes a cancel flag, so the operati
 
 In order of likelihood:
 
-1. **Companion app missing or unpermitted.** Open the companion; all three checklist items must be green.
+1. **Companion app missing or unpermitted.** Open the companion; the first three checklist items must be green.
 2. **No profile for this vault.** The local check reports when `runner.log` has never appeared in *this* vault's runtime folder: no Termux profile points here (a second vault that was never paired, or the installer was pointed at another path). Use *Pair this vault* in the settings or the setup guide, or re-run the install command with this vault's path. Other vaults keep their own profiles and tokens.
-3. **Termux is closed or was force-stopped** (swiped away, or battery optimization killed it). Android then refuses to start its background service, so the trigger arrives at the companion but never reaches the runner. The companion detects this case and opens Termux for you (toast: "Termux is closed…"); Bridge check also offers an **Open Termux** button. Keep Termux running (its persistent notification is enough) and consider excluding it from battery optimization.
+3. **Termux is closed or was force-stopped** (swiped away, or battery optimization killed it). Android then refuses to start its background service, so the trigger arrives at the companion but never reaches the runner. The companion detects this case and opens Termux for you (toast: "Termux is closed…"); Bridge check also offers an **Open Termux** button. Keep Termux running (its persistent notification is enough) and exclude it from battery optimization: the companion's step 4 opens the right settings page (Battery → Unrestricted; on Samsung also *Never sleeping apps* under Background usage limits).
 4. **A very slow network operation.** Raise the timeout in settings; the runner itself caps network git at 120 s per command.
 
 Recovery path: run `~/.config/native-git-bridge/runner.sh` by hand in Termux and watch its output.

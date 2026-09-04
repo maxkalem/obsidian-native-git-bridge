@@ -68,22 +68,20 @@ export function safeDirectoryCommand(repoPathHint: string): string | null {
  * in a way the reset is not — hence the terminal, where the user runs it
  * themselves and sees the result, rather than a one-tap action.
  *
- * `--unset-all` needs no value, so nothing is read. The listing that follows
- * prints key NAMES only, and `|| echo` is not decoration: `--get-regexp`
- * exits 1 when it matches nothing, which after a successful removal is
- * exactly what happens, and a bare non-zero exit reads as the command having
- * failed. `--no-pager` for the same reason as the identity command — a
- * device with a broken `core.pager` dies on the listing AFTER the removal
- * already happened.
+ * `--unset-all` needs no value, so nothing is read, and one line is the whole
+ * command. It carried a verification listing and an `|| echo` at first; both
+ * are gone, on the user's rule (2026-08-28): **a command that is one action
+ * says nothing about itself.** An echo earns its place when the command runs
+ * in several steps, takes long enough that silence reads as a hang, or waits
+ * for the user to type something — the identity command's closing listing is
+ * exactly that case, because it proves what the two prompts wrote. Here the
+ * check is one tap away in the window that offered the removal: "Check again"
+ * re-reads the scopes and shows the helper gone.
  *
  * No repository path: the global configuration is the same from anywhere.
  */
 export function dropGlobalCredHelperCommand(): string {
-  return (
-    `git config --global --unset-all credential.helper; ` +
-    `git --no-pager config --global --name-only --get-regexp '^credential\\.' ` +
-    `|| echo "no credential.* left in the global configuration"`
-  );
+  return "git config --global --unset-all credential.helper";
 }
 
 /** Profile ids are generated, and this is their whole alphabet. */

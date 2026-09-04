@@ -15,13 +15,14 @@ Note: the companion app never installs anything itself. It can only open F-Droid
 
 ## Step 2: Companion app
 
-Install `git-bridge-companion.apk` from the GitHub release (or, if the release carries only `git-bridge-companion-DEBUG-SIGNATURE.apk`, take that one: it works, but future updates will require uninstalling it first). Open it: it shows a three-step checklist.
+Install `git-bridge-companion.apk` from the GitHub release (or, if the release carries only `git-bridge-companion-DEBUG-SIGNATURE.apk`, take that one: it works, but future updates will require uninstalling it first). Open it: it shows a four-step checklist.
 
 1. *Termux installed*: detected automatically.
 2. *Run commands in Termux environment*: tap to grant the Android permission.
 3. *Round trip*: verified automatically after step 3 below (the app triggers the runner through the real RUN_COMMAND path and shows a green checkmark when a result comes back).
+4. *Termux may run in the background*: tap to open Termux's Android settings and choose Battery → Unrestricted. This one is advisory: everything you start from an open Obsidian works without it. It matters for what runs after Obsidian leaves the screen — sync-on-close — because battery optimisation, and on Samsung the *Sleeping apps* and *Deep sleeping apps* lists under Background usage limits, stop Termux exactly then. On Samsung, also add Termux to *Never sleeping apps*.
 
-All three checkmarks must be green before the bridge can work.
+The first three checkmarks must be green before the bridge can work.
 
 ## Step 3: one pasted line in Termux
 

@@ -11,6 +11,31 @@
  */
 
 export const __notices: string[] = [];
+
+/**
+ * Answer every ConfirmModal automatically, for the tests that need to reach
+ * what lies BEYOND a confirmation.
+ *
+ * `open()` deliberately does not call `onOpen()` — orchestration tests assert
+ * which window appeared, not its DOM — so the confirm buttons are never built
+ * and the decision callback never fires. A walk that ends past a confirmation
+ * (the repair's refetch, for one) therefore hangs until vitest's timeout.
+ * Opt-in and reset between tests, because "the confirmation was NOT taken" is
+ * exactly what several other tests assert.
+ */
+export const __autoConfirm = { answer: null as boolean | null };
+/** Body text of every modal opened, one entry per open, lines joined by \n. */
+export const __modalBodies: string[] = [];
+
+/** A ResultModal body line as plain text: a string, or one of the two rich forms. */
+function __modalLineText(line: Any): string {
+  if (typeof line === "string") return line;
+  if (line && typeof line === "object") {
+    if (typeof line.fact === "string") return `${line.fact}: ${String(line.value ?? "")}`;
+    if (typeof line.note === "string") return line.note;
+  }
+  return String(line ?? "");
+}
 export const __openedModals: string[] = [];
 /**
  * Titles of opened modals, where the modal carries one (ResultModal and the
@@ -30,6 +55,8 @@ export const __modalActionLabels: string[] = [];
 export const __protocolHandlers = new Map<string, (params: Record<string, string>) => void>();
 export function __resetObsidianMock(): void {
   __notices.length = 0;
+  __modalBodies.length = 0;
+  __autoConfirm.answer = null;
   __openedModals.length = 0;
   __modalTitles.length = 0;
   __modalActionLabels.length = 0;
@@ -312,9 +339,27 @@ export class Modal {
     // cannot tell "clone failed" from "clone needs credentials".
     const t = (this as unknown as { title?: unknown }).title;
     if (typeof t === "string") __modalTitles.push(t);
-    const o = (this as unknown as { opts?: { actions?: { label?: unknown }[] } }).opts;
+    const o = (this as unknown as {
+      opts?: { actions?: { label?: unknown }[]; body?: unknown[]; title?: unknown };
+    }).opts;
+    // ConfirmModal keeps its title inside `opts`, ResultModal as a field of
+    // its own, and only the second was collected — so every assertion about a
+    // confirmation had to name the CLASS and could not tell one confirmation
+    // from another.
+    if (typeof o?.title === "string") __modalTitles.push(o.title);
     for (const a of o?.actions ?? []) {
       if (typeof a?.label === "string") __modalActionLabels.push(a.label);
+    }
+    // The BODY, flattened to text. onOpen() is deliberately not called (see
+    // below), so without this a test could assert which window opened but
+    // never what it said — and several windows now differ only in their text,
+    // a set-aside repository with and without its manifest among them.
+    const body = (this as unknown as { lines?: unknown[] }).lines ?? o?.body;
+    if (Array.isArray(body)) __modalBodies.push(body.map(__modalLineText).join("\n"));
+    // See __autoConfirm: a decision nobody can take is a test that hangs.
+    const decide = (this as unknown as { onDecision?: (c: boolean) => unknown }).onDecision;
+    if (__autoConfirm.answer !== null && typeof decide === "function") {
+      void decide(__autoConfirm.answer);
     }
     // Intentionally does NOT call onOpen(): orchestration tests assert WHICH
     // modal was opened, not its DOM contents.

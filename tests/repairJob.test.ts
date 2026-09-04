@@ -33,6 +33,7 @@ const ctx = (over: Partial<RepairContext> = {}): RepairContext => ({
   ahead: 0,
   cacheTreeBroken: false,
   hasUpstream: true,
+  shallow: false,
   ...over,
 });
 
@@ -43,6 +44,25 @@ describe("missingOids", () => {
     expect(ids).toContain(TREE);
     expect(ids).toContain("be11d9a27078d8e6c143ed68e238f8d1c7a8b5a6");
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("reads git's `error: Could not read <oid>` form", () => {
+    // A real device produced four hundred of these, and the RUNNER's filter
+    // (`missing_from_findings`) knew none of the shapes in them, so the walk
+    // answered "damaged content, left alone on purpose" and sent the user to
+    // recover by hand what one targeted fetch would have brought back. The
+    // extraction here was never the problem — it takes any 40-hex id — which
+    // is exactly why the fix belongs in the runner and this test only pins
+    // the form so nobody narrows the pattern later (e2e phase 13 proves the
+    // runner half).
+    const out = missingOids(
+      "error: Could not read 01ea88ce455580c180a090e42582be282aeb45bd\n" +
+        "error: Could not read 0261f6ec31c39d760aeff33df3b565a0712e49da"
+    );
+    expect(out).toEqual([
+      "01ea88ce455580c180a090e42582be282aeb45bd",
+      "0261f6ec31c39d760aeff33df3b565a0712e49da",
+    ]);
   });
 
   it("caps the list at what one request accepts", () => {
@@ -95,6 +115,31 @@ describe("decideRepair", () => {
       ctx({ cacheTreeBroken: true })
     );
     expect(d.kind).toBe("offer-reset");
+  });
+
+  it("a SHORTENED history is never evidence about the remote", () => {
+    // `git fetch --refetch` asks for this repository's depth window and gets
+    // it, so objects belonging to older commits were never requested. The
+    // shipped code concluded "the remote does not have them either, clone the
+    // vault again" from exactly that, on a real device (2026-08-30) — this
+    // plugin's most destructive sentence, drawn from an inference that does
+    // not hold. Deepening is the exit, and it downloads no more than the
+    // clone would.
+    const d = decideRepair(
+      "refetch",
+      { fsckMissing: BUNDLE_MISSING, fsckRemaining: BUNDLE_MISSING },
+      ctx({ shallow: true })
+    );
+    expect(d.kind).toBe("missing-shallow");
+    // Local-only evidence still outranks it: unpushed commits are not on the
+    // remote at any depth, and the reset is what keeps them.
+    expect(
+      decideRepair(
+        "refetch",
+        { fsckMissing: BUNDLE_MISSING, fsckRemaining: BUNDLE_MISSING },
+        ctx({ shallow: true, ahead: 7 })
+      ).kind
+    ).toBe("offer-reset");
   });
 
   it("without local-only evidence the honest ending is that the remote cannot help", () => {

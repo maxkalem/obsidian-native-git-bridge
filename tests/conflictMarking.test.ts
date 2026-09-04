@@ -31,7 +31,7 @@ function statusActions(): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
-    syncState: noop, openOutput: noop,
+    syncState: noop, panelShown: noop, openOutput: noop,
     // A reader, not an action, and the row renderer calls it unconditionally on
     // mobile: the cast below hides a missing one until the row is drawn, and
     // then it fails as "not a function" in the middle of a render.

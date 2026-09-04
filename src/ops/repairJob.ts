@@ -27,6 +27,15 @@ export interface RepairContext {
   /** fsck named the index's cache-tree — damage inside device-local state. */
   cacheTreeBroken: boolean;
   hasUpstream: boolean;
+  /**
+   * This device keeps a SHORTENED history (`.git/shallow` exists).
+   *
+   * It changes what a failed refetch is allowed to conclude. `git fetch
+   * --refetch` re-downloads what this repository asks for — and a shallow
+   * repository asks for its current depth window, not the whole history. So
+   * objects still missing afterwards say nothing whatever about the remote.
+   */
+  shallow: boolean;
 }
 
 export type RepairStage = "scan" | "fetch-missing" | "refetch";
@@ -34,6 +43,8 @@ export type RepairStage = "scan" | "fetch-missing" | "refetch";
 export type RepairDecision =
   /** Nothing missing, nothing damaged: the store is complete. */
   | { kind: "clean" }
+  /** Still missing after a refetch, but the history here is SHORTENED. */
+  | { kind: "missing-shallow" }
   /** Nothing missing, but damaged (non-empty) objects remain — left alone by design. */
   | { kind: "damaged" }
   /** Objects are missing; ask the remote for exactly those. */
@@ -234,6 +245,13 @@ export function decideRepair(
   // upstream there is nothing to rebuild on, so the honest ending is the
   // remote-cannot-help one even when the evidence points local.
   if (ctx.hasUpstream && (ctx.ahead > 0 || ctx.cacheTreeBroken)) return { kind: "offer-reset" };
+  // A shortened history is the one state where "the refetch brought nothing
+  // back" is not evidence about the remote at all: the refetch asked for this
+  // repository's depth window and got it. Concluding "the remote does not
+  // have them either, clone the vault again" from that is the most
+  // destructive advice this plugin gives, drawn from an inference that does
+  // not hold. A real device reached exactly this ending (2026-08-30).
+  if (ctx.shallow) return { kind: "missing-shallow" };
   return { kind: "missing-remote" };
 }
 

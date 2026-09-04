@@ -1253,3 +1253,19 @@
    background — is gone: the alignment pushed the button off the horizontal
    scroller on a diff wider than the pane, and the shape differed from the diff
    pane's for no reason anyone could name. */
+
+/* Result-window body lines that are a REPORT rather than prose: one key per
+   row with the value carrying the colour, and the occasional sentence that
+   matters more than its neighbours. Added after a device screenshot of the
+   identity check, which was five even-weight paragraphs and unreadable on a
+   phone — the values were the answer and they were buried in the prose. The
+   `--text-*` variables are Obsidian's own, so the colours follow the user's
+   theme instead of asserting one. */
+.ngb-res-fact { display: flex; gap: var(--size-4-2); align-items: baseline; }
+.ngb-res-fact-k { color: var(--text-muted); flex: 0 0 auto; }
+.ngb-res-fact-v { color: var(--text-normal); min-width: 0; overflow-wrap: anywhere; font-weight: 600; }
+.ngb-res-note { margin-top: var(--size-4-2); }
+.ngb-tone-ok { color: var(--text-success, #08b94e); }
+.ngb-tone-warn { color: var(--text-warning, #e0ac00); }
+.ngb-tone-bad { color: var(--text-error); }
+.ngb-tone-accent { color: var(--text-accent); }

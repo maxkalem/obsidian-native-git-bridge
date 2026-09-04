@@ -7,7 +7,7 @@
 set -u
 umask 077
 
-RUNNER_VERSION=17
+RUNNER_VERSION=18
 PROFILE_FORMAT=1
 
 # The store: one directory holding profiles/<id>.conf (one per paired vault),
@@ -83,6 +83,8 @@ LOG_FILE="$NGB_CONFIG_DIR/runner.log"
 PROFILE_ID=""
 PROFILE_FILE=""
 NGB_REPO_DIR=""
+# The vault root of the active profile, derived from its runtime directory.
+NGB_VAULT_DIR=""
 NGB_TOKEN=""
 NGB_RUNTIME_DIR=""
 REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""; PROG_DIR=""
@@ -93,6 +95,26 @@ log() {
   if [ "$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$NGB_LOG_MAX_BYTES" ]; then
     tail -c $((NGB_LOG_MAX_BYTES / 2)) "$LOG_FILE" > "$LOG_FILE.tmp" && mv "$LOG_FILE.tmp" "$LOG_FILE"
   fi
+}
+
+# The same line into the store's log AND every healthy profile's own
+# runtime/runner.log. A cross-profile event belongs with the profiles, but the
+# plugin's bridge check and its log bundle read one vault's file and nothing
+# else, so an event recorded only in the store is invisible to the one place a
+# device report comes from. The case that needed it: a trigger that found an
+# empty queue. Written only to the store, it could not be told apart from a
+# trigger that never arrived, and that is exactly the question a sync queued
+# while Obsidian was leaving the foreground raises.
+log_every_profile() {
+  local conf saved="$LOG_FILE"
+  log "$@"
+  for conf in "${HEALTHY_FILES[@]}"; do
+    read_profile_file "$conf" || continue
+    [ -d "$P_RUNTIME" ] || continue
+    LOG_FILE="$P_RUNTIME/runner.log"
+    [ "$LOG_FILE" != "$saved" ] && log "$@"
+  done
+  LOG_FILE="$saved"
 }
 
 # Any userinfo in a URL, not only `user:password`. A personal access token is
@@ -378,6 +400,24 @@ profile_file_for_repo() { # $1 absolute repo dir -> prints conf path, empty if n
   return 1
 }
 
+# The same lookup by VAULT rather than by repository. Needed because the two
+# stopped being the same directory (ADR-003): a claim asks on behalf of a
+# VAULT, and asking "is there already a profile whose repository is this
+# directory" answers no for a vault whose repository is elsewhere — which
+# would pair the same vault twice, each half answering the other's queue.
+profile_file_for_vault() { # $1 absolute vault dir -> prints conf path, empty if none
+  local f real target
+  target="$(canon_dir "$1")"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    read_profile_file "$f" || continue
+    real="$(canon_dir "$(vault_dir_of_runtime_dir "${P_RUNTIME:-}")")"
+    [ -n "$real" ] || continue
+    if [ "$real" = "$target" ]; then printf '%s' "$f"; return 0; fi
+  done < <(list_profile_files)
+  return 1
+}
+
 # ---- profile activation ------------------------------------------------------
 
 # Pin git to THIS profile's repository. cwd alone is not enough once two
@@ -446,6 +486,7 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   # Clear first: a failed activation must never leave the PREVIOUS profile's
   # directories in place, or a broken profile would answer its neighbour's queue.
   PROFILE_ID=""; PROFILE_FILE=""; NGB_REPO_DIR=""; NGB_TOKEN=""; NGB_RUNTIME_DIR=""
+  NGB_VAULT_DIR=""
   REQ_DIR=""; PROC_DIR=""; RES_DIR=""; CAN_DIR=""; DONE_DIR=""; PROG_DIR=""
   LOG_FILE="$NGB_CONFIG_DIR/runner.log"
   read_profile_file "$1" || { PROFILE_UNHEALTHY_REASON="Unusable profile file."; return 1; }
@@ -454,6 +495,12 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   NGB_REPO_DIR="$P_REPO"
   NGB_TOKEN="$P_TOKEN"
   NGB_RUNTIME_DIR="$P_RUNTIME"
+  # The vault root, derived rather than stored: the runtime directory is always
+  # inside the vault by construction (§4 rule 6), so the profile format needs
+  # no new key for ADR-003 — the two directories it already holds determine
+  # both roots between them. Empty when the runtime path is not of the
+  # expected shape, and every reader treats empty as "the roots coincide".
+  NGB_VAULT_DIR="$(vault_dir_of_runtime_dir "$NGB_RUNTIME_DIR")"
   REQ_DIR="$NGB_RUNTIME_DIR/requests"
   PROC_DIR="$NGB_RUNTIME_DIR/processing"
   RES_DIR="$NGB_RUNTIME_DIR/results"
@@ -538,6 +585,54 @@ vault_dir_of_runtime_file() { # $1 .../<config>/plugins/native-git-bridge/runtim
   dirname "$d"                           # vault root
 }
 
+# The suffix every runtime directory ends with, below the vault's Obsidian
+# configuration directory. Named once because three places below strip it and
+# a fourth used to keep only the first path segment instead, which is the
+# `configDirTracked` bug.
+NGB_RUNTIME_SUFFIX="plugins/native-git-bridge/runtime"
+
+# The vault's Obsidian configuration directory, from the runtime path. Empty
+# when the runtime directory is not of the expected shape, because a guess
+# there is a guess about which directory Obsidian is holding open.
+config_dir_of_runtime_dir() { # $1 .../<config>/plugins/native-git-bridge/runtime
+  case "$1" in
+    */"$NGB_RUNTIME_SUFFIX") printf '%s' "${1%/"$NGB_RUNTIME_SUFFIX"}" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# The vault root, from the runtime path: the configuration directory's parent.
+vault_dir_of_runtime_dir() { # $1 .../<config>/plugins/native-git-bridge/runtime
+  local c; c="$(config_dir_of_runtime_dir "$1")"
+  [ -n "$c" ] || { printf '%s' ""; return 0; }
+  dirname "$c"
+}
+
+# Canonical form for comparing two directories, falling back to the string
+# when realpath cannot answer (a path that does not exist yet, and shared
+# storage where realpath occasionally will not).
+canon_dir() { realpath "$1" 2>/dev/null || printf '%s' "${1%/}"; }
+
+# Where the vault sits relative to the repository, or the repository relative
+# to the vault. At most one is non-empty; both empty means the roots coincide,
+# which is every installation before ADR-003 and the only thing a plugin too
+# old to read the fields can assume.
+#
+# The plugin must NOT work this out from absolute paths of its own: its only
+# absolute path is `repoPathHint`, a device-local string the user typed, and
+# one place already misused it as a vault path. The runner knows both
+# directories with certainty, so the runner is what says it.
+root_offset_of() { # prints "<vaultInRepo>\n<repoInVault>"
+  local v r a="" b=""
+  v="$(canon_dir "${NGB_VAULT_DIR:-}")"
+  r="$(canon_dir "${NGB_REPO_DIR:-}")"
+  if [ -n "$v" ] && [ -n "$r" ] && [ "$v" != "$r" ]; then
+    case "$v" in "$r"/*) a="${v#"$r"/}" ;; esac
+    case "$r" in "$v"/*) b="${r#"$v"/}" ;; esac
+  fi
+  printf '%s\n%s\n' "$a" "$b"
+}
+
 dir_is_own_worktree() { # $1 dir
   [ -d "$1" ] || return 1
   local top
@@ -551,7 +646,7 @@ dir_is_own_worktree() { # $1 dir
 # A profile whose marker is nowhere to be found is treated as deleted; no
 # replacement repository is ever linked to it automatically.
 relocate_profiles() { # $1..$n = marker files
-  local mf vault id conf
+  local mf vault id conf old_vault new_repo
   for mf in "$@"; do
     case "$mf" in */profile.json) : ;; *) continue ;; esac
     id="$(jq -r '.profileId // empty' "$mf" 2>/dev/null || true)"
@@ -560,13 +655,33 @@ relocate_profiles() { # $1..$n = marker files
     [ -f "$conf" ] || continue
     read_profile_file "$conf" || continue
     vault="$(vault_dir_of_runtime_file "$mf")"
-    [ "$(realpath "$vault" 2>/dev/null)" = "$(realpath "$P_REPO" 2>/dev/null)" ] && continue
+    # Compare against the recorded VAULT, not against the recorded repository:
+    # with the repository inside the vault the two are different directories by
+    # design, so the old comparison read every split-root profile as "moved"
+    # and only the worktree guard below stopped it relocating (ADR-003).
+    old_vault="$(vault_dir_of_runtime_dir "${P_RUNTIME:-}")"
+    [ -n "$old_vault" ] || old_vault="$P_REPO"
+    [ "$(canon_dir "$vault")" = "$(canon_dir "$old_vault")" ] && continue
+    # The offset the profile was set up with, preserved across the move: a
+    # vault that moved says nothing about where an ANCESTOR repository went,
+    # so a profile whose repository was OUTSIDE its vault is never relocated
+    # automatically — it is re-created by the installer, which is the only
+    # route that can reach an ancestor at all.
+    new_repo="$vault"
+    case "$(canon_dir "$P_REPO")" in
+      "$(canon_dir "$old_vault")") : ;;
+      "$(canon_dir "$old_vault")"/*)
+        new_repo="$vault/${P_REPO#"$old_vault"/}" ;;
+      *)
+        log "RELOCATE profile $id has its repository outside its vault; not following the move"
+        continue ;;
+    esac
     # Only relocate when the recorded location is really gone: two markers with
     # the same id (a copied vault) must not make the profile bounce.
     dir_is_own_worktree "$P_REPO" && continue
-    dir_is_own_worktree "$vault" || continue
-    if write_profile_file "$id" "$vault" "$(default_runtime_for "$vault")" "$P_TOKEN"; then
-      log "RELOCATED profile $id: $P_REPO -> $vault (token kept)"
+    dir_is_own_worktree "$new_repo" || continue
+    if write_profile_file "$id" "$new_repo" "$(default_runtime_for "$vault")" "$P_TOKEN"; then
+      log "RELOCATED profile $id: $P_REPO -> $new_repo (token kept)"
     fi
   done
 }
@@ -589,7 +704,7 @@ adopt_claims() { # $1..$n = marker files
         continue
       fi
     fi
-    if profile_file_for_repo "$vault" >/dev/null; then
+    if profile_file_for_vault "$vault" >/dev/null || profile_file_for_repo "$vault" >/dev/null; then
       rm -f "$cf" 2>/dev/null || true
       continue
     fi
@@ -869,8 +984,25 @@ collect_status_fields() {
   user_email_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="user.email"{print $1}')"
   cred_helper_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="credential.helper"{print $1}')"
   collect_untracked_children
+  # The two roots (v18). At most one is non-empty; both empty is "they
+  # coincide", which is what every plugin below this version assumes and what
+  # every installation before ADR-003 actually is.
+  local vault_in_repo repo_in_vault offsets
+  offsets="$(root_offset_of)"
+  vault_in_repo="$(printf '%s' "$offsets" | sed -n 1p)"
+  repo_in_vault="$(printf '%s' "$offsets" | sed -n 2p)"
+  # `.gitignore` rides along with status (v18) rather than being fetched: it is
+  # a `cat` of one small file, no git process, and the plugin's file menu has
+  # to decide synchronously whether a path is ignored. Warming that cache used
+  # to be an adapter read at startup — free, but wrong the moment the two roots
+  # differ, and stale after any pull that changed the file. A round trip at
+  # startup instead would have been the worst of the three: 10-15 s on the
+  # device, for a cache.
   DATA=$(obj_from_fields \
     branchInfo "$branch_info" \
+    vaultInRepo "$vault_in_repo" \
+    repoInVault "$repo_in_vault" \
+    gitignoreList "$(cat "$NGB_REPO_DIR/.gitignore" 2>/dev/null || true)" \
     shallow "$is_shallow" \
     partialFilter "$partial_filter" \
     credsConfigured "$creds_configured" \
@@ -1515,7 +1647,14 @@ fsck_findings() {
 # changes it, and offering the repair again would be the loop this action exists
 # to break.
 missing_from_findings() {
-  printf '%s\n' "$1" | grep -E 'missing|broken link|unable to read' || true
+  # `error: Could not read <oid>` belongs here and was absent until a real
+  # device produced four hundred of them: git prints that form from
+  # `parse_object` when the object cannot be read, which is the same fault as
+  # `missing blob <oid>` and has the same exit — ask the remote for exactly
+  # those objects. Without the pattern the verdict fell through to "damaged
+  # content, left alone on purpose", which told the user to recover by hand in
+  # Termux what one targeted fetch would have brought back (2026-08-30).
+  printf '%s\n' "$1" | grep -E 'missing|broken link|unable to read|[Cc]ould not read' || true
 }
 
 # Recover missing objects on a git that has no `--refetch`.
@@ -1587,7 +1726,7 @@ recover_missing_objects() { # $1 = fsck findings naming the missing objects
   # pack as "not fetched yet" — masking a real fault. Remember which existed
   # before, so only the ones this created are cleaned up.
   local before_markers
-  before_markers="$(ls "$(git rev-parse --git-path objects/pack)"/*.promisor 2>/dev/null | sort || true)"
+  before_markers="$(list_promisor_markers)"
 
   if [ -z "$already" ]; then
     git config core.repositoryformatversion 1
@@ -1621,9 +1760,32 @@ EOF
     while IFS= read -r m; do
       [ -n "$m" ] || continue
       printf '%s\n' "$before_markers" | grep -qxF -- "$m" || rm -f "$m"
-    done < <(ls "$(git rev-parse --git-path objects/pack)"/*.promisor 2>/dev/null || true)
+    done < <(list_promisor_markers)
   fi
   return 0
+}
+
+# The `.promisor` markers in the pack directory, listed WITHOUT a glob.
+#
+# `ls <dir>/*.promisor` looks safe and is not: this script sets `nullglob`, so
+# with no marker present the pattern vanishes and `ls` lists the CURRENT
+# directory — the repository root — instead of nothing. Both listings around
+# the temporary partial-clone marking used that form, and the second one feeds
+# `rm -f`: any entry that appeared at the repository root between them would
+# have been deleted as a leftover marker. The two listings happening to agree
+# is the only reason nothing was lost. Same root cause as the "." reported as
+# a set-aside repository (buried bodies, 2026-08-30).
+list_promisor_markers() {
+  local dir name
+  dir="$(git rev-parse --git-path objects/pack 2>/dev/null || true)"
+  [ -n "$dir" ] && [ -d "$dir" ] || return 0
+  # `ls -1` of the directory, never a glob, and no GNU-only `find` predicates:
+  # Termux installs git, jq and openssh and nothing else, so `-printf` and
+  # `-regex` are not a given there.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    printf '%s/%s\n' "$dir" "$name"
+  done < <(ls -1 "$dir" 2>/dev/null | grep -E '\.promisor$' | sort || true)
 }
 
 MIRROR_ERR=""
@@ -1766,6 +1928,34 @@ action_repair_scan() {
   done < <(find "$(git rev-parse --git-dir)/objects" -type f -size 0 -print0 2>/dev/null || true)
   log "REPAIR scan removed $removed empty object file(s)"
 
+  # The commit-graph is a cache, and it goes stale here in one specific way:
+  # gc writes it while the history is whole, then `fetch --depth` cuts the
+  # parents of the commits at the new boundary while the graph still lists
+  # them. git refuses to READ a commit-graph in a shallow repository, so
+  # nothing misbehaves — but `git fsck` verifies the file all the same and
+  # prints "commit-graph parent list for commit <oid> is too long" on every
+  # run, without the `error:` prefix fsck_findings keys on, so the plugin
+  # called the store clean while the user's own fsck stayed red (a real device,
+  # 2026-09-04). It would have stayed red forever: gc does not rewrite the
+  # graph while the repository is shallow either. Dropping the file costs
+  # nothing — it is derived from the objects and comes back with the first gc
+  # after the history is whole again — which is the same argument as the empty
+  # files above. Outside a shallow repository the same treatment applies to a
+  # graph that fails its own verification; a healthy one is left alone.
+  local graph_dropped=false graph_file graph_dir
+  graph_file="$(git rev-parse --git-path objects/info/commit-graph)"
+  graph_dir="$(git rev-parse --git-path objects/info/commit-graphs)"
+  if [ -e "$graph_file" ] || [ -d "$graph_dir" ]; then
+    if [ "$(git rev-parse --is-shallow-repository 2>/dev/null)" = "true" ] ||
+       ! git commit-graph verify >/dev/null 2>&1; then
+      progress_note "repair: dropping a stale commit-graph cache"
+      rm -f "$graph_file"
+      rm -rf "$graph_dir"
+      graph_dropped=true
+      log "REPAIR scan dropped the commit-graph cache"
+    fi
+  fi
+
   # Context the plugin's verdict needs and cannot cheaply learn on its own:
   # whether the damage sits inside local-only state. Missing objects that
   # survive a full refetch while the branch is ahead, or that the index's
@@ -1780,11 +1970,21 @@ action_repair_scan() {
   fi
   repair_verify
   printf '%s' "$(printf '%s' "$DATA" | jq -r '.fsckRemaining // ""')" | grep -q 'cache-tree' && ct_broken=true
+  # `count-objects -v` rides along (v18): it only stats the object directory,
+  # so it costs nothing next to the fsck this action already ran, and it is
+  # what lets the final window notice reclaimable space without a second round
+  # trip. A real device carried 6.3 GB of object store while both lightweight
+  # toggles read "small" and the footprint check never looked, because it only
+  # ran for a partial-clone filter.
+  local counts=""
+  git count-objects -v >/dev/null 2>&1 && counts="$(git count-objects -v 2>/dev/null || true)"
   DATA=$(merge_data "$DATA" "$(obj_from_fields \
     removedObjects "$(printf '%s\n' "${emptied[@]:-}")" \
     removedCount "$removed" \
+    commitGraphDropped "$graph_dropped" \
     aheadCount "$ahead" \
     hasUpstream "$has_up" \
+    countObjects "$counts" \
     cacheTreeBroken "$ct_broken")")
 }
 
@@ -2798,6 +2998,81 @@ action_cred_helper_local_reset() {
 
 exclude_file_path() { git rev-parse --git-path info/exclude; }
 
+# ---- .gitignore, through the runner (v18, ADR-003) ---------------------------
+# The plugin used to read and write `.gitignore` itself, through Obsidian's
+# vault adapter. That works only while the repository root IS the vault root:
+# with the vault inside the repository, `.gitignore` is above it and the
+# adapter cannot reach it at all, and the file it WOULD reach at the same name
+# is a different file. So the three routes move here, mirroring the three that
+# already exist for `$GIT_DIR/info/exclude`, and the plugin uses them ALWAYS
+# rather than only when the file is out of reach — two behaviours for one
+# question is what the one-surface rule refuses everywhere else.
+#
+# Two obligations carried over from the exclude actions, and the first one is
+# a real corruption this project already shipped: `ensure_trailing_newline`
+# before every append, because `"Projects/Backup"` + `"/.gitignore"` once
+# fused into one pattern and leaked repository files into a protected path
+# (§4 rule 10). And `.gitignore` is TRACKED, unlike the exclude file, so it
+# travels to every other device — which is why the plugin confirms the change
+# by name before asking for it.
+gitignore_file_path() { printf '%s/.gitignore' "$NGB_REPO_DIR"; }
+
+emit_gitignore_list() {
+  local gf; gf="$(gitignore_file_path)"
+  DATA=$(obj_from_fields gitignoreList "$(cat "$gf" 2>/dev/null || true)")
+}
+
+emit_gitignore_with_status() {
+  local gf; gf="$(gitignore_file_path)"
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields gitignoreList "$(cat "$gf" 2>/dev/null || true)")")
+}
+
+# A pattern is not a path: `*.tmp`, `!keep.md` and `build/` are all legal and
+# none of them would survive `valid_rel_path`. What must be refused is a line
+# that could damage the FILE rather than the ignore rules — a newline (which
+# would write two rules from one request) and anything unprintable.
+valid_gitignore_pattern() { # $1
+  case "$1" in
+    ""|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  [ "${#1}" -le 512 ] || return 1
+  printf '%s' "$1" | LC_ALL=C grep -q '[^[:print:]]' && return 1
+  return 0
+}
+
+action_gitignore_list() { emit_gitignore_list; }
+
+action_gitignore_add() {
+  local req_file="$1" pattern gf
+  pattern=$(jq -r '.args.pattern // empty' "$req_file")
+  valid_gitignore_pattern "$pattern" || {
+    ERROR=$(err_json BAD_REQUEST "Invalid .gitignore pattern." "" ""); return 1; }
+  gf="$(gitignore_file_path)"
+  if grep -qxF "$pattern" "$gf" 2>/dev/null; then
+    emit_gitignore_with_status
+    return 0
+  fi
+  ensure_trailing_newline "$gf"
+  printf '%s\n' "$pattern" >> "$gf" || {
+    ERROR=$(err_json GIT_FAILED "Could not write .gitignore." "" ""); return 1; }
+  emit_gitignore_with_status
+}
+
+action_gitignore_remove() {
+  local req_file="$1" pattern gf
+  pattern=$(jq -r '.args.pattern // empty' "$req_file")
+  valid_gitignore_pattern "$pattern" || {
+    ERROR=$(err_json BAD_REQUEST "Invalid .gitignore pattern." "" ""); return 1; }
+  gf="$(gitignore_file_path)"
+  if [ -f "$gf" ]; then
+    grep -vxF -e "$pattern" "$gf" > "$gf.ngb-tmp" || true
+    mv "$gf.ngb-tmp" "$gf" || {
+      ERROR=$(err_json GIT_FAILED "Could not write .gitignore." "" ""); return 1; }
+  fi
+  emit_gitignore_with_status
+}
+
 emit_exclude_list() { # DATA <- current exclude file content
   local xf; xf="$(exclude_file_path)"
   DATA=$(obj_from_fields excludeList "$(cat "$xf" 2>/dev/null || true)")
@@ -3218,8 +3493,17 @@ action_repair_triage() {
   collect_live_processes
   # Set-aside repositories a re-clone left behind: names only, the manifests
   # beside them carry the sizes and the plugin already reads those.
+  # `ls -1` of the directory and a pattern match, never a glob: this script
+  # runs with `nullglob` set, so an
+  # unmatched pattern DISAPPEARS from the command line and `ls -d` then means
+  # `ls -d .` — which reported the runtime directory itself as a set-aside
+  # repository named ".", and the plugin dutifully offered to delete
+  # `<runtime>/.`, the whole runtime folder. Found on a real device, 2026-08-30.
+  # The name shape is enforced here as well as in the plugin: nothing but
+  # `previous-git-<timestamp>` may ever reach a deletion offer.
   local prev_gits=""
-  prev_gits="$(cd "$NGB_RUNTIME_DIR" 2>/dev/null && ls -d previous-git-* 2>/dev/null | grep -v '\.json$' || true)"
+  prev_gits="$(ls -1 "$NGB_RUNTIME_DIR" 2>/dev/null |
+    grep -E '^previous-git-[0-9]{8}T[0-9]{6}Z$' | sort || true)"
   collect_status_fields
   DATA=$(merge_data "$DATA" "$(obj_from_fields \
     lockExists "$lock_exists" \
@@ -3243,11 +3527,15 @@ NGB_CLONE_TIMEOUT="${NGB_CLONE_TIMEOUT:-3600}"
 # The runtime directory must be excluded from the repository the moment one
 # exists, or the request/result files show up as untracked changes.
 write_runtime_exclude() {
-  local xf line=".obsidian/plugins/native-git-bridge/runtime/"
-  # Derive the line from the profile's own runtime dir when it lives inside the
-  # repository (a custom Obsidian config directory is not always ".obsidian").
+  local xf line
+  # The line has to be derived, never assumed: a custom Obsidian config
+  # directory is not always ".obsidian", and with the repository INSIDE the
+  # vault the runtime directory is outside the repository altogether — where
+  # the hard-coded default matched nothing and was written anyway, a line git
+  # would never use and a reader would have to explain away (ADR-003).
   case "$NGB_RUNTIME_DIR" in
     "$NGB_REPO_DIR"/*) line="${NGB_RUNTIME_DIR#"$NGB_REPO_DIR"/}/" ;;
+    *) return 0 ;;
   esac
   xf="$(git rev-parse --git-path info/exclude 2>/dev/null || true)"
   [ -n "$xf" ] || return 0
@@ -3256,6 +3544,35 @@ write_runtime_exclude() {
   grep -qxF "$line" "$xf" 2>/dev/null && return 0
   ensure_trailing_newline "$xf"
   printf '%s\n' "$line" >> "$xf" || true
+}
+
+# Obsidian's trash is at the VAULT root and nothing in this project excluded
+# it, while staging is `git add -A` — so every file that lands there was
+# committed: a note the user deleted in Obsidian, a file the plugin moved out
+# of the way, and the bad one, a file the sparse repair moved out of a
+# PROTECTED path, which sparse hides precisely so it never travels. The user's
+# decision (2026-08-28): do not change what goes to the trash, exclude the
+# trash wherever it is. Skipped entirely when the vault sits outside the
+# repository, where git can never see it and a line would misdescribe the
+# layout. The plugin writes the same line through `exclude-add` for
+# repositories that were set up before this, which is how existing
+# installations get it without a reinstall.
+write_trash_exclude() {
+  local xf line
+  [ -n "$NGB_VAULT_DIR" ] || return 0
+  case "$NGB_VAULT_DIR" in
+    "$NGB_REPO_DIR") line=".trash/" ;;
+    "$NGB_REPO_DIR"/*) line="${NGB_VAULT_DIR#"$NGB_REPO_DIR"/}/.trash/" ;;
+    *) return 0 ;;
+  esac
+  xf="$(git rev-parse --git-path info/exclude 2>/dev/null || true)"
+  [ -n "$xf" ] || return 0
+  case "$xf" in /*) : ;; *) xf="$NGB_REPO_DIR/$xf" ;; esac
+  mkdir -p "$(dirname "$xf")" 2>/dev/null || return 0
+  grep -qxF "$line" "$xf" 2>/dev/null && return 0
+  ensure_trailing_newline "$xf"
+  printf '%s\n' "$line" >> "$xf" || true
+  log "TRASH excluded $line from this repository (.git/info/exclude, local only)"
 }
 
 # A freshly created repository inside another paired vault has to be excluded
@@ -3385,6 +3702,7 @@ action_init_repo() {
   fi
   PROFILE_STATE="ready"
   write_runtime_exclude
+  write_trash_exclude
   exclude_from_outer_profiles
   # From here the repository EXISTS. Anything that fails after this point must
   # say so, or the user is told "init failed" while looking at a new .git.
@@ -3687,6 +4005,7 @@ action_clone_into_vault() {
   PROFILE_STATE="ready"
   persist_clone_credentials "$url"
   write_runtime_exclude
+  write_trash_exclude
   exclude_from_outer_profiles
   head_branch="$(git symbolic-ref --short -q HEAD || true)"
   local from_ref="HEAD"
@@ -3721,12 +4040,18 @@ action_clone_into_vault() {
   # Whether the repository tracks Obsidian's own configuration directory is
   # reported too: writing into it while Obsidian is running means the app is
   # holding an older copy in memory, which is a restart, not a repair.
-  local collisions="" f config_dir="" config_tracked=false
-  case "$NGB_RUNTIME_DIR" in
-    "$NGB_REPO_DIR"/*)
-      config_dir="${NGB_RUNTIME_DIR#"$NGB_REPO_DIR"/}"
-      config_dir="${config_dir%%/*}" ;;
-  esac
+  #
+  # The configuration directory is the runtime path with the plugin suffix
+  # stripped, NOT its first path segment: with the vault at `docs/` inside the
+  # repository, the first segment is `docs` — the whole vault — and the clone
+  # then warned that it tracks the user's notes (ADR-003).
+  local collisions="" f config_dir="" config_abs config_tracked=false
+  config_abs="$(config_dir_of_runtime_dir "$NGB_RUNTIME_DIR")"
+  if [ -n "$config_abs" ]; then
+    case "$config_abs" in
+      "$NGB_REPO_DIR"/*) config_dir="${config_abs#"$NGB_REPO_DIR"/}" ;;
+    esac
+  fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     [ -e "$NGB_REPO_DIR/$f" ] && collisions="$collisions$f
@@ -3916,6 +4241,9 @@ process_request() {
     exclude-add)           action_exclude_add "$req_file" || { ok=false; ec=1; } ;;
     exclude-remove)        action_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
     exclude-list)          action_exclude_list || { ok=false; ec=1; } ;;
+    gitignore-add)         action_gitignore_add "$req_file" || { ok=false; ec=1; } ;;
+    gitignore-remove)      action_gitignore_remove "$req_file" || { ok=false; ec=1; } ;;
+    gitignore-list)        action_gitignore_list || { ok=false; ec=1; } ;;
     init-repo)             action_init_repo "$req_file" || { ok=false; ec=1; } ;;
     set-remote)            action_set_remote "$req_file" || { ok=false; ec=1; } ;;
     clone-into-vault)      action_clone_into_vault "$req_file" || { ok=false; ec=1; } ;;
@@ -3951,7 +4279,7 @@ process_request() {
   if [ "$ok" = false ] && [ "$PROFILE_STATE" = "ready" ]; then
     case "$action" in
       # Read-only, or already collecting status themselves.
-      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|maintenance-scan|repair-triage) ;;
+      ping|status|diagnostics|verify-sparse-safety|file-log|repo-log|show-file-at-commit|diff-file|exclude-list|gitignore-list|maintenance-scan|repair-triage) ;;
       *)
         error_data="$DATA"
         collect_status_fields
@@ -4189,7 +4517,11 @@ while :; do
   done
 
   if [ "${#QUEUE[@]}" -eq 0 ]; then
-    [ "$DRAIN_PASS" -eq 1 ] && log "RUN no pending requests"
+    # Into every vault's log, not only the store's (see log_every_profile):
+    # LOG_FILE points at the store here, and the plugin reads its own vault's
+    # runner.log. A trigger that arrives and finds nothing is evidence, and it
+    # has to land where the log bundle looks.
+    [ "$DRAIN_PASS" -eq 1 ] && log_every_profile "RUN no pending requests"
     break
   fi
   [ "$DRAIN_PASS" -gt 1 ] && log "RUN pass $DRAIN_PASS: ${#QUEUE[@]} request(s) arrived while draining"

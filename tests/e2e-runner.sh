@@ -1086,6 +1086,17 @@ check '[ "$(jq -r .profileId "$B_RT/results/r-20260805T110001Z-two002.json")" = 
 # timestamp: the older request can never start after the newer one.
 check '[ "$(jq -r .startedAt "$A_RT/results/r-20260805T110000Z-two001.json")" \< "$(jq -r .startedAt "$B_RT/results/r-20260805T110001Z-two002.json")" ] || [ "$(jq -r .startedAt "$A_RT/results/r-20260805T110000Z-two001.json")" = "$(jq -r .startedAt "$B_RT/results/r-20260805T110001Z-two002.json")" ]' "oldest request first across profiles"
 
+echo "# phase 6: a trigger that finds nothing to do is recorded in every vault's own log"
+# The plugin's bridge check and its log bundle read the vault's runtime/runner.log
+# and nothing else. A trigger that arrived and found an empty queue used to be
+# written only into the store's log, where no device report ever looks — and
+# that is exactly the line that tells "the trigger came too early" apart from
+# "the trigger never came" (sync-on-close, 2026-09-04).
+mrun >/dev/null
+check 'grep -q "RUN no pending requests" "$A_RT/runner.log"' "vault A's log records the idle trigger"
+check 'grep -q "RUN no pending requests" "$B_RT/runner.log"' "vault B's log records it too"
+check 'grep -q "RUN no pending requests" "$MCONF/runner.log"' "and so does the store's log"
+
 echo "# phase 6: a token is valid for its own profile only"
 mreq "$B_RT" "r-20260805T120000Z-tok001" "$A_TOKEN" status "$A_PID"
 mrun >/dev/null
@@ -1751,6 +1762,48 @@ check 'printf %s "$OUT" | grep -q "does not look like a script"' "a truncated or
 # `list_profiles` is lifted out of the real installer rather than copied here:
 # the installer itself refuses to run outside Termux, and a second copy of the
 # code would be free to drift from the one that ships.
+
+echo "# phase 8a: nullglob traps, lifted from the runner"
+# The runner sets `shopt -s nullglob`, so an unmatched pattern DISAPPEARS from
+# the command line instead of being passed through. Two places used
+# `ls <glob>` and both then meant something else entirely: `ls -d` prints ".",
+# which the plugin reported as a set-aside repository and offered to delete —
+# `rm -rf "<runtime>/."`, the whole runtime folder — and `ls` with no operand
+# lists the CURRENT directory, which the promisor cleanup feeds to `rm -f`.
+# Found on a real device, 2026-08-30.
+NG_DIR="$ROOT/nullglob"
+mkdir -p "$NG_DIR/runtime" "$NG_DIR/pack"
+{
+  printf 'shopt -s nullglob\n'
+  printf 'NGB_RUNTIME_DIR="%s/runtime"\n' "$NG_DIR"
+  # Lifted from the runner, with the `local` keyword dropped: the point is the
+  # command, and `local` outside a function is a bash error of the harness's
+  # own making.
+  sed -n '/^  local prev_gits=""/,/sort || true)"/p' "$RUNNER" | sed 's/^  //; /^local /d'
+  printf 'printf "[%%s]\\n" "$prev_gits"\n'
+} > "$NG_DIR/probe.sh"
+OUT="$(bash "$NG_DIR/probe.sh" 2>/dev/null)"
+check '[ "$OUT" = "[]" ]' "an empty runtime folder reports NO set-aside repository, not \".\""
+mkdir -p "$NG_DIR/runtime/previous-git-20260812T021946Z" "$NG_DIR/runtime/not-one"
+touch "$NG_DIR/runtime/previous-git-20260812T021946Z.json"
+OUT="$(bash "$NG_DIR/probe.sh" 2>/dev/null)"
+check '[ "$OUT" = "[previous-git-20260812T021946Z]" ]' "…and a real one is reported by name, without its manifest or its neighbours"
+
+echo "# phase 8a: fsck's 'Could not read' is a MISSING object, not damaged content"
+# The form a real device produced four hundred times. The extractor knew
+# `missing`, `broken link` and `unable to read` and none of them matched, so
+# the walk answered "damaged content, left alone on purpose" — sending the user
+# to recover by hand what one targeted fetch would have brought back.
+{
+  sed -n '/^missing_from_findings() {/,/^}$/p' "$RUNNER"
+  printf 'missing_from_findings "$1"\n'
+} > "$NG_DIR/fsck.sh"
+OUT="$(bash "$NG_DIR/fsck.sh" 'error: Could not read 01ea88ce455580c180a090e42582be282aeb45bd')"
+check 'printf %s "$OUT" | grep -q 01ea88ce455580c180a090e42582be282aeb45bd' "a 'Could not read' line is extracted as missing"
+OUT="$(bash "$NG_DIR/fsck.sh" 'missing blob 0261f6ec31c39d760aeff33df3b565a0712e49da')"
+check 'printf %s "$OUT" | grep -q 0261f6ec' "…and the shapes it already knew still are"
+OUT="$(bash "$NG_DIR/fsck.sh" 'dangling commit 0261f6ec31c39d760aeff33df3b565a0712e49da')"
+check '[ -z "$OUT" ]' "…while a dangling object is still not a fault"
 
 echo "# phase 8b: the installer lists every profile and flags the dead ones"
 PROBE_DIR="$ROOT/profprobe"
@@ -2450,6 +2503,12 @@ check 'jq -er ".data.removedObjects" "$RES" | grep -q "/"' "…and the result na
 # own tree, so until it is recovered even `git status` cannot read the branch —
 # the scan reports what it can and the fields are legitimately thin.
 check 'jq -e ".data | has(\"aheadCount\") and has(\"hasUpstream\") and has(\"cacheTreeBroken\")" "$RES" >/dev/null' "…and it reports whose the damage might be"
+# v18: count-objects rides along, so the repair's final window can name
+# reclaimable space without a second round trip. A real device sat on 6.3 GB
+# of object store while both lightweight toggles read "small", because the
+# footprint check only ran for a partial-clone filter.
+check 'jq -er ".data.countObjects" "$RES" | grep -q "^size-pack:"' "…and it carries count-objects for the storage report"
+check 'jq -er ".data.countObjects" "$RES" | grep -q "^count:"' "…including the loose-object count"
 
 # Whatever the scan said is missing, the targeted fetch brings back: the victim
 # is a reachable object the remote still has.
@@ -2972,6 +3031,18 @@ check 'git log --oneline -1 >/dev/null 2>&1' "history still reads"
 # runner's own capability checks, which is itself asserted here.
 
 cd "$ROOT/vault"
+echo "# phase 18: a healthy commit-graph in a whole history is left alone"
+# The graph is what gc writes when the history is whole; repair-scan must not
+# treat a valid one as damage (v18, the stale-graph drop below).
+git commit-graph write --reachable >/dev/null 2>&1
+GRAPH=".git/objects/info/commit-graph"
+check '[ -e "$GRAPH" ] || [ -d .git/objects/info/commit-graphs ]' "there is a commit-graph to judge"
+req "r-20260811T145959Z-cg01" repair-scan "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T145959Z-cg01.json"
+check 'jq -e ".ok == true and .data.commitGraphDropped == \"false\"" "$RES" >/dev/null' "repair-scan keeps a graph that verifies"
+check '[ -e "$GRAPH" ] || [ -d .git/objects/info/commit-graphs ]' "…and the file is still there"
+
 echo "# phase 18: repo-shallow cuts history and clears this device's reflog"
 FULL_COUNT="$(git rev-list --count HEAD)"
 req "r-20260811T150000Z-fp01" repo-shallow "$TOKEN" '{"depth":1}'
@@ -2982,6 +3053,21 @@ check '[ -f .git/shallow ]' "the shallow boundary exists"
 check 'jq -e ".data.shallow == \"true\"" "$RES" >/dev/null' "status reports shallow=true"
 check '[ "$(git rev-list --count HEAD)" -lt "$FULL_COUNT" ]' "history on this device is shorter than it was"
 check '[ "$(git reflog 2>/dev/null | wc -l)" -eq 0 ]' "the reflog is cleared, so the cut can actually free space"
+
+echo "# phase 18: the commit-graph written before the cut is stale, and repair-scan drops it"
+# The graph still lists the parents the boundary just cut away. git never
+# reads it while the repository is shallow, gc never rewrites it while the
+# repository is shallow, and fsck verifies it on every run and complains —
+# without the `error:` prefix the findings filter looks for, so the plugin
+# said "clean" while the user's fsck stayed red (a real device, 2026-09-04).
+check '[ -e "$GRAPH" ] || [ -d .git/objects/info/commit-graphs ]' "the pre-cut graph survived the cut"
+req "r-20260811T150000Z-cg02" repair-scan "$TOKEN" '{}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260811T150000Z-cg02.json"
+check 'jq -e ".ok == true and .data.commitGraphDropped == \"true\"" "$RES" >/dev/null' "repair-scan reports the graph dropped"
+check '[ ! -e "$GRAPH" ] && [ ! -d .git/objects/info/commit-graphs ]' "…and the cache is gone"
+check '! git fsck --connectivity-only --no-reflogs --no-progress 2>&1 | grep -q "commit-graph"' "…so fsck has nothing left to say about it"
+check 'grep -q "REPAIR scan dropped the commit-graph cache" "$RUNTIME/runner.log"' "…and the log says why the file went"
 req "r-20260811T150001Z-fp02" repo-shallow "$TOKEN" '{"depth":"evil; rm -rf"}'
 bash "$RUNNER"
 check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T150001Z-fp02.json" >/dev/null' \
@@ -3037,6 +3123,124 @@ bash "$RUNNER"
 check 'jq -e ".ok == false and .error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260811T150005Z-fp06.json" >/dev/null' \
   "only blob:none passes; nothing was cloned or replaced"
 check '[ -d .git ] && git log --oneline -1 >/dev/null 2>&1' "the vault's repository is untouched"
+
+# ---------------------------------------------------------------------------
+echo "# phase 19: the repository root is not the vault root (ADR-003, runner v18)"
+# Two arrangements, and they are not symmetrical. Everything asserted here is
+# what the runner alone can answer: the offset it reports, which excludes it
+# writes, and whether it answers into the VAULT's runtime directory while
+# operating on the REPOSITORY. The plugin's half of the conversion is pure and
+# unit-tested; the two cannot be proven together anywhere but a device.
+
+# --- arrangement A: the vault sits INSIDE the repository (repo/docs) --------
+# Created through `init-repo` rather than by hand, because the two exclusion
+# writers only run where a repository is created or cloned — and they are half
+# of what this phase exists to check.
+SR_REPO="$ROOT/split-a"
+mkdir -p "$SR_REPO/src" "$SR_REPO/docs/Notes"
+echo "code" > "$SR_REPO/src/main.ts"
+echo "note" > "$SR_REPO/docs/Notes/a.md"
+SR_RUNTIME="$SR_REPO/docs/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$SR_RUNTIME/requests" "$ROOT/conf-split-a"
+cat > "$ROOT/conf-split-a/config" <<CONF
+NGB_REPO_DIR="$SR_REPO"
+NGB_TOKEN="$TOKEN"
+NGB_RUNTIME_DIR="$SR_RUNTIME"
+CONF
+req_sra() { # $1 id, $2 action, $3 extra-args-json
+  local args="${3:-}"; [ -z "$args" ] && args='{}'
+  cat > "$SR_RUNTIME/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":$args}
+REQ
+}
+
+req_sra "r-20260828T115959Z-sra00" init-repo '{"branch":"trunk","initialCommit":true,"message":"e2e: split-a first commit"}'
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+RES="$SR_RUNTIME/results/r-20260828T115959Z-sra00.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "init-repo creates the repository ABOVE its vault"
+check '[ -d "$SR_REPO/.git" ] && [ ! -e "$SR_REPO/docs/.git" ]' "…at the repository root, not at the vault root"
+# Both exclusion writers, with split roots. The runtime line has to be DERIVED:
+# the hard-coded `.obsidian/…` default names nothing here.
+check 'grep -qxF "docs/.obsidian/plugins/native-git-bridge/runtime/" "$SR_REPO/.git/info/exclude"' \
+  "the runtime exclusion names the path from the REPOSITORY root"
+# And the trash follows the VAULT, which is where Obsidian puts it.
+check 'grep -qxF "docs/.trash/" "$SR_REPO/.git/info/exclude"' \
+  "the trash exclusion follows the vault, not the repository root"
+printf 'build/\n' > "$SR_REPO/.gitignore"
+
+req_sra "r-20260828T120000Z-sra01" status
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+RES="$SR_RUNTIME/results/r-20260828T120000Z-sra01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "split roots: status answers into the VAULT runtime dir"
+check '[ "$(jq -r ".data.vaultInRepo" "$RES")" = "docs" ]' "…and reports the vault as docs/ inside the repository"
+check '[ "$(jq -r ".data.repoInVault" "$RES")" = "" ]' "…with the mirror field empty: only one can be true"
+# The repository's own .gitignore, not whatever sits at that name in the vault.
+check 'jq -er ".data.gitignoreList" "$RES" | grep -qx "build/"' "…and .gitignore rides along from the REPOSITORY root"
+
+req_sra "r-20260828T120001Z-sra02" gitignore-add '{"pattern":"*.tmp"}'
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+RES="$SR_RUNTIME/results/r-20260828T120001Z-sra02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "gitignore-add ok with split roots"
+check 'grep -qx "\*.tmp" "$SR_REPO/.gitignore"' "…and it wrote the REPOSITORY root's .gitignore"
+check '[ "$(tail -c 1 "$SR_REPO/.gitignore" | od -An -tx1 | tr -d " \n")" = "0a" ]' "…leaving the file newline-terminated"
+check 'jq -er ".data.gitignoreList" "$RES" | grep -qx "\*.tmp"' "…and the result carries the new list"
+check 'jq -e ".data | has(\"branchInfo\")" "$RES" >/dev/null' "…with fresh status, so the plugin needs no follow-up"
+
+# The trailing-newline obligation, on the shape that once fused two patterns
+# into one and leaked a protected path's files into the repository (§4 rule 10).
+printf 'Projects/Backup' > "$SR_REPO/.gitignore"
+req_sra "r-20260828T120002Z-sra03" gitignore-add '{"pattern":"/.trash/"}'
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+check 'grep -qx "Projects/Backup" "$SR_REPO/.gitignore"' "an append never fuses with an unterminated last line"
+check 'grep -qx "/.trash/" "$SR_REPO/.gitignore"' "…and the new pattern is its own line"
+
+req_sra "r-20260828T120003Z-sra04" gitignore-remove '{"pattern":"/.trash/"}'
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+check '! grep -qx "/.trash/" "$SR_REPO/.gitignore"' "gitignore-remove takes exactly that line"
+check 'grep -qx "Projects/Backup" "$SR_REPO/.gitignore"' "…and leaves the rest alone"
+
+req_sra "r-20260828T120004Z-sra05" gitignore-add '{"pattern":"two\nlines"}'
+NGB_CONFIG="$ROOT/conf-split-a/config" bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$SR_RUNTIME/results/r-20260828T120004Z-sra05.json" >/dev/null' \
+  "a pattern carrying a newline is refused: one request writes one rule"
+
+# --- arrangement B: the repository sits INSIDE the vault (vault/project) ----
+SR_VAULT="$ROOT/split-b"
+mkdir -p "$SR_VAULT/Inbox" "$SR_VAULT/project"
+echo "loose note" > "$SR_VAULT/Inbox/today.md"
+echo "tracked" > "$SR_VAULT/project/a.md"
+SRB_RUNTIME="$SR_VAULT/.obsidian/plugins/native-git-bridge/runtime"
+mkdir -p "$SRB_RUNTIME/requests" "$ROOT/conf-split-b"
+cat > "$ROOT/conf-split-b/config" <<CONF
+NGB_REPO_DIR="$SR_VAULT/project"
+NGB_TOKEN="$TOKEN"
+NGB_RUNTIME_DIR="$SRB_RUNTIME"
+CONF
+req_srb() { # $1 id, $2 action, $3 extra-args-json
+  local args="${3:-}"; [ -z "$args" ] && args='{}'
+  cat > "$SRB_RUNTIME/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":30,"args":$args}
+REQ
+}
+req_srb "r-20260828T120009Z-srb00" init-repo '{"branch":"trunk","initialCommit":true,"message":"e2e: split-b first commit"}'
+NGB_CONFIG="$ROOT/conf-split-b/config" bash "$RUNNER"
+check 'jq -e ".ok == true" "$SRB_RUNTIME/results/r-20260828T120009Z-srb00.json" >/dev/null' \
+  "init-repo creates the repository INSIDE its vault"
+check '[ -d "$SR_VAULT/project/.git" ] && [ ! -e "$SR_VAULT/.git" ]' "…and the vault itself is not a repository"
+req_srb "r-20260828T120010Z-srb01" status
+NGB_CONFIG="$ROOT/conf-split-b/config" bash "$RUNNER"
+RES="$SRB_RUNTIME/results/r-20260828T120010Z-srb01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "repository inside the vault: status ok"
+check '[ "$(jq -r ".data.repoInVault" "$RES")" = "project" ]' "…and reports the repository as project/ inside the vault"
+check '[ "$(jq -r ".data.vaultInRepo" "$RES")" = "" ]' "…with the mirror field empty"
+# The runtime directory is OUTSIDE the repository here, so no exclusion line
+# can name it — the shipped code wrote the hard-coded default anyway, a line
+# git would never use.
+check '! grep -q "native-git-bridge/runtime" "$SR_VAULT/project/.git/info/exclude" 2>/dev/null' \
+  "no runtime exclusion is written when the runtime dir is outside the repository"
+check '! grep -q "trash" "$SR_VAULT/project/.git/info/exclude" 2>/dev/null' \
+  "…and none for the trash either, which lives above the work tree"
+check '[ -f "$SR_VAULT/Inbox/today.md" ]' "the vault's own notes outside the repository are untouched"
 
 cd "$ROOT/vault"
 git checkout -- . 2>/dev/null || true

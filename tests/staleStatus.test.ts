@@ -34,7 +34,7 @@ function actions(): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
-    syncState: noop, openOutput: noop, showChangeWords: () => true,
+    syncState: noop, panelShown: noop, openOutput: noop, showChangeWords: () => true,
   } as unknown as StatusViewActions;
 }
 

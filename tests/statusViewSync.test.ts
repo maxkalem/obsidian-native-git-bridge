@@ -38,7 +38,7 @@ function actions(over: Partial<StatusViewActions> = {}): StatusViewActions {
     finishInProgressOp: noop, abortInProgressOp: noop, cancel: noop, openFile: noop,
     openDiff: noop, openConflict: noop, stage: noop, unstage: noop, discard: noop,
     folderAction: noop, groupAction: noop, groupMenu: noop, fileMenu: noop,
-    syncState: noop, openOutput: noop,
+    syncState: noop, panelShown: noop, openOutput: noop,
     ...over,
   } as unknown as StatusViewActions;
 }
@@ -103,6 +103,18 @@ describe("a panel opened during an operation", () => {
     expect(detail.hasClass("ngb-sv-progress-tap")).toBe(true);
     expect(__fire(detail, "click")).toBe(true);
     expect(opened).toBe(1);
+  });
+
+  it("reports that it became visible, so the plugin can decide about a refresh", async () => {
+    // The user's report: open the history panel, come back, and this one says
+    // the tree is clean over a file that changed while they were away. The
+    // view only announces the event — whether it is worth a Termux round trip
+    // depends on how old the snapshot is and on what a round trip costs here,
+    // and the view knows neither.
+    let shown = 0;
+    const view = new StatusView({} as Any, actions({ panelShown: () => (shown += 1) })) as Any;
+    await view.onOpen();
+    expect(shown).toBe(1);
   });
 
   it("asks the plugin for the current state as it opens", async () => {

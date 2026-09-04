@@ -15,6 +15,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.LinearLayout
@@ -42,6 +43,14 @@ class SetupActivity : Activity() {
     private lateinit var step1: StepRow
     private lateinit var step2: StepRow
     private lateinit var step3: StepRow
+    /**
+     * Termux must be allowed to keep running once Obsidian is gone: the runner
+     * is started when Obsidian leaves the foreground (sync-on-close) and a
+     * fetch can take a minute. Android battery optimisation and, on Samsung,
+     * Device care's sleeping-apps lists stop exactly that. Advisory: the
+     * foreground path works without it, so it never blocks "ready".
+     */
+    private lateinit var step4: StepRow
     private lateinit var detail: TextView
     /** Raw Termux error, kept small and secondary (for bug reports only). */
     private lateinit var technical: TextView
@@ -168,9 +177,11 @@ class SetupActivity : Activity() {
             requestPermissions(arrayOf(TermuxForwarder.PERMISSION), REQ_PERMISSION)
         }
         step3 = makeStepRow("3") { copyCommandAndOpenTermux() }
+        step4 = makeStepRow("4") { openTermuxBatterySettings() }
         root.addView(step1.container)
         root.addView(step2.container)
         root.addView(step3.container)
+        root.addView(step4.container)
 
         detail = TextView(this).apply {
             textSize = 13f
@@ -324,11 +335,17 @@ class SetupActivity : Activity() {
         style(step1, termuxOk, R.string.check_termux, R.string.check_termux)
         style(step2, permissionOk, R.string.btn_grant, R.string.btn_grant_done)
         style(step3, probeOk, R.string.btn_setup_termux, R.string.btn_setup_termux_done, probeInFlight)
+        val batteryOk = termuxUnrestricted()
+        style(step4, batteryOk, R.string.check_battery, R.string.check_battery_done)
 
         detail.text = when {
             // An outdated runner is NOT "ready": the probe answers, but the
             // plugin will refuse newer actions. Show the fix, not a green light.
             probeOk && runnerLags() -> getString(R.string.runner_outdated_detail)
+            // Everything answers, but Termux may be put to sleep the moment
+            // Obsidian is gone. Name the exact screen, Samsung has two of them.
+            probeOk && !batteryOk ->
+                getString(if (isSamsung()) R.string.battery_hint_samsung else R.string.battery_hint)
             probeOk -> getString(R.string.setup_ready)
             probeInFlight -> getString(R.string.probe_running)
             probeMsg.isNotEmpty() -> explainProbeFailure(probeMsg)
@@ -357,6 +374,49 @@ class SetupActivity : Activity() {
             Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
             BridgeActivity.openTermuxStore(this)
         }
+    }
+
+    /**
+     * Whether Termux is exempt from battery optimisation. The one signal about
+     * ANOTHER app's background standing that Android exposes without a
+     * permission: the power allowlist. On Samsung it is the same switch as
+     * "Unrestricted" under the app's Battery page, and an app on it is kept
+     * out of Device care's sleeping-apps lists; the lists themselves have no
+     * public API, so this is as close as a check can get. Missing Termux reads
+     * as "not exempt", which is the honest answer for step 1 as well.
+     */
+    private fun termuxUnrestricted(): Boolean = try {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.isIgnoringBatteryOptimizations(TermuxForwarder.TERMUX_PACKAGE)
+    } catch (e: Exception) {
+        false
+    }
+
+    private fun isSamsung(): Boolean = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+
+    /**
+     * Land the user on Termux's own settings page, where Battery ->
+     * Unrestricted lives on every Android. The battery page itself has no
+     * stable intent across vendors, and asking the system dialog
+     * (REQUEST_IGNORE_BATTERY_OPTIMIZATIONS) on behalf of a different package
+     * would need a permission this app has no other use for.
+     */
+    private fun openTermuxBatterySettings() {
+        if (!TermuxForwarder.isTermuxInstalled(this)) {
+            Toast.makeText(this, R.string.err_termux_missing, Toast.LENGTH_LONG).show()
+            return
+        }
+        Toast.makeText(
+            this,
+            if (isSamsung()) R.string.battery_toast_samsung else R.string.battery_toast,
+            Toast.LENGTH_LONG
+        ).show()
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:${TermuxForwarder.TERMUX_PACKAGE}")
+            )
+        )
     }
 
     /** True when Obsidian reported a runner older than what the plugin needs. */

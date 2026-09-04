@@ -22,13 +22,17 @@ Locally: open `companion/` in Android Studio, or `gradle assembleDebug`
 ## One-time setup on the phone
 
 1. Install the APK (enable "install unknown apps" for your file manager).
-2. Open the **Git Bridge Companion** app: it shows a 3-step checklist with
+2. Open the **Git Bridge Companion** app: it shows a 4-step checklist with
    live checkmarks. Step 2 asks for the permission with the standard Android
    dialog; step 3 copies the setup command and opens Termux (paste + Enter).
    The third checkmark is verified by a real probe — the app runs the runner
    in Termux and receives the result back via the documented RUN_COMMAND
    pending-intent, so "Termux configured ✅" means the whole chain works.
    The probe re-runs automatically every time you return to the screen.
+   Step 4 is advisory and reads the power allowlist: it opens Termux's
+   Android settings so you can set Battery → Unrestricted (on Samsung, also
+   keep Termux out of Sleeping apps / Deep sleeping apps), which is what lets
+   a sync started as Obsidian closes finish.
    Fallback for OEMs that suppress the permission dialog: "Open Android app
    settings" → Permissions → Additional permissions.
 3. In Obsidian → Native Git Bridge settings → Android integration type →
