@@ -251,6 +251,8 @@ var DEFAULT_DEVICE_SETTINGS = {
   enabledOnThisDevice: false,
   termuxIntegrationEnabled: false,
   repoPathHint: "",
+  vaultInRepo: "",
+  repoInVault: "",
   authToken: "",
   profileId: "",
   protectedPaths: [...DEFAULT_PROTECTED_PATHS],
@@ -1932,7 +1934,7 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       })
     );
     new import_obsidian4.Setting(containerEl).setName("Sync when Obsidian goes to the background").setDesc(
-      "Queues a sync as Obsidian leaves the screen. On Android the trigger does not reach Termux while Obsidian is hidden: the sync runs when you come back, if that is within about 13 minutes; later than that it is dropped. Nothing runs while Obsidian is away, and nothing is queued when there is nothing local to send."
+      "Queues a sync the moment Obsidian starts losing the screen, while Android still lets it reach Termux. If that moment is missed, Android holds the trigger until you come back and the sync runs then, if that is within about 13 minutes; later than that it is dropped. Nothing is queued when there is nothing local to send."
     ).addToggle(
       (t) => t.setValue(s.autoSyncOnClose).onChange((v) => {
         void (async () => {
@@ -2520,9 +2522,11 @@ var CompanionIntentTransport = class {
     this.uriTemplate = uriTemplate;
     this.openUri = openUri;
   }
-  trigger(requestId) {
+  trigger(requestId, options) {
     const safeId = encodeURIComponent(requestId);
-    this.openUri(this.uriTemplate.replace("{id}", safeId));
+    let uri = this.uriTemplate.replace("{id}", safeId);
+    if (options?.quiet) uri += (uri.includes("?") ? "&" : "?") + "quiet=1";
+    this.openUri(uri);
     return { kind: "intent" };
   }
 };
@@ -2781,6 +2785,71 @@ var FileAtCommitView = class extends import_obsidian6.ItemView {
   }
 };
 
+// src/git/repoRoot.ts
+var ROOTS_COINCIDE = { kind: "same" };
+function normalizeOffset(raw) {
+  const s = raw.trim().replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+  if (s === "" || s.length > 512) return null;
+  if (/[\\"\x00-\x1f\x7f]/.test(s)) return null;
+  const parts = s.split("/");
+  if (parts.some((p) => p === "" || p === "." || p === "..")) return null;
+  return parts.join("/");
+}
+var validOffset = normalizeOffset;
+function parseRootOffset(fields) {
+  const vaultInRepo = validOffset(fields.vaultInRepo ?? "");
+  const repoInVault = validOffset(fields.repoInVault ?? "");
+  if (vaultInRepo !== null && repoInVault !== null) return ROOTS_COINCIDE;
+  if (vaultInRepo !== null) return { kind: "vault-in-repo", offset: vaultInRepo };
+  if (repoInVault !== null) return { kind: "repo-in-vault", offset: repoInVault };
+  return ROOTS_COINCIDE;
+}
+function stripPrefix(path, prefix) {
+  if (path === prefix) return "";
+  if (path.startsWith(`${prefix}/`)) return path.slice(prefix.length + 1);
+  return null;
+}
+function clean(path) {
+  return path.trim().replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+}
+function toVault(offset, repoPath) {
+  const p = clean(repoPath);
+  switch (offset.kind) {
+    case "same":
+      return p;
+    case "repo-in-vault":
+      return p === "" ? offset.offset : `${offset.offset}/${p}`;
+    case "vault-in-repo":
+      return stripPrefix(p, offset.offset);
+  }
+}
+function toRepo(offset, vaultPath) {
+  const p = clean(vaultPath);
+  switch (offset.kind) {
+    case "same":
+      return p;
+    case "vault-in-repo":
+      return p === "" ? offset.offset : `${offset.offset}/${p}`;
+    case "repo-in-vault":
+      return stripPrefix(p, offset.offset);
+  }
+}
+var VAULT_TRASH_DIR = ".trash";
+function trashExcludePattern(offset) {
+  const p = toRepo(offset, VAULT_TRASH_DIR);
+  return p === null ? null : `${p}/`;
+}
+function describeRootOffset(offset) {
+  switch (offset.kind) {
+    case "same":
+      return "";
+    case "vault-in-repo":
+      return `The vault is ${offset.offset}/ inside the repository.`;
+    case "repo-in-vault":
+      return `The repository is ${offset.offset}/ inside the vault.`;
+  }
+}
+
 // src/settings/pairing.ts
 var TOKEN_RE = /^[A-Za-z0-9]{16,128}$/;
 var PROFILE_RE = /^p-[0-9a-f]{8,32}$/;
@@ -2797,6 +2866,10 @@ function parsePairingFile(text) {
   const out = { token: r.token };
   if (typeof r.repoPath === "string" && r.repoPath.length < 4096) out.repoPath = r.repoPath;
   if (typeof r.profileId === "string" && PROFILE_RE.test(r.profileId)) out.profileId = r.profileId;
+  const vaultInRepo = typeof r.vaultInRepo === "string" ? normalizeOffset(r.vaultInRepo) : null;
+  const repoInVault = typeof r.repoInVault === "string" ? normalizeOffset(r.repoInVault) : null;
+  if (vaultInRepo !== null && repoInVault === null) out.vaultInRepo = vaultInRepo;
+  if (repoInVault !== null && vaultInRepo === null) out.repoInVault = repoInVault;
   if (typeof r.createdAt === "string") out.createdAt = r.createdAt;
   return out;
 }
@@ -6267,59 +6340,6 @@ function isValidBranchName(name) {
   return true;
 }
 
-// src/git/repoRoot.ts
-var ROOTS_COINCIDE = { kind: "same" };
-function validOffset(raw) {
-  const s = raw.trim().replace(/^\/+|\/+$/g, "");
-  if (s === "") return null;
-  const parts = s.split("/");
-  if (parts.some((p) => p === "" || p === "." || p === "..")) return null;
-  return parts.join("/");
-}
-function parseRootOffset(fields) {
-  const vaultInRepo = validOffset(fields.vaultInRepo ?? "");
-  const repoInVault = validOffset(fields.repoInVault ?? "");
-  if (vaultInRepo !== null && repoInVault !== null) return ROOTS_COINCIDE;
-  if (vaultInRepo !== null) return { kind: "vault-in-repo", offset: vaultInRepo };
-  if (repoInVault !== null) return { kind: "repo-in-vault", offset: repoInVault };
-  return ROOTS_COINCIDE;
-}
-function stripPrefix(path, prefix) {
-  if (path === prefix) return "";
-  if (path.startsWith(`${prefix}/`)) return path.slice(prefix.length + 1);
-  return null;
-}
-function clean(path) {
-  return path.trim().replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
-}
-function toVault(offset, repoPath) {
-  const p = clean(repoPath);
-  switch (offset.kind) {
-    case "same":
-      return p;
-    case "repo-in-vault":
-      return p === "" ? offset.offset : `${offset.offset}/${p}`;
-    case "vault-in-repo":
-      return stripPrefix(p, offset.offset);
-  }
-}
-function toRepo(offset, vaultPath) {
-  const p = clean(vaultPath);
-  switch (offset.kind) {
-    case "same":
-      return p;
-    case "vault-in-repo":
-      return p === "" ? offset.offset : `${offset.offset}/${p}`;
-    case "repo-in-vault":
-      return stripPrefix(p, offset.offset);
-  }
-}
-var VAULT_TRASH_DIR = ".trash";
-function trashExcludePattern(offset) {
-  const p = toRepo(offset, VAULT_TRASH_DIR);
-  return p === null ? null : `${p}/`;
-}
-
 // src/main.ts
 var import_obsidian17 = require("obsidian");
 
@@ -7012,6 +7032,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   async onload() {
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
     this.deviceSettings = this.store.read();
+    this.rootOffset = parseRootOffset(this.deviceSettings);
     this.lastRunnerVersion = Number(this.store.getValue("last-runner-version") ?? 0) || 0;
     this.lastCompanionVersion = this.store.getValue("last-companion-version") ?? "";
     this.log = new OperationLog(this.store);
@@ -7580,8 +7601,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       );
     }
     if (s.autoSyncOnClose) {
+      this.registerDomEvent(window, "blur", () => void this.queueSyncAndForget("blur"));
       const onHide = () => {
-        if (document.visibilityState === "hidden") void this.queueSyncAndForget();
+        if (document.visibilityState === "hidden") void this.queueSyncAndForget("hide");
       };
       this.registerDomEvent(document, "visibilitychange", onHide);
     }
@@ -7605,8 +7627,13 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.log.add("info", "auto", `Automatic sync (${reason}).`);
     await this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
   }
-  /** Queue a sync request without waiting (used only on close/background). */
-  async queueSyncAndForget() {
+  /**
+   * Queue a sync request without waiting (used only when leaving the
+   * foreground). `moment` is which signal fired it — logged, because the
+   * device's log is the only place that shows whether the blur path wins the
+   * race against onStop.
+   */
+  async queueSyncAndForget(moment = "hide") {
     const s = this.deviceSettings;
     if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled || !s.authToken) return;
     if (this.lock.active) return;
@@ -7624,9 +7651,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         s.authToken,
         s.opTimeoutSeconds
       );
+      this.makeTransport().trigger(req.id, { quiet: true });
       await this.client.submit(req);
-      this.makeTransport().trigger(req.id);
-      this.log.add("info", "auto", `Sync-on-close request ${req.id} queued (fire and forget).`);
+      this.log.add("info", "auto", `Sync-on-close request ${req.id} queued on ${moment} (fire and forget).`);
     } catch (e) {
       this.log.add("warn", "auto", `Sync-on-close queueing failed: ${String(e)}`);
     }
@@ -7792,8 +7819,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           authToken: pairing.token,
           repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
           profileId: pairing.profileId ?? this.deviceSettings.profileId,
+          // The layout comes from the side that knows both directories. A
+          // pairing file without the fields is an older installer, and its
+          // profile has one root — which is what empty means.
+          vaultInRepo: pairing.vaultInRepo ?? "",
+          repoInVault: pairing.repoInVault ?? "",
           termuxIntegrationEnabled: true
         });
+        this.rootOffset = parseRootOffset(this.deviceSettings);
         try {
           await adapter.remove(path);
         } catch {
@@ -7848,7 +7881,17 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       `A result came back from profile ${id}, but this vault is paired with ${current}. Keeping ${current}; re-run the installer if the vault was re-paired.`
     );
   }
-  async cmdPairThisVault() {
+  /**
+   * `repoInVault` names a folder INSIDE this vault as the repository (ADR-003
+   * stage C); absent, the vault itself is the repository, as always. The
+   * choice is made here, at pairing, and not at "create" or "clone": the
+   * profile the runner writes carries the repository directory, and the
+   * runner never re-points a profile on a request's say-so (ADR-002). A
+   * relative, downward-only offset is the whole of what a claim may say
+   * about location — the other arrangement, a repository ABOVE the vault, is
+   * the installer's alone, where the user types both paths at a terminal.
+   */
+  async cmdPairThisVault(opts = {}) {
     if (!import_obsidian16.Platform.isAndroidApp) {
       new import_obsidian16.Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
       return;
@@ -7857,7 +7900,26 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const root = new RuntimePaths(this.app.vault.configDir).root;
     const claimPath = `${root}/${CLAIM_FILE}`;
     const pairingPath = `${root}/${PAIRING_FILE}`;
-    const needsRepo = !await this.vaultHasRepository();
+    let repoInVault = "";
+    if (opts.repoInVault !== void 0) {
+      const choice = this.checkRepoFolderChoice(opts.repoInVault);
+      if (!choice.ok) {
+        new ResultModal(this.app, "That folder cannot be the repository", [choice.reason], { isError: true }).open();
+        return;
+      }
+      repoInVault = choice.offset;
+    }
+    const gitDir = repoInVault ? `${repoInVault}/.git` : ".git";
+    let needsRepo;
+    try {
+      if (repoInVault && !await adapter.exists(repoInVault)) await adapter.mkdir(repoInVault);
+      needsRepo = !await adapter.exists(gitDir);
+    } catch (e) {
+      new ResultModal(this.app, "Pairing failed", [`The repository folder could not be prepared: ${String(e)}`], {
+        isError: true
+      }).open();
+      return;
+    }
     try {
       await this.client.ensureRuntimeDirs();
       await adapter.write(
@@ -7866,7 +7928,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           {
             createdAt: (/* @__PURE__ */ new Date()).toISOString(),
             vault: this.app.vault.getName(),
-            bootstrap: needsRepo
+            bootstrap: needsRepo,
+            ...repoInVault ? { repoInVault } : {}
           },
           null,
           2
@@ -8047,16 +8110,119 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     ).open();
   }
   /**
+   * The two ways to pair, offered together wherever pairing is offered: the
+   * vault as the repository (the ordinary case, one tap), or a folder inside
+   * the vault, which asks for the folder first. One list, two callers, so
+   * the setup guide and the "not paired yet" precondition cannot drift.
+   */
+  pairActions() {
+    return [
+      {
+        label: "Pair this vault",
+        cta: true,
+        keepOpen: true,
+        onClick: () => void this.cmdPairThisVault()
+      },
+      {
+        label: "Pair with a folder inside the vault\u2026",
+        keepOpen: true,
+        onClick: () => this.promptPairWithFolder()
+      }
+    ];
+  }
+  /**
+   * Ask which folder inside the vault is the repository, then pair. The
+   * folder is created if it is not there yet (adoption itself creates
+   * nothing), and refused before the claim is written when it cannot be a
+   * repository at all.
+   */
+  promptPairWithFolder() {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Repository folder inside this vault",
+        placeholder: "project",
+        submitLabel: "Pair with this folder",
+        initial: ""
+      },
+      (raw) => {
+        if (raw === null) return;
+        const choice = this.checkRepoFolderChoice(raw);
+        if (!choice.ok) {
+          new ResultModal(this.app, "That folder cannot be the repository", [choice.reason], { isError: true }).open();
+          return;
+        }
+        new ConfirmModal(
+          this.app,
+          {
+            title: `Pair with ${choice.offset}/?`,
+            body: [
+              `Git will work in ${choice.offset}/ and nowhere else in this vault: notes outside that folder are not tracked, not synced, and never appear in the Git panel.`,
+              "The folder is created if it does not exist yet. Termux writes it into this device's profile, so changing it later means pairing again.",
+              "Files in the folder are not touched by pairing."
+            ],
+            confirmLabel: "Pair",
+            icon: "check"
+          },
+          async (confirmed) => {
+            if (confirmed) await this.cmdPairThisVault({ repoInVault: choice.offset });
+          }
+        ).open();
+      }
+    ).open();
+  }
+  /**
    * Does this vault hold a repository? Answered from the vault itself, without
    * a Termux round trip: `.git` is either a directory (normal) or a file (a
-   * worktree link). Used to decide which bootstrap steps make sense.
+   * worktree link), at the REPOSITORY root — the vault root, or the folder
+   * inside the vault the profile was paired to. Used to decide which
+   * bootstrap steps make sense.
+   *
+   * With the vault INSIDE the repository, `.git` lies above the vault where
+   * Obsidian cannot look. That arrangement is reachable only through the
+   * installer, which pairs nothing but an existing repository, so the answer
+   * is yes; a repository that later disappears is reported by the runner as
+   * `REPO_MISSING`, which every command already handles.
    */
   async vaultHasRepository() {
+    const gitDir = this.vaultPathOf(".git");
+    if (gitDir === null) return true;
     try {
-      return await this.app.vault.adapter.exists(".git");
+      return await this.app.vault.adapter.exists(gitDir);
     } catch {
       return false;
     }
+  }
+  /**
+   * "Where the repository is", for a window that has to name it: the vault,
+   * or a folder inside it.
+   */
+  repoPlaceName() {
+    return this.rootOffset.kind === "repo-in-vault" ? `the folder ${this.rootOffset.offset}/` : "this vault";
+  }
+  /**
+   * The folder a NEW pairing would put the repository in, typed by the user,
+   * checked before it goes anywhere near a claim. Returns the normalised
+   * offset, or a reason it is refused. The runner refuses the same things
+   * again, but a refusal here has a face and a reason; a refusal there is a
+   * line in a log the user has not opened.
+   */
+  checkRepoFolderChoice(raw) {
+    const offset = normalizeOffset(raw);
+    if (offset === null) {
+      return {
+        ok: false,
+        reason: "A folder inside this vault, written relative to the vault root: 'project' or 'Work/project'. No leading slash, no '..', no quotes."
+      };
+    }
+    const cfg = this.app.vault.configDir.replace(/^\/+|\/+$/g, "");
+    if (offset === cfg || offset.startsWith(`${cfg}/`)) {
+      return { ok: false, reason: `${cfg}/ is Obsidian's own configuration folder and cannot be the repository.` };
+    }
+    if (offset === VAULT_TRASH_DIR || offset.startsWith(`${VAULT_TRASH_DIR}/`)) {
+      return { ok: false, reason: `${VAULT_TRASH_DIR}/ is Obsidian's trash and cannot be the repository.` };
+    }
+    return { ok: true, offset };
   }
   /**
    * "Set up the repository for this vault": the missing beginning of the
@@ -8073,31 +8239,32 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const paired = s.authToken !== "";
     const lines = [];
     const actions = [];
+    const layout = paired ? describeRootOffset(this.rootOffset) : "";
+    const place = paired ? this.repoPlaceName() : "this vault";
+    const subject = place === "this vault" ? "This vault" : `The repository folder ${this.rootOffset.kind === "repo-in-vault" ? this.rootOffset.offset : ""}/`;
     lines.push(
-      hasRepo ? "This vault is a git repository." : "This vault is NOT a git repository yet.",
+      hasRepo ? `${subject} is a git repository.` : `${subject} is NOT a git repository yet.`,
       `Paired with Termux: ${paired ? `yes (${s.profileId || "profile unknown"})` : "no"}`,
+      ...layout ? [layout] : [],
       ""
     );
     if (!paired) {
       lines.push(
         "Termux has to know this vault before it can do anything here. Pairing works even before the repository exists.",
         "1. Pair this vault (Termux generates the token and answers).",
-        "2. Then come back here to create or clone the repository."
+        "2. Then come back here to create or clone the repository.",
+        "",
+        "The repository is normally the vault itself. It can instead be one folder inside the vault \u2014 the rest of the vault then stays outside git \u2014 and that is decided when pairing, because Termux writes the folder into the profile it creates."
       );
-      actions.push({
-        label: "Pair this vault",
-        cta: true,
-        keepOpen: true,
-        onClick: () => void this.cmdPairThisVault()
-      });
+      actions.push(...this.pairActions());
       new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
       return;
     }
     if (!hasRepo) {
       lines.push(
         "Two ways to give it one:",
-        "\u2022 Start fresh \u2014 create an empty repository here and, if you want, commit what the vault already contains. You can add a remote afterwards.",
-        "\u2022 Clone an existing one \u2014 the vault keeps the files it already has; anything that exists on both sides is reported and you decide, nothing is overwritten silently.",
+        `\u2022 Start fresh \u2014 create an empty repository in ${place} and, if you want, commit what ${place === "this vault" ? "the vault" : "that folder"} already contains. You can add a remote afterwards.`,
+        `\u2022 Clone an existing one \u2014 ${place === "this vault" ? "the vault" : "the folder"} keeps the files it already has; anything that exists on both sides is reported and you decide, nothing is overwritten silently.`,
         "",
         "Credentials never come through the plugin. Set them up once in Termux (a credential helper, an SSH key, or `gh auth login`) \u2014 see docs/setup.md."
       );
@@ -8143,11 +8310,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           "Termux has to know this vault before it can create or clone anything here.",
           "Pairing works even before the repository exists."
         ],
-        {
-          actions: [
-            { label: "Pair this vault", cta: true, keepOpen: true, onClick: () => void this.cmdPairThisVault() }
-          ]
-        }
+        { actions: this.pairActions() }
       ).open();
       return false;
     }
@@ -8193,7 +8356,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     new CommitMessageModal(
       this.app,
       {
-        title: "Create a repository in this vault",
+        title: `Create a repository in ${this.repoPlaceName()}`,
         placeholder: "main",
         submitLabel: "Create repository",
         initial: "main"
@@ -8212,8 +8375,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           {
             title: "Commit what is here?",
             body: [
-              `A new repository on branch '${branch}' will be created in this vault.`,
-              "Confirm to also make a first commit containing every file the vault currently holds (the plugin's runtime folder is excluded automatically).",
+              `A new repository on branch '${branch}' will be created in ${this.repoPlaceName()}.`,
+              `Confirm to also make a first commit containing every file ${this.rootOffset.kind === "repo-in-vault" ? "that folder" : "the vault"} currently holds (the plugin's runtime folder is excluded automatically).`,
               "Decline to create the repository empty and commit later, after reviewing what is in it."
             ],
             confirmLabel: "Create and commit everything",
@@ -8295,7 +8458,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     new CommitMessageModal(
       this.app,
       {
-        title: "Clone into this vault",
+        title: `Clone into ${this.repoPlaceName()}`,
         placeholder: "https://github.com/you/vault.git",
         submitLabel: "Clone",
         initial: ""
@@ -10139,6 +10302,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         Platform: import_obsidian16.Platform.isAndroidApp ? "Android app" : import_obsidian16.Platform.isMobile ? "mobile" : "desktop",
         "Obsidian requires": this.manifest.minAppVersion,
         "Profile for this vault": s.profileId || "(none yet)",
+        "Repository root": describeRootOffset(this.rootOffset) || "the vault root",
         "Protected paths (effective)": this.effectiveProtectedPaths().join(", ") || "(none)",
         "Termux integration": String(s.termuxIntegrationEnabled)
       },
@@ -10343,6 +10507,19 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       vaultInRepo: d.vaultInRepo,
       repoInVault: d.repoInVault
     });
+    if (d.vaultInRepo !== void 0 || d.repoInVault !== void 0) {
+      const rememberVault = this.rootOffset.kind === "vault-in-repo" ? this.rootOffset.offset : "";
+      const rememberRepo = this.rootOffset.kind === "repo-in-vault" ? this.rootOffset.offset : "";
+      const s = this.deviceSettings;
+      if (s.vaultInRepo !== rememberVault || s.repoInVault !== rememberRepo) {
+        this.deviceSettings = this.store.write({ vaultInRepo: rememberVault, repoInVault: rememberRepo });
+        this.log.add(
+          "info",
+          "pairing",
+          describeRootOffset(this.rootOffset) || "The repository root and the vault root are the same folder."
+        );
+      }
+    }
     this.absorbGitignoreList(d.gitignoreList);
     if (typeof d.rescueBranches === "string") this.offerRescueCleanup(d.rescueBranches);
     if (!d.branchInfo) return;
@@ -13067,6 +13244,7 @@ ${(d.fsckMissing ?? "").trim()}` : "still missing: nothing"
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
     report.pluginSide["Profile for this vault"] = s.profileId || "(none yet)";
+    report.pluginSide["Repository root"] = describeRootOffset(this.rootOffset) || "the vault root";
     report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Protected paths (derived from sparse)"] = (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";
     report.pluginSide["Protected paths (effective)"] = this.effectiveProtectedPaths().join(", ") || "(none)";

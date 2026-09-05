@@ -203,6 +203,25 @@ valid_abs_path() {
   return 0
 }
 
+# The one thing a claim may say about WHERE the repository is (ADR-003): a
+# relative offset below the vault, `project` or `Work/project`. Relative by
+# construction — no leading slash, no `..`, no empty or `.` segment — so it
+# cannot name a directory the user did not open as a vault; the caller still
+# resolves it and checks the result stays under the vault, because a segment
+# can be a symlink. Stricter than valid_rel_path on purpose: it becomes a
+# profile's repository directory, where a quote would break the file.
+valid_repo_offset() {
+  local o="$1"
+  [ -n "$o" ] || return 1
+  [ "${#o}" -le 512 ] || return 1
+  case "$o" in
+    /*|*/|*//*|*\\*|*'"'*|~*|:*) return 1 ;;
+    .|./*|*/.|*/./*|..|../*|*/..|*/../*) return 1 ;;
+  esac
+  printf '%s' "$o" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+  return 0
+}
+
 valid_rel_path() {
   # repository-relative: not empty, no leading /, no backslash, no '..' segment,
   # no control chars, not inside .git, no git pathspec magic.
@@ -690,8 +709,19 @@ relocate_profiles() { # $1..$n = marker files
 # The token is generated HERE, in Termux: nothing a claim file contains is
 # trusted, so a stray file can at most cause an empty profile for a repository
 # the user already opened as a vault on this device.
+#
+# The one thing a claim may say about the repository's location (ADR-003) is
+# `repoInVault`, a relative offset BELOW the vault: the repository is then
+# `<vault>/<offset>` rather than the vault itself. Relative and downward only,
+# so a claim can never name a directory the user did not open as a vault; the
+# other arrangement — the repository ABOVE the vault — is reachable from the
+# installer alone, where the user types both paths at a terminal (threat
+# model T13). The offset is validated in shape, resolved, and checked to stay
+# under the vault, because a segment can be a symlink; and the directory has
+# to exist already — the plugin creates it inside its own vault before asking,
+# so adoption itself creates nothing.
 adopt_claims() { # $1..$n = marker files
-  local cf vault created age now id token runtime
+  local cf vault created age now id token runtime repo offset canon_v canon_r cfg
   for cf in "$@"; do
     case "$cf" in */claim.json) : ;; *) continue ;; esac
     vault="$(vault_dir_of_runtime_file "$cf")"
@@ -708,34 +738,79 @@ adopt_claims() { # $1..$n = marker files
       rm -f "$cf" 2>/dev/null || true
       continue
     fi
+    repo="$vault"
+    offset="$(jq -r '.repoInVault // empty' "$cf" 2>/dev/null || true)"
+    if [ -n "$offset" ]; then
+      if ! valid_repo_offset "$offset"; then
+        log "CLAIM $vault names an invalid repository folder; not pairing it"
+        rm -f "$cf" 2>/dev/null || true
+        continue
+      fi
+      repo="$vault/$offset"
+      if [ ! -d "$repo" ]; then
+        log "CLAIM $vault names a repository folder that does not exist ($offset); not pairing it"
+        continue
+      fi
+      canon_v="$(canon_dir "$vault")"
+      canon_r="$(canon_dir "$repo")"
+      case "$canon_r" in
+        "$canon_v"/*) : ;;
+        *) log "CLAIM $vault names a repository folder that resolves outside the vault ($offset); not pairing it"
+           rm -f "$cf" 2>/dev/null || true
+           continue ;;
+      esac
+      # Obsidian's own configuration directory is the one folder inside a
+      # vault that can never be the repository: the runtime directory lives
+      # under it, and a repository there would track its own request queue.
+      cfg="$(canon_dir "$(config_dir_of_runtime_dir "$(dirname "$cf")")")"
+      case "$canon_r" in
+        "$cfg"|"$cfg"/*)
+          log "CLAIM $vault names Obsidian's configuration directory as the repository ($offset); not pairing it"
+          rm -f "$cf" 2>/dev/null || true
+          continue ;;
+      esac
+      if profile_file_for_repo "$repo" >/dev/null; then
+        log "CLAIM $repo already has a profile; not pairing $vault to it again"
+        rm -f "$cf" 2>/dev/null || true
+        continue
+      fi
+    fi
     # Normally a claim is only honoured for a directory that is already a git
     # work tree. A vault that asks to be BOOTSTRAPPED has none yet by
     # definition, so it may pair without one — the claim file's own location
     # proves it is an Obsidian vault (it lies in this plugin's runtime folder),
     # and until a repository exists the profile can answer nothing but the two
     # actions that create one.
-    if ! dir_is_own_worktree "$vault"; then
+    if ! dir_is_own_worktree "$repo"; then
       if [ "$(jq -r '.bootstrap // false' "$cf" 2>/dev/null || echo false)" != "true" ]; then
-        log "CLAIM $vault is not a git repository of its own; not pairing it"
+        log "CLAIM $repo is not a git repository of its own; not pairing it"
         continue
       fi
-      if [ ! -d "$vault" ] || [ ! -w "$vault" ]; then
-        log "CLAIM $vault is not a writable directory; not pairing it"
+      if [ ! -d "$repo" ] || [ ! -w "$repo" ]; then
+        log "CLAIM $repo is not a writable directory; not pairing it"
         continue
       fi
-      log "CLAIM $vault has no repository yet; pairing it for bootstrap"
+      log "CLAIM $repo has no repository yet; pairing it for bootstrap"
     fi
     id="$(new_profile_id)"
     token="$(new_token)"
-    runtime="$(default_runtime_for "$vault")"
-    write_profile_file "$id" "$vault" "$runtime" "$token" || continue
+    # The claim's own directory IS the runtime directory: taking it from the
+    # file rather than rebuilding it from a `.obsidian` default keeps a vault
+    # with a renamed configuration directory paired to the folder it actually
+    # writes to.
+    runtime="$(dirname "$cf")"
+    write_profile_file "$id" "$repo" "$runtime" "$token" || continue
     mkdir -p "$runtime" 2>/dev/null || true
-    printf '{"token":"%s","repoPath":"%s","profileId":"%s","createdAt":"%s"}\n' \
-      "$token" "$vault" "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$runtime/pairing.json.tmp" &&
+    printf '{"token":"%s","repoPath":"%s","profileId":"%s","repoInVault":"%s","createdAt":"%s"}\n' \
+      "$token" "$repo" "$id" "$offset" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$runtime/pairing.json.tmp" &&
       mv "$runtime/pairing.json.tmp" "$runtime/pairing.json"
-    printf '{"profileId":"%s","repoDir":"%s"}\n' "$id" "$vault" > "$runtime/profile.json" 2>/dev/null || true
+    printf '{"profileId":"%s","repoDir":"%s"}\n' "$id" "$repo" > "$runtime/profile.json" 2>/dev/null || true
     rm -f "$cf" 2>/dev/null || true
-    log "ADOPTED $vault as profile $id (new token; pairing file written)"
+    if [ -n "$offset" ]; then
+      log "ADOPTED $vault as profile $id with its repository at $offset/ (new token; pairing file written)"
+    else
+      log "ADOPTED $vault as profile $id (new token; pairing file written)"
+    fi
   done
 }
 

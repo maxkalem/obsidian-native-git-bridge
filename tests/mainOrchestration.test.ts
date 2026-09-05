@@ -753,17 +753,28 @@ describe("one surface per question (no legacy modals)", () => {
  */
 function answerWith(h: Harness, build: (req: Any) => Any): void {
     h.runner.onTrigger = (id) => {
-      const req = JSON.parse(h.adapter.files.get(paths.requestFile(id))!);
-      h.adapter.files.set(
-        paths.resultFile(id),
-        JSON.stringify({
-          protocolVersion: 1,
-          id,
-          action: req.action,
-          runnerVersion: RUNNER_MIN_VERSION,
-          ...build(req),
-        })
-      );
+      const answer = () => {
+        const raw = h.adapter.files.get(paths.requestFile(id));
+        // The leave-time trigger fires BEFORE its request is written, by
+        // design (the start must leave while the window is still visible);
+        // a real runner takes a second to come up, so it never notices.
+        if (raw === undefined) {
+          setTimeout(answer, 0);
+          return;
+        }
+        const req = JSON.parse(raw);
+        h.adapter.files.set(
+          paths.resultFile(id),
+          JSON.stringify({
+            protocolVersion: 1,
+            id,
+            action: req.action,
+            runnerVersion: RUNNER_MIN_VERSION,
+            ...build(req),
+          })
+        );
+      };
+      answer();
     };
 }
 
@@ -787,6 +798,105 @@ describe("repository bootstrap", () => {
     await h.plugin.cmdPairThisVault();
     const claim = JSON.parse(h.adapter.files.get(`${paths.root}/claim.json`)!);
     expect(claim.bootstrap).toBe(false);
+  });
+
+  it("pairs with a folder inside the vault: the claim names it, the folder is created, bootstrap is judged there", async () => {
+    // ADR-003 stage C. The offset travels in the claim (never a path, never
+    // upward), the plugin makes the folder exist before Termux looks, and
+    // "does it need a repository" is asked of THAT folder, not the vault root.
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    h.adapter.dirs.add(".git"); // the vault root happens to be a repository of its own
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 200;
+    h.runner.onTrigger = () => {
+      const claim = JSON.parse(h.adapter.files.get(`${paths.root}/claim.json`)!);
+      expect(claim.repoInVault).toBe("Work/project");
+      expect(claim.bootstrap).toBe(true);
+      expect(claim.token).toBeUndefined();
+      // Termux echoes the offset back: the plugin learns the layout from the
+      // side that wrote the profile, not from its own proposal.
+      h.adapter.files.set(
+        `${paths.root}/pairing.json`,
+        JSON.stringify({
+          token: "d1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6",
+          profileId: "p-66778899aabbccdd",
+          repoPath: "/storage/emulated/0/Main/Work/project",
+          repoInVault: "Work/project",
+        })
+      );
+    };
+    await h.plugin.cmdPairThisVault({ repoInVault: " /Work/project/ " });
+    expect(h.adapter.dirs.has("Work/project")).toBe(true);
+    expect(h.plugin.deviceSettings.authToken).toBe("d1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6");
+    expect(h.plugin.deviceSettings.repoInVault).toBe("Work/project");
+    expect(h.plugin.deviceSettings.vaultInRepo).toBe("");
+    // From here the plugin's path model is the folder's: the repository
+    // question looks at Work/project/.git, and a repository path maps under it.
+    expect(await h.plugin.vaultHasRepository()).toBe(false);
+    h.adapter.dirs.add("Work/project/.git");
+    expect(await h.plugin.vaultHasRepository()).toBe(true);
+    expect((h.plugin as Any).vaultPathOf("notes/a.md")).toBe("Work/project/notes/a.md");
+    expect((h.plugin as Any).repoPathOf("Inbox/loose.md")).toBeNull();
+  });
+
+  it("refuses a repository folder that cannot be one, before any claim is written", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    h.plugin.pairingPollMs = 1;
+    h.plugin.pairingWaitMs = 10;
+    for (const bad of ["../Outside", ".obsidian", ".obsidian/plugins", ".trash", ".trash/x", 'a"b']) {
+      await h.plugin.cmdPairThisVault({ repoInVault: bad });
+      expect(h.adapter.files.has(`${paths.root}/claim.json`), bad).toBe(false);
+      expect(h.adapter.dirs.has(bad), bad).toBe(false);
+    }
+    expect(__modalTitles.filter((t) => /cannot be the repository/.test(t))).toHaveLength(6);
+    expect(h.runner.uris).toHaveLength(0);
+  });
+
+  it("remembers the layout the runner reports in status, so the next load knows it before the first round trip", async () => {
+    // A real localStorage stand-in for this one test: the store is otherwise
+    // volatile per instance, and "the next load" is exactly what is asserted.
+    const kv = new Map<string, string>();
+    (globalThis as Any).activeWindow = {
+      localStorage: {
+        getItem: (k: string) => kv.get(k) ?? null,
+        setItem: (k: string, v: string) => void kv.set(k, v),
+        removeItem: (k: string) => void kv.delete(k),
+      },
+    };
+    try {
+      const h = await loadPlugin();
+      await enableBridge(h);
+      h.useFastClient();
+      h.runner.onTrigger = (id) => {
+        const r = JSON.parse(okStatusResult(id, RUNNER_MIN_VERSION));
+        r.data.repoInVault = "project";
+        r.data.vaultInRepo = "";
+        h.adapter.files.set(paths.resultFile(id), JSON.stringify(r));
+      };
+      await h.plugin.cmdStatus(true);
+      expect(h.plugin.deviceSettings.repoInVault).toBe("project");
+      expect((h.plugin as Any).vaultPathOf("a.md")).toBe("project/a.md");
+      // A second plugin instance over the same device store starts with the
+      // layout already in place, before any round trip.
+      const again = await loadPlugin();
+      expect(again.plugin.deviceSettings.repoInVault).toBe("project");
+      expect((again.plugin as Any).vaultPathOf("a.md")).toBe("project/a.md");
+      installGlobals(h.runner); // loading `again` re-pointed window.open at its own fake runner
+      // And a runner that reports one root again corrects the memory.
+      h.runner.onTrigger = (id) => {
+        const r = JSON.parse(okStatusResult(id, RUNNER_MIN_VERSION));
+        r.data.repoInVault = "";
+        r.data.vaultInRepo = "";
+        h.adapter.files.set(paths.resultFile(id), JSON.stringify(r));
+      };
+      await h.plugin.cmdStatus(true);
+      expect(h.plugin.deviceSettings.repoInVault).toBe("");
+      expect((h.plugin as Any).vaultPathOf("a.md")).toBe("a.md");
+    } finally {
+      delete (globalThis as Any).activeWindow;
+    }
   });
 
   it("answers a refresh in a repo-less vault with the setup window, not an error", async () => {
@@ -2604,6 +2714,40 @@ describe("sync on close (fire and forget)", () => {
     await (h.plugin as Any).queueSyncAndForget();
     await (h.plugin as Any).queueSyncAndForget(); // immediately again
     expect(requestFiles(h.adapter)).toHaveLength(1); // second one suppressed
+  });
+
+  it("the leave-time trigger is quiet, leaves before the write, and says which signal fired it", async () => {
+    // adb logcat on the device (2026-09-05): a start after visibilitychange is
+    // BAL_BLOCK and runs only on return; a start while the window is still
+    // visible (onPause = window blur) is allowed. So the URI goes out first,
+    // asks the companion not to ack (an ack would pull Obsidian back to the
+    // front), and the request file follows.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    let fileExistedAtTrigger: boolean | null = null;
+    h.runner.onTrigger = (id) => {
+      fileExistedAtTrigger = h.adapter.files.has(paths.requestFile(id));
+    };
+    await (h.plugin as Any).queueSyncAndForget("blur");
+    expect(h.runner.uris).toHaveLength(1);
+    expect(h.runner.uris[0]).toMatch(/^nativegitbridge:\/\/run\?id=r-[0-9TZ]+-[a-z0-9]+&quiet=1$/);
+    expect(fileExistedAtTrigger).toBe(false);
+    expect(requestFiles(h.adapter)).toHaveLength(1);
+    const line = h.plugin.log.list().find((e) => /Sync-on-close request/.test(e.message));
+    expect(line?.message).toMatch(/queued on blur/);
+    // The hide that follows the same leave is inside the minimum interval:
+    // one request, not two.
+    await (h.plugin as Any).queueSyncAndForget("hide");
+    expect(requestFiles(h.adapter)).toHaveLength(1);
+  });
+
+  it("a blur caused by our own operation's companion overlay does not queue a sync", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    expect((h.plugin as Any).lock.tryAcquire("r-20260905T000000Z-busy01", "status")).toBe(true);
+    await (h.plugin as Any).queueSyncAndForget("blur");
+    expect(requestFiles(h.adapter)).toHaveLength(0);
+    (h.plugin as Any).lock.release("r-20260905T000000Z-busy01");
   });
 });
 

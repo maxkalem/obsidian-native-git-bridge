@@ -98,6 +98,17 @@ class BridgeActivity : Activity() {
             }
             uri.host != "run" ->
                 toast(R.string.err_unknown_action)
+            // A quiet run: the trigger fired as Obsidian was leaving the
+            // foreground (window blur, still visible, so Android let this
+            // activity start). Forward and vanish. No ack — that is a
+            // startActivity of obsidian://, which would pull the app the user
+            // just left back onto the screen; no toast; and no repair screen
+            // or Termux window either, because nobody is looking. Whatever
+            // failed here fails again, visibly, on the next foreground
+            // trigger. The request file the plugin wrote simply waits.
+            uri.getQueryParameter("quiet") == "1" -> {
+                if (TermuxForwarder.hasPermission(this)) TermuxForwarder.forward(this)
+            }
             !TermuxForwarder.hasPermission(this) -> {
                 ackObsidian("run-no-permission")
                 toast(R.string.err_no_permission_opening_setup)

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeRootOffset,
+  normalizeOffset,
   parseRootOffset,
   ROOTS_COINCIDE,
   toRepo,
@@ -148,6 +149,23 @@ describe("trashExcludePattern", () => {
     // vault, that is above the work tree and git can never see it, so there
     // is no line to write and writing one would be a lie about the layout.
     expect(trashExcludePattern(REPO_IN_VAULT)).toBeNull();
+  });
+});
+
+describe("normalizeOffset", () => {
+  it("accepts a folder or a nested folder, and cleans the slashes it picks up", () => {
+    expect(normalizeOffset("project")).toBe("project");
+    expect(normalizeOffset("Work/project")).toBe("Work/project");
+    expect(normalizeOffset("  /Work/project/ ")).toBe("Work/project");
+    expect(normalizeOffset("./project")).toBe("project");
+    expect(normalizeOffset("Нотатки/проєкт")).toBe("Нотатки/проєкт");
+  });
+
+  it("refuses everything that could leave the vault or break the profile file", () => {
+    for (const bad of ["", "   ", "..", "../x", "a/../b", "a/./b", "a//b", ".", "/", 'a"b', "a\\b", "a\nb", "a\u0007b"]) {
+      expect(normalizeOffset(bad)).toBeNull();
+    }
+    expect(normalizeOffset("x".repeat(513))).toBeNull();
   });
 });
 

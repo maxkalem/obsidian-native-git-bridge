@@ -10,7 +10,7 @@ The bridge is **three parts that update independently**. Knowing which is which 
 
 ## The rule that matters
 
-**Updating the plugin never updates the runner.** The plugin folder often syncs through git itself, so `main.js` can arrive on a device silently, while the runner stays whatever it was. The two enforce a version handshake (`RUNNER_MIN_VERSION` in the plugin vs `RUNNER_VERSION` reported in every result): when the runner is too old, the plugin says so explicitly and every result modal repeats the hint until you update.
+**Updating the plugin never updates the runner.** The plugin folder often syncs through git itself, so `main.js` can arrive on a device silently, while the runner stays whatever it was. (That delivery route exists only while the plugin folder is inside the repository. With the repository kept as one folder of a larger vault, `.obsidian/` lies outside it and the plugin is not carried between devices by this repository at all; each device updates the plugin the ordinary way, by copying the files or through the community-plugins list.) The two enforce a version handshake (`RUNNER_MIN_VERSION` in the plugin vs `RUNNER_VERSION` reported in every result): when the runner is too old, the plugin says so explicitly and every result modal repeats the hint until you update.
 
 **Update the runner when the plugin asks for it, and not before.** The plugin says so plainly: the settings badge turns red and every result window repeats the hint until the runner is new enough. That is not advice but a requirement — the actions the new plugin sends do not exist in the old runner.
 
@@ -35,6 +35,8 @@ bash "<vault>/.obsidian/plugins/native-git-bridge/termux/bootstrap.sh" "<vault>"
 ```
 
 Settings → *Install without a network* shows that line with your paths filled in. Nothing is downloaded, so a GitHub outage, a captive portal or a flight cannot block a runner update.
+
+Where the repository and the vault are different folders, re-running the installer with the repository path alone is enough: it finds the repository's existing profile and keeps the vault recorded in it. Both paths (`--vault`) are needed only the first time, or to change which vault the repository serves.
 
 The manual route is unchanged: paste the install command again in Termux (Settings → Native Git Bridge → Copy command & open Termux, or see [setup.md](setup.md) step 3). Re-running is safe and idempotent: it keeps **this vault's** pairing token, re-checks auth, re-writes the runner, and re-runs the self-test. Nothing in the vault or the git history is touched.
 

@@ -741,7 +741,7 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Sync when Obsidian goes to the background")
       .setDesc(
-        "Queues a sync as Obsidian leaves the screen. On Android the trigger does not reach Termux while Obsidian is hidden: the sync runs when you come back, if that is within about 13 minutes; later than that it is dropped. Nothing runs while Obsidian is away, and nothing is queued when there is nothing local to send."
+        "Queues a sync the moment Obsidian starts losing the screen, while Android still lets it reach Termux. If that moment is missed, Android holds the trigger until you come back and the sync runs then, if that is within about 13 minutes; later than that it is dropped. Nothing is queued when there is nothing local to send."
       )
       .addToggle((t) =>
         t.setValue(s.autoSyncOnClose).onChange((v) => { void (async () => {

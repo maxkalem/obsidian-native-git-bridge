@@ -1,6 +1,12 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # Native Git Bridge - Termux installer.
-# Usage: bash install.sh [/absolute/path/to/vault-repo] [--with-ssh]
+# Usage: bash install.sh [/absolute/path/to/repository] [--vault /absolute/path/to/vault] [--with-ssh]
+#
+# One path when the vault IS the repository, which is the usual arrangement.
+# Two when they differ: the repository is the git work tree, the vault is the
+# folder Obsidian opens (it holds .obsidian and this plugin's runtime folder),
+# and one has to contain the other — a documentation vault inside a code
+# repository, or one folder of a larger vault kept as a repository of its own.
 set -u
 
 # Output width. Termux on a phone is far narrower than a desktop terminal (the
@@ -201,22 +207,82 @@ ask_line() { # $1 prompt -> stdout answer
   fi
 }
 
-# Find Obsidian vaults that are git repositories on shared storage.
+# Find Obsidian vaults on shared storage that belong to a git repository, and
+# say which one. Prints one `vault<TAB>repository` line per vault: the same
+# directory twice in the usual arrangement, an ANCESTOR when the vault sits
+# inside a code repository (git finds that one by walking up from the vault).
+# A repository BELOW a vault cannot be detected — nothing says which folder
+# it would be — and is named on the command line instead.
 detect_vaults() {
   local roots="/storage/emulated/0 $HOME/storage/shared /sdcard"
-  local r d v
+  local r d v top
   { for r in $roots; do
       [ -d "$r" ] || continue
       find "$r/" -maxdepth 4 -type d -name .obsidian 2>/dev/null
     done; } | while IFS= read -r d; do
       v="$(dirname "$d")"
-      [ -d "$v/.git" ] && realpath "$v" 2>/dev/null
+      top="$(git -C "$v" rev-parse --show-toplevel 2>/dev/null || true)"
+      [ -n "$top" ] || continue
+      printf '%s\t%s\n' "$(realpath "$v" 2>/dev/null || printf '%s' "$v")" \
+        "$(realpath "$top" 2>/dev/null || printf '%s' "$top")"
     done | sort -u
 }
 
-REPO_ARG="${1:-}"
-WITH_SSH=false
-for a in "$@"; do [ "$a" = "--with-ssh" ] && WITH_SSH=true; done
+# One line of the detection list as a person reads it: the vault, and the
+# repository only when it is not the same directory.
+describe_pair() { # $1 "vault<TAB>repo"
+  local v="${1%%	*}" r="${1#*	}"
+  if [ "$v" = "$r" ]; then printf '%s' "$v"; else printf '%s  (repository: %s)' "$v" "$r"; fi
+}
+
+# Arguments: the first bare path is the repository, `--vault PATH` the vault
+# when it differs, `--with-ssh` as before. A function so the e2e suite can
+# lift and exercise it without running the installer.
+install_args() { # $@ -> REPO_ARG, VAULT_ARG, WITH_SSH
+  REPO_ARG=""; VAULT_ARG=""; WITH_SSH=false
+  local a expect_vault=false
+  for a in "$@"; do
+    if [ "$expect_vault" = true ]; then VAULT_ARG="$a"; expect_vault=false; continue; fi
+    case "$a" in
+      --with-ssh) WITH_SSH=true ;;
+      --vault) expect_vault=true ;;
+      --vault=*) VAULT_ARG="${a#--vault=}" ;;
+      --*) return 1 ;;
+      *) [ -z "$REPO_ARG" ] && REPO_ARG="$a" ;;
+    esac
+  done
+  [ "$expect_vault" = false ] || return 1
+  return 0
+}
+
+# The two roots have to nest (ADR-003). Prints nothing and succeeds for the
+# usual arrangement and for either nesting; fails for two unrelated
+# directories, where no line in any exclude file could describe the layout.
+roots_nest() { # $1 repo, $2 vault
+  local r v
+  r="$(realpath "$1" 2>/dev/null || printf '%s' "${1%/}")"
+  v="$(realpath "$2" 2>/dev/null || printf '%s' "${2%/}")"
+  [ "$r" = "$v" ] && return 0
+  case "$v" in "$r"/*) return 0 ;; esac
+  case "$r" in "$v"/*) return 0 ;; esac
+  return 1
+}
+
+# The `.git/info/exclude` line for a directory inside the repository, or
+# nothing when it lies outside it — a runtime directory above the work tree
+# needs no exclusion, and the hard-coded `.obsidian/…` default this used to
+# write named nothing there (the runner had the same bug; ADR-003).
+exclude_line_for() { # $1 repo, $2 dir inside it -> "rel/" or ""
+  local r d
+  r="$(realpath "$1" 2>/dev/null || printf '%s' "${1%/}")"
+  d="$(realpath -m "$2" 2>/dev/null || printf '%s' "${2%/}")"
+  case "$d" in
+    "$r"/*) printf '%s/' "${d#"$r"/}" ;;
+    *) printf '' ;;
+  esac
+}
+
+install_args "$@" || fail "Usage: bash install.sh [/path/to/repository] [--vault /path/to/vault] [--with-ssh]"
 
 # One rule ABOVE the title only: every section below brings its own rule, so
 # a closing one here put two rules back to back (user report, 2026-08-26).
@@ -347,22 +413,33 @@ say "-- Runner ${NGB_GREEN}successfully${NGB_OFF} installed to $CONF_DIR/runner.
 say "-- First runner pass (config migration; drains any queued requests — live output follows)..."
 NGB_SCAN_ROOTS="" "$CONF_DIR/runner.sh" interactive || true
 
-# 5. Repository path: use the argument, otherwise auto-detect vaults
-# (folders on shared storage containing both .obsidian and .git).
+# 5. Repository and vault paths: the arguments, otherwise auto-detect vaults
+# on shared storage (a folder holding .obsidian that belongs to a git
+# repository — the folder itself, or one above it).
 section "Vault"
+VAULT_DIR=""
 if [ -z "$REPO_ARG" ]; then
+  [ -z "$VAULT_ARG" ] || fail "--vault names the vault; the repository path has to be given with it."
   say "-- No path given; scanning shared storage for Obsidian vaults with a git repo..."
   VAULTS="$(detect_vaults)"
   COUNT="$(printf '%s\n' "$VAULTS" | grep -c . || true)"
+  PAIR=""
   if [ "$COUNT" -eq 1 ]; then
-    REPO_ARG="$VAULTS"
-    say "-- Found exactly one: $REPO_ARG"
+    PAIR="$VAULTS"
+    say "-- Found exactly one: $(describe_pair "$PAIR")"
   elif [ "$COUNT" -gt 1 ]; then
     say "-- Found several vaults:"
-    printf '%s\n' "$VAULTS" | nl -w2 -s'. '
+    n=0
+    printf '%s\n' "$VAULTS" | while IFS= read -r line; do
+      n=$((n + 1)); sayr "$(printf '%2d. %s' "$n" "$(describe_pair "$line")")"
+    done
     PICK="$(ask_line 'Enter the number of the vault to use: ')"
-    REPO_ARG="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
-    [ -n "$REPO_ARG" ] || fail "Invalid selection."
+    PAIR="$(printf '%s\n' "$VAULTS" | sed -n "${PICK}p")"
+    [ -n "$PAIR" ] || fail "Invalid selection."
+  fi
+  if [ -n "$PAIR" ]; then
+    VAULT_DIR="${PAIR%%	*}"
+    REPO_ARG="${PAIR#*	}"
   else
     # Not a failure. Everything a vaultless device CAN have is already
     # installed above, and the plugin pairs a new vault by itself: it writes a
@@ -382,6 +459,17 @@ if [ -z "$REPO_ARG" ]; then
 fi
 REPO_DIR="$REPO_ARG"
 [ -d "$REPO_DIR" ] || fail "Directory does not exist: $REPO_DIR"
+# The vault: named, detected, or the repository itself. It has to be an
+# Obsidian vault — the runtime directory goes under its .obsidian, and that is
+# where the plugin will look for answers — and it has to nest with the
+# repository one way or the other.
+[ -n "$VAULT_ARG" ] && VAULT_DIR="$VAULT_ARG"
+[ -n "$VAULT_DIR" ] || VAULT_DIR="$REPO_DIR"
+[ -d "$VAULT_DIR" ] || fail "Vault directory does not exist: $VAULT_DIR"
+if [ "$VAULT_DIR" != "$REPO_DIR" ]; then
+  [ -d "$VAULT_DIR/.obsidian" ] || fail "Not an Obsidian vault (no .obsidian inside): $VAULT_DIR"
+  roots_nest "$REPO_DIR" "$VAULT_DIR" || fail "The vault must be inside the repository or the repository inside the vault: $VAULT_DIR is neither, relative to $REPO_DIR."
+fi
 
 # 7+8. Verify repository; explain safe.directory if needed (repo on shared
 # storage is usually owned by a different uid, which new git versions reject).
@@ -396,7 +484,20 @@ if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     fail "Not a git work tree: $REPO_DIR"
   fi
 fi
-say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
+# Inside a work tree is not the same as being one: a folder below another
+# repository passes the test above while its `.git` is the parent's. The
+# runner pins git to the profile's own directory and would answer
+# REPO_MISSING there forever, so name the real root now instead.
+REPO_TOP="$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$REPO_TOP" ] && [ "$(realpath "$REPO_TOP" 2>/dev/null || printf '%s' "$REPO_TOP")" != "$(realpath "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")" ]; then
+  fail "$REPO_DIR is inside the repository $REPO_TOP but is not a repository of its own. Pass the repository root as the first argument and, if the vault is this folder, add: --vault \"$REPO_DIR\""
+fi
+if [ "$VAULT_DIR" = "$REPO_DIR" ]; then
+  say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
+else
+  say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
+  say "-- Vault: $VAULT_DIR (the repository and the vault are different folders; the plugin's runtime lives in the vault, git works in the repository)"
+fi
 
 # 9. Verify sparse checkout (informational; sparse is supported, not required).
 SPARSE=$(git -C "$REPO_DIR" config --get core.sparseCheckout 2>/dev/null || true)
@@ -427,10 +528,23 @@ for f in "$PROFILES_DIR"/*.conf; do
   fi
 done
 
-RUNTIME_DIR="$REPO_DIR/.obsidian/plugins/native-git-bridge/runtime"
+# The runtime directory is the VAULT's, never derived from the repository:
+# with the repository above the vault the two differ, and the plugin reads
+# answers only from its own vault (ADR-003). A re-run that names the
+# repository alone keeps the runtime directory the profile already has —
+# that is how the profile remembers where the vault is.
+RUNTIME_DIR="$VAULT_DIR/.obsidian/plugins/native-git-bridge/runtime"
 if [ -n "$PROFILE_FILE" ]; then
   PROFILE_ID="$(profile_value "$PROFILE_FILE" NGB_PROFILE_ID)"
   TOKEN="$(profile_value "$PROFILE_FILE" NGB_TOKEN)"
+  if [ -z "$VAULT_ARG" ] && [ "$VAULT_DIR" = "$REPO_DIR" ]; then
+    KEPT_RUNTIME="$(profile_value "$PROFILE_FILE" NGB_RUNTIME_DIR)"
+    if [ -n "$KEPT_RUNTIME" ] && [ "$KEPT_RUNTIME" != "$RUNTIME_DIR" ]; then
+      RUNTIME_DIR="$KEPT_RUNTIME"
+      VAULT_DIR="${RUNTIME_DIR%/.obsidian/plugins/native-git-bridge/runtime}"
+      say "-- This repository's profile serves the vault $VAULT_DIR; keeping that."
+    fi
+  fi
   say "-- Existing profile for this vault reused: ${NGB_YELLOW}$PROFILE_ID${NGB_OFF} (token ${NGB_GREEN}kept${NGB_OFF})."
 else
   PROFILE_ID="p-$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -480,6 +594,7 @@ list_profiles() {
     n=$(( n + 1 ))
     pid="$(profile_value "$f" NGB_PROFILE_ID)"
     dir="$(profile_value "$f" NGB_REPO_DIR)"
+    rt="$(profile_value "$f" NGB_RUNTIME_DIR)"
     mark=""
     [ "$f" = "$PROFILE_FILE" ] && mark="  <- this vault"
     state=""
@@ -488,6 +603,10 @@ list_profiles() {
     elif ! git -C "$dir" rev-parse --git-dir >/dev/null 2>&1; then
       state="  NOT A REPOSITORY (no git work tree there)"
     fi
+    # The vault, when it is not the repository: the one fact that tells two
+    # profiles with nested directories apart.
+    vdir="${rt%/.obsidian/plugins/native-git-bridge/runtime}"
+    [ -n "$rt" ] && [ "$vdir" != "$rt" ] && [ "$vdir" != "$dir" ] && state="$state  (vault: $vdir)"
     sayr "  $n. ${NGB_YELLOW}${pid:-<unreadable>}${NGB_OFF}  ${dir:-<unreadable>}$state$mark"
   done
   say "One runner drains all of them. A profile you no longer want is one file:"
@@ -643,7 +762,12 @@ if [ -n "$REMOTE_URL" ]; then
   fi
 fi
 
-# 6. Exclude the runtime dir locally (never synced).
+# 6. Exclude the runtime dir and Obsidian's trash locally (never synced).
+# Both lines are derived from where the VAULT is, and skipped when the
+# directory lies outside the repository, where git cannot see it and a line
+# would misdescribe the layout. The trash line exists because staging is
+# `git add -A`: without it a note deleted in Obsidian, or a file the sparse
+# repair moved out of a protected path, is committed straight back.
 GIT_DIR_PATH="$(git -C "$REPO_DIR" rev-parse --git-dir)"
 case "$GIT_DIR_PATH" in
   /*) : ;;
@@ -651,14 +775,24 @@ case "$GIT_DIR_PATH" in
 esac
 EXCLUDE_FILE="$GIT_DIR_PATH/info/exclude"
 mkdir -p "$(dirname "$EXCLUDE_FILE")"
-EXCLUDE_LINE=".obsidian/plugins/native-git-bridge/runtime/"
-# Append only after a newline: a file whose last line has none would otherwise
-# swallow our entry into it (and corrupt that line too).
-if [ -s "$EXCLUDE_FILE" ] && [ "$(tail -c 1 "$EXCLUDE_FILE" | od -An -tx1 | tr -d ' \n')" != "0a" ]; then
-  printf '\n' >> "$EXCLUDE_FILE"
+add_exclude_line() { # $1 line ("" = nothing to add)
+  [ -n "$1" ] || return 0
+  # Append only after a newline: a file whose last line has none would
+  # otherwise swallow our entry into it (and corrupt that line too).
+  if [ -s "$EXCLUDE_FILE" ] && [ "$(tail -c 1 "$EXCLUDE_FILE" | od -An -tx1 | tr -d ' \n')" != "0a" ]; then
+    printf '\n' >> "$EXCLUDE_FILE"
+  fi
+  grep -qxF "$1" "$EXCLUDE_FILE" 2>/dev/null || printf '%s\n' "$1" >> "$EXCLUDE_FILE"
+}
+RUNTIME_LINE="$(exclude_line_for "$REPO_DIR" "$RUNTIME_DIR")"
+TRASH_LINE="$(exclude_line_for "$REPO_DIR" "$VAULT_DIR/.trash")"
+add_exclude_line "$RUNTIME_LINE"
+add_exclude_line "$TRASH_LINE"
+if [ -n "$RUNTIME_LINE" ]; then
+  say "-- Runtime dir and the vault's .trash excluded via .git/info/exclude (local only)."
+else
+  say "-- The vault lies outside the repository: nothing to exclude, git never sees the runtime dir or the trash."
 fi
-grep -qxF "$EXCLUDE_LINE" "$EXCLUDE_FILE" 2>/dev/null || printf '%s\n' "$EXCLUDE_LINE" >> "$EXCLUDE_FILE"
-say "-- Runtime dir excluded via .git/info/exclude (local only)."
 
 # 10. Test round trip: write a ping request and run the runner.
 #
@@ -711,8 +845,16 @@ run_self_test
 # 11. Auto-pairing: the plugin imports this file on next start and deletes it,
 # so the token never has to be copied by hand. (It transits vault storage once;
 # same trust boundary as the request files themselves.)
+# It also carries where the two roots sit relative to each other (at most one
+# of the two fields is non-empty), so the plugin knows the layout before its
+# first status answer arrives.
+VAULT_IN_REPO=""; REPO_IN_VAULT=""
+REPO_REAL="$(realpath "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")"
+VAULT_REAL="$(realpath "$VAULT_DIR" 2>/dev/null || printf '%s' "$VAULT_DIR")"
+case "$VAULT_REAL" in "$REPO_REAL"/*) VAULT_IN_REPO="${VAULT_REAL#"$REPO_REAL"/}" ;; esac
+case "$REPO_REAL" in "$VAULT_REAL"/*) REPO_IN_VAULT="${REPO_REAL#"$VAULT_REAL"/}" ;; esac
 cat > "$RUNTIME_DIR/pairing.json" <<PAIR
-{"token":"$TOKEN","repoPath":"$REPO_DIR","profileId":"$PROFILE_ID","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
+{"token":"$TOKEN","repoPath":"$REPO_DIR","profileId":"$PROFILE_ID","vaultInRepo":"$VAULT_IN_REPO","repoInVault":"$REPO_IN_VAULT","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 PAIR
 say "-- Pairing file ${NGB_GREEN}written${NGB_OFF}; the Obsidian plugin will import the token automatically."
 
@@ -737,4 +879,5 @@ say ""
 say "Nothing runs in the background; the runner executes only when triggered. Run it by hand any time:"
 sayr "  ~/.config/native-git-bridge/runner.sh"
 say ""
-say "Another vault? Run the same command with its path; each vault gets its own profile and token, and one runner drains them all."
+say "Another vault? Run the same command with its path; each vault gets its own profile and token, and one runner drains them all. A vault that is not the repository's root takes both paths:"
+sayr "  bash install.sh /path/to/repository --vault /path/to/vault"

@@ -45,17 +45,25 @@ export const ROOTS_COINCIDE: RootOffset = { kind: "same" };
 
 /**
  * A relative offset the plugin is willing to act on: no leading or trailing
- * slash, no empty segment, no `.` or `..`, nothing absolute. The runner
- * validates the same shape; this side exists because a malformed value must
- * fail into "the roots coincide" rather than into a wrong file.
+ * slash, no empty segment, no `.` or `..`, nothing absolute, no backslash,
+ * quote or control character (it becomes a profile's directory on the Termux
+ * side, where a quote would break the file). The runner validates the same
+ * shape (`valid_repo_offset`); this side exists because a malformed value
+ * must fail into "the roots coincide" rather than into a wrong file, and so
+ * that a folder the user types is refused here, with a reason, before it is
+ * ever written into a claim.
  */
-function validOffset(raw: string): string | null {
-  const s = raw.trim().replace(/^\/+|\/+$/g, "");
-  if (s === "") return null;
+export function normalizeOffset(raw: string): string | null {
+  const s = raw.trim().replace(/^\.\//, "").replace(/^\/+|\/+$/g, "");
+  if (s === "" || s.length > 512) return null;
+  // eslint-disable-next-line no-control-regex
+  if (/[\\"\x00-\x1f\x7f]/.test(s)) return null;
   const parts = s.split("/");
   if (parts.some((p) => p === "" || p === "." || p === "..")) return null;
   return parts.join("/");
 }
+
+const validOffset = normalizeOffset;
 
 /**
  * Read the offset out of the status fields. The runner reports at most one of

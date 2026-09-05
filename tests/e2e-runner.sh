@@ -1854,6 +1854,49 @@ check 'grep -qx "https://ghp_sometoken123:@github.com" "$CREDLAB/creds"' "a colo
 check 'grep -qx "https://user:pass@example.com" "$CREDLAB/creds"' "a user:password line is left exactly alone"
 check 'grep -qx "https://git:tok@host.tld" "$CREDLAB/creds"' "…and so is every other well-formed line"
 
+echo "# installer: two roots — argument parsing, nesting, exclude lines (lifted; ADR-003 stage C)"
+# The installer is the ONLY route to a repository ABOVE its vault (the claim
+# route is downward-only by design), so its two inputs and the derivations
+# from them are what this block proves. Functions lifted from the real file
+# and run against real directories; the installer itself needs Termux.
+INST_LAB="$ROOT/inst-lab"
+mkdir -p "$INST_LAB/repo/docs/.obsidian" "$INST_LAB/vault/project" "$INST_LAB/elsewhere"
+for fn in install_args roots_nest exclude_line_for describe_pair; do
+  check "grep -q '^$fn() {' \"$SCRIPT_DIR/native-git-bridge/termux/install.sh\"" "the installer defines $fn (lifted below)"
+done
+inst_lift() { # source the four functions into the current shell
+  eval "$(sed -n '/^install_args() {/,/^}$/p;/^roots_nest() {/,/^}$/p;/^exclude_line_for() {/,/^}$/p;/^describe_pair() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+}
+(
+  inst_lift
+  install_args /a/repo && [ "$REPO_ARG" = "/a/repo" ] && [ "$VAULT_ARG" = "" ] && [ "$WITH_SSH" = false ]
+) && ok "one path: the repository, and the vault defaults to it" || bad "one path: the repository, and the vault defaults to it"
+(
+  inst_lift
+  install_args /a/repo --vault /a/repo/docs --with-ssh && [ "$REPO_ARG" = "/a/repo" ] && [ "$VAULT_ARG" = "/a/repo/docs" ] && [ "$WITH_SSH" = true ]
+) && ok "--vault names the vault; --with-ssh still recognised beside it" || bad "--vault names the vault; --with-ssh still recognised beside it"
+(
+  inst_lift
+  install_args --vault=/v /r && [ "$REPO_ARG" = "/r" ] && [ "$VAULT_ARG" = "/v" ]
+) && ok "--vault=PATH and the order of the arguments do not matter" || bad "--vault=PATH and the order of the arguments do not matter"
+( inst_lift; ! install_args /r --vault ) && ok "a trailing --vault without a path is a usage error" || bad "a trailing --vault without a path is a usage error"
+( inst_lift; ! install_args /r --repo /x ) && ok "an unknown option is a usage error, not a path" || bad "an unknown option is a usage error, not a path"
+( inst_lift; roots_nest "$INST_LAB/repo" "$INST_LAB/repo" ) && ok "roots_nest: the same directory nests" || bad "roots_nest: the same directory nests"
+( inst_lift; roots_nest "$INST_LAB/repo" "$INST_LAB/repo/docs" ) && ok "roots_nest: a vault inside the repository nests" || bad "roots_nest: a vault inside the repository nests"
+( inst_lift; roots_nest "$INST_LAB/vault/project" "$INST_LAB/vault" ) && ok "roots_nest: a repository inside the vault nests" || bad "roots_nest: a repository inside the vault nests"
+( inst_lift; ! roots_nest "$INST_LAB/repo" "$INST_LAB/elsewhere" ) && ok "roots_nest: two unrelated directories are refused" || bad "roots_nest: two unrelated directories are refused"
+( inst_lift; ! roots_nest "$INST_LAB/repo" "$INST_LAB/repo2" ) && ok "roots_nest: a string prefix is not a parent (repo vs repo2)" || bad "roots_nest: a string prefix is not a parent (repo vs repo2)"
+check '[ "$(inst_lift; exclude_line_for "$INST_LAB/repo" "$INST_LAB/repo/docs/.obsidian/plugins/native-git-bridge/runtime")" = "docs/.obsidian/plugins/native-git-bridge/runtime/" ]' \
+  "the runtime exclude line is derived from the vault's place inside the repository"
+check '[ "$(inst_lift; exclude_line_for "$INST_LAB/repo" "$INST_LAB/repo/docs/.trash")" = "docs/.trash/" ]' \
+  "…and so is the trash line"
+check '[ "$(inst_lift; exclude_line_for "$INST_LAB/repo" "$INST_LAB/repo/.obsidian/plugins/native-git-bridge/runtime")" = ".obsidian/plugins/native-git-bridge/runtime/" ]' \
+  "with one root the line is exactly what the installer always wrote"
+check '[ -z "$(inst_lift; exclude_line_for "$INST_LAB/vault/project" "$INST_LAB/vault/.obsidian/plugins/native-git-bridge/runtime")" ]' \
+  "a runtime directory OUTSIDE the repository gets no line at all"
+check '[ "$(inst_lift; describe_pair "$(printf "%s\t%s" /v /v)")" = "/v" ]' "a detected vault that is its own repository is listed once"
+check '[ "$(inst_lift; describe_pair "$(printf "%s\t%s" /r/docs /r)")" = "/r/docs  (repository: /r)" ]' "a detected vault inside a repository names the repository"
+
 echo "# installer: apt_filter reshapes pkg/apt output for a phone screen (lifted)"
 # The device install showed the raw pkg/apt firehose: mirror verdicts hidden
 # at the end of wrapped URLs, sizes at the end of Get lines, screens of index
@@ -3320,6 +3363,110 @@ check '! grep -q "native-git-bridge/runtime" "$SR_VAULT/project/.git/info/exclud
 check '! grep -q "trash" "$SR_VAULT/project/.git/info/exclude" 2>/dev/null' \
   "…and none for the trash either, which lives above the work tree"
 check '[ -f "$SR_VAULT/Inbox/today.md" ]' "the vault's own notes outside the repository are untouched"
+
+# ---------------------------------------------------------------------------
+echo "# phase 20: a claim chooses a repository folder inside the vault (ADR-003 stage C)"
+# The route a user actually takes: the plugin writes a claim naming a folder
+# BELOW its vault, the runner pairs the vault to that folder, and the
+# bootstrap actions then create the repository there. Relative and downward
+# only — a claim must never be able to name a directory the user did not open
+# as a vault — which is what the refusals at the end of this phase prove.
+CL="$ROOT/claims"
+CLCONF="$ROOT/conf-claims"
+mkdir -p "$CL" "$CLCONF"
+clrun() { NGB_CONFIG="$CLCONF/config" NGB_SCAN_ROOTS="$CL" bash "$RUNNER" "$@"; }
+clclaim() { # $1 vault dir, $2 extra JSON fields (with leading comma) or empty
+  mkdir -p "$1/.obsidian/plugins/native-git-bridge/runtime"
+  printf '{"createdAt":"%s"%s}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${2:-}" \
+    > "$1/.obsidian/plugins/native-git-bridge/runtime/claim.json"
+}
+clreq() { # $1 runtime, $2 id, $3 token, $4 action, $5 profileId, $6 args
+  local args="${6:-}"; [ -z "$args" ] && args='{}'
+  mkdir -p "$1/requests"
+  cat > "$1/requests/$2.json" <<REQ
+{"protocolVersion":1,"id":"$2","token":"$3","action":"$4","profileId":"$5","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":$args}
+REQ
+}
+profiles_in() { ls "$1"/profiles/*.conf 2>/dev/null | wc -l | tr -d ' '; }
+
+# --- the positive route: bootstrap claim naming a folder, then init-repo ----
+CV="$CL/Main"
+mkdir -p "$CV/Inbox" "$CV/project"
+echo "loose" > "$CV/Inbox/loose.md"
+echo "tracked" > "$CV/project/a.md"
+clclaim "$CV" ',"bootstrap":true,"repoInVault":"project"'
+CV_RT="$CV/.obsidian/plugins/native-git-bridge/runtime"
+clrun >/dev/null
+check '[ "$(profiles_in "$CLCONF")" = "1" ]' "a bootstrap claim naming a folder inside the vault pairs the vault"
+check '[ -f "$CV_RT/pairing.json" ]' "…and the pairing file lands in the VAULT's runtime directory"
+CV_CONF="$(ls "$CLCONF"/profiles/*.conf | head -1)"
+check 'grep -qxF "NGB_REPO_DIR=\"$CV/project\"" "$CV_CONF"' "the profile's repository is the named folder, not the vault"
+check 'grep -qxF "NGB_RUNTIME_DIR=\"$CV_RT\"" "$CV_CONF"' "…while its runtime directory stays in the vault"
+check '[ "$(jq -r .repoInVault "$CV_RT/pairing.json")" = "project" ]' "the pairing file echoes the offset, so the plugin learns it from Termux"
+check '[ "$(jq -r .repoPath "$CV_RT/pairing.json")" = "$CV/project" ]' "…and names the repository directory as its path"
+check '[ "$(jq -r .repoDir "$CV_RT/profile.json")" = "$CV/project" ]' "the profile marker records the repository directory"
+check '[ ! -e "$CV/project/.git" ] && [ ! -e "$CV/.git" ]' "adoption itself creates no repository anywhere"
+CV_TOKEN="$(jq -r .token "$CV_RT/pairing.json")"; CV_PID="$(jq -r .profileId "$CV_RT/pairing.json")"
+clreq "$CV_RT" "r-20260905T120000Z-cl01" "$CV_TOKEN" status "$CV_PID"
+clrun >/dev/null
+check 'jq -e ".error.code == \"REPO_MISSING\"" "$CV_RT/results/r-20260905T120000Z-cl01.json" >/dev/null' \
+  "before init the profile is in the bootstrap state: status -> REPO_MISSING"
+clreq "$CV_RT" "r-20260905T120001Z-cl02" "$CV_TOKEN" init-repo "$CV_PID" '{"branch":"main","initialCommit":true,"message":"e2e: repo inside vault"}'
+clrun >/dev/null
+RES="$CV_RT/results/r-20260905T120001Z-cl02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "init-repo creates the repository in the named folder"
+check '[ -d "$CV/project/.git" ] && [ ! -e "$CV/.git" ]' "…there and not at the vault root"
+check '[ "$(jq -r ".data.repoInVault" "$RES")" = "project" ]' "…and the result already reports the offset"
+check 'git -C "$CV/project" ls-files | grep -qx "a.md"' "the folder's own file is in the first commit"
+check '! git -C "$CV/project" ls-files | grep -q "Inbox"' "…and nothing from the rest of the vault is"
+check '[ -f "$CV/Inbox/loose.md" ]' "the vault's other notes are untouched"
+# A second claim from the same vault, now that it has a profile, is consumed
+# and pairs nothing more: one vault, one profile, whatever the folder.
+clclaim "$CV" ',"bootstrap":true,"repoInVault":"other"'
+mkdir -p "$CV/other"
+clrun >/dev/null
+check '[ "$(profiles_in "$CLCONF")" = "1" ]' "a vault that already has a profile is not paired a second time to another folder"
+check '[ ! -f "$CV_RT/claim.json" ]' "…and the surplus claim is consumed"
+
+# --- an existing repository below the vault pairs without bootstrap --------
+EV="$CL/Existing"
+mkdir -p "$EV/Notes" "$EV/repo"
+git init -q "$EV/repo"
+git -C "$EV/repo" config user.email m@e; git -C "$EV/repo" config user.name m
+echo "x" > "$EV/repo/x.md"; git -C "$EV/repo" add -A; git -C "$EV/repo" commit -qm init
+clclaim "$EV" ',"repoInVault":"repo"'
+EV_RT="$EV/.obsidian/plugins/native-git-bridge/runtime"
+clrun >/dev/null
+check '[ "$(profiles_in "$CLCONF")" = "2" ]' "a plain claim naming a folder that already is a repository pairs it"
+check '[ -f "$EV_RT/pairing.json" ] && [ "$(jq -r .repoInVault "$EV_RT/pairing.json")" = "repo" ]' "…with the offset in the pairing file"
+EV_TOKEN="$(jq -r .token "$EV_RT/pairing.json")"; EV_PID="$(jq -r .profileId "$EV_RT/pairing.json")"
+clreq "$EV_RT" "r-20260905T120002Z-cl03" "$EV_TOKEN" status "$EV_PID"
+clrun >/dev/null
+RES="$EV_RT/results/r-20260905T120002Z-cl03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "…and it answers status at once (no bootstrap state)"
+check '[ "$(jq -r ".data.repoInVault" "$RES")" = "repo" ]' "…reporting the repository as repo/ inside the vault"
+
+# --- refusals: what a claim must never be able to do -----------------------
+BEFORE_CL="$(profiles_in "$CLCONF")"
+refused_claim() { # $1 vault dir, $2 claim fields, $3 description
+  clclaim "$1" "$2"
+  clrun >/dev/null
+  check "[ \"\$(profiles_in \"$CLCONF\")\" = \"$BEFORE_CL\" ]" "$3"
+  rm -f "$1/.obsidian/plugins/native-git-bridge/runtime/claim.json"
+}
+RV="$CL/Refuse"
+mkdir -p "$RV/inside" "$CL/Outside"
+ln -s "$CL/Outside" "$RV/escape"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":"../Outside"' "an offset climbing out of the vault pairs nothing"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":"/etc"' "an absolute offset pairs nothing"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":"escape"' "an offset that is a symlink out of the vault pairs nothing"
+check '[ ! -e "$CL/Outside/.git" ]' "…and nothing was created where it pointed"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":".obsidian"' "Obsidian's configuration directory cannot be the repository"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":".obsidian/plugins"' "…nor anything inside it"
+refused_claim "$RV" ',"bootstrap":true,"repoInVault":"missing"' "a folder that does not exist yet pairs nothing (the plugin creates it first)"
+check '[ ! -e "$RV/missing" ]' "…and adoption did not create it"
+refused_claim "$RV" ',"repoInVault":"inside"' "without the bootstrap flag a folder that is not a repository pairs nothing"
+check '[ ! -e "$RV/inside/.git" ] && [ ! -e "$RV/.git" ]' "no refusal created a repository"
 
 cd "$ROOT/vault"
 git checkout -- . 2>/dev/null || true

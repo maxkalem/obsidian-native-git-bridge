@@ -102,10 +102,13 @@ import { runSelfCheck } from "./bridge/selfCheck";
 import { isValidBranchName, redactRemoteUrl, remoteFileUrl, validateRemoteUrl } from "./git/remoteUrl";
 import {
   parseRootOffset,
+  normalizeOffset,
+  describeRootOffset,
   ROOTS_COINCIDE,
   toRepo,
   toVault,
   trashExcludePattern,
+  VAULT_TRASH_DIR,
   type RootOffset,
 } from "./git/repoRoot";
 import {
@@ -447,6 +450,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     // ---- device-local settings (never synced through the vault) ----
     this.store = new DeviceLocalSettingsStore(getLocalStorageBackend(), this.resolveScopeId());
     this.deviceSettings = this.store.read();
+    // The two roots, as this device last learned them (pairing file, then
+    // every status): needed before the first round trip, because "does this
+    // vault have a repository" is answered from the vault itself.
+    this.rootOffset = parseRootOffset(this.deviceSettings);
     this.lastRunnerVersion = Number(this.store.getValue("last-runner-version") ?? 0) || 0;
     this.lastCompanionVersion = this.store.getValue("last-companion-version") ?? "";
     this.log = new OperationLog(this.store);
@@ -1116,10 +1123,21 @@ export default class NativeGitBridgePlugin extends Plugin {
       );
     }
     if (s.autoSyncOnClose) {
-      // Fire-and-forget during the close/background transition: the request is
-      // queued and the transport triggered, but we do not poll for a result.
+      // Fire-and-forget during the leave transition: the request is queued and
+      // the transport triggered, but we do not poll for a result. TWO moments,
+      // and the order is the whole point (adb logcat on the device, 2026-09-05):
+      //
+      // `blur` on the window is Android's onPause — the activity is losing
+      // window focus but is STILL VISIBLE, so Android's background-launch check
+      // lets the companion start (BAL_ALLOW_VISIBLE_WINDOW) and Termux runs
+      // while we leave. `visibilitychange=hidden` is onStop, and by then the
+      // process is LAST_ACTIVITY: the start is BAL_BLOCK, created invisibly in
+      // our own task and executed only when the user comes back. The hide
+      // handler stays as the fallback for a hide that came without a blur; the
+      // minimum interval keeps the pair from queueing twice.
+      this.registerDomEvent(window, "blur", () => void this.queueSyncAndForget("blur"));
       const onHide = () => {
-        if (document.visibilityState === "hidden") void this.queueSyncAndForget();
+        if (document.visibilityState === "hidden") void this.queueSyncAndForget("hide");
       };
       this.registerDomEvent(document, "visibilitychange", onHide);
     }
@@ -1148,10 +1166,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     await this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
   }
 
-  /** Queue a sync request without waiting (used only on close/background). */
-  private async queueSyncAndForget(): Promise<void> {
+  /**
+   * Queue a sync request without waiting (used only when leaving the
+   * foreground). `moment` is which signal fired it — logged, because the
+   * device's log is the only place that shows whether the blur path wins the
+   * race against onStop.
+   */
+  private async queueSyncAndForget(moment: "blur" | "hide" = "hide"): Promise<void> {
     const s = this.deviceSettings;
     if (!s.enabledOnThisDevice || !s.termuxIntegrationEnabled || !s.authToken) return;
+    // Our own operations put the companion over the window and take focus
+    // away for a moment; that blur is not the user leaving.
     if (this.lock.active) return;
     const minGap = s.minAutoSyncIntervalMinutes * 60_000;
     if (Date.now() - this.lastAutoSyncMs < minGap) return;
@@ -1170,9 +1195,19 @@ export default class NativeGitBridgePlugin extends Plugin {
         s.authToken,
         s.opTimeoutSeconds
       );
+      // Trigger FIRST, then write. The start has to leave while the window is
+      // still visible, and that window is the launcher's transition — a few
+      // hundred milliseconds. The id is known before the write; the runner
+      // takes a second or more to come up in Termux, and a write of a few
+      // hundred bytes is long done by then. If the write fails, the runner
+      // finds an empty queue and says so in the log, which is harmless.
+      //
+      // `quiet`: no ack, no toast. The companion's ack is a startActivity of
+      // obsidian://, which would pull the app the user is leaving back to the
+      // front; the plugin does not wait for anything here anyway.
+      this.makeTransport().trigger(req.id, { quiet: true });
       await this.client.submit(req);
-      this.makeTransport().trigger(req.id);
-      this.log.add("info", "auto", `Sync-on-close request ${req.id} queued (fire and forget).`);
+      this.log.add("info", "auto", `Sync-on-close request ${req.id} queued on ${moment} (fire and forget).`);
     } catch (e) {
       this.log.add("warn", "auto", `Sync-on-close queueing failed: ${String(e)}`);
     }
@@ -1370,8 +1405,14 @@ export default class NativeGitBridgePlugin extends Plugin {
           authToken: pairing.token,
           repoPathHint: pairing.repoPath ?? this.deviceSettings.repoPathHint,
           profileId: pairing.profileId ?? this.deviceSettings.profileId,
+          // The layout comes from the side that knows both directories. A
+          // pairing file without the fields is an older installer, and its
+          // profile has one root — which is what empty means.
+          vaultInRepo: pairing.vaultInRepo ?? "",
+          repoInVault: pairing.repoInVault ?? "",
           termuxIntegrationEnabled: true,
         });
+        this.rootOffset = parseRootOffset(this.deviceSettings);
         try {
           await adapter.remove(path);
         } catch {
@@ -1444,7 +1485,17 @@ export default class NativeGitBridgePlugin extends Plugin {
   pairingPollMs = 500;
   pairingWaitMs = PAIRING_WAIT_MS;
 
-  async cmdPairThisVault(): Promise<void> {
+  /**
+   * `repoInVault` names a folder INSIDE this vault as the repository (ADR-003
+   * stage C); absent, the vault itself is the repository, as always. The
+   * choice is made here, at pairing, and not at "create" or "clone": the
+   * profile the runner writes carries the repository directory, and the
+   * runner never re-points a profile on a request's say-so (ADR-002). A
+   * relative, downward-only offset is the whole of what a claim may say
+   * about location — the other arrangement, a repository ABOVE the vault, is
+   * the installer's alone, where the user types both paths at a terminal.
+   */
+  async cmdPairThisVault(opts: { repoInVault?: string } = {}): Promise<void> {
     if (!Platform.isAndroidApp) {
       new Notice("Native Git Bridge works on Android only (it delegates git to Termux).");
       return;
@@ -1453,10 +1504,33 @@ export default class NativeGitBridgePlugin extends Plugin {
     const root = new RuntimePaths(this.app.vault.configDir).root;
     const claimPath = `${root}/${CLAIM_FILE}`;
     const pairingPath = `${root}/${PAIRING_FILE}`;
-    // A vault that is not a repository yet has to say so: the runner pairs a
-    // directory without a repository ONLY when it was asked to, and the
-    // resulting profile can then answer nothing but "create one" / "clone one".
-    const needsRepo = !(await this.vaultHasRepository());
+    let repoInVault = "";
+    if (opts.repoInVault !== undefined) {
+      const choice = this.checkRepoFolderChoice(opts.repoInVault);
+      if (!choice.ok) {
+        new ResultModal(this.app, "That folder cannot be the repository", [choice.reason], { isError: true }).open();
+        return;
+      }
+      repoInVault = choice.offset;
+    }
+    // The folder has to exist before the runner looks: adoption creates
+    // nothing, by design, and the plugin is the half that lives in the vault.
+    // Until the pairing answer arrives the offset is a proposal, so it is
+    // applied to this plugin's own path model only once Termux has echoed it.
+    const gitDir = repoInVault ? `${repoInVault}/.git` : ".git";
+    let needsRepo: boolean;
+    try {
+      if (repoInVault && !(await adapter.exists(repoInVault))) await adapter.mkdir(repoInVault);
+      // A vault that is not a repository yet has to say so: the runner pairs a
+      // directory without a repository ONLY when it was asked to, and the
+      // resulting profile can then answer nothing but "create one" / "clone one".
+      needsRepo = !(await adapter.exists(gitDir));
+    } catch (e) {
+      new ResultModal(this.app, "Pairing failed", [`The repository folder could not be prepared: ${String(e)}`], {
+        isError: true,
+      }).open();
+      return;
+    }
     try {
       await this.client.ensureRuntimeDirs();
       await adapter.write(
@@ -1466,6 +1540,7 @@ export default class NativeGitBridgePlugin extends Plugin {
             createdAt: new Date().toISOString(),
             vault: this.app.vault.getName(),
             bootstrap: needsRepo,
+            ...(repoInVault ? { repoInVault } : {}),
           },
           null,
           2
@@ -1672,16 +1747,123 @@ export default class NativeGitBridgePlugin extends Plugin {
   }
 
   /**
+   * The two ways to pair, offered together wherever pairing is offered: the
+   * vault as the repository (the ordinary case, one tap), or a folder inside
+   * the vault, which asks for the folder first. One list, two callers, so
+   * the setup guide and the "not paired yet" precondition cannot drift.
+   */
+  private pairActions(): ResultModalAction[] {
+    return [
+      {
+        label: "Pair this vault",
+        cta: true,
+        keepOpen: true,
+        onClick: () => void this.cmdPairThisVault(),
+      },
+      {
+        label: "Pair with a folder inside the vault…",
+        keepOpen: true,
+        onClick: () => this.promptPairWithFolder(),
+      },
+    ];
+  }
+
+  /**
+   * Ask which folder inside the vault is the repository, then pair. The
+   * folder is created if it is not there yet (adoption itself creates
+   * nothing), and refused before the claim is written when it cannot be a
+   * repository at all.
+   */
+  private promptPairWithFolder(): void {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Repository folder inside this vault",
+        placeholder: "project",
+        submitLabel: "Pair with this folder",
+        initial: "",
+      },
+      (raw) => {
+        if (raw === null) return;
+        const choice = this.checkRepoFolderChoice(raw);
+        if (!choice.ok) {
+          new ResultModal(this.app, "That folder cannot be the repository", [choice.reason], { isError: true }).open();
+          return;
+        }
+        new ConfirmModal(
+          this.app,
+          {
+            title: `Pair with ${choice.offset}/?`,
+            body: [
+              `Git will work in ${choice.offset}/ and nowhere else in this vault: notes outside that folder are not tracked, not synced, and never appear in the Git panel.`,
+              "The folder is created if it does not exist yet. Termux writes it into this device's profile, so changing it later means pairing again.",
+              "Files in the folder are not touched by pairing.",
+            ],
+            confirmLabel: "Pair",
+            icon: "check",
+          },
+          async (confirmed) => {
+            if (confirmed) await this.cmdPairThisVault({ repoInVault: choice.offset });
+          }
+        ).open();
+      }
+    ).open();
+  }
+
+  /**
    * Does this vault hold a repository? Answered from the vault itself, without
    * a Termux round trip: `.git` is either a directory (normal) or a file (a
-   * worktree link). Used to decide which bootstrap steps make sense.
+   * worktree link), at the REPOSITORY root — the vault root, or the folder
+   * inside the vault the profile was paired to. Used to decide which
+   * bootstrap steps make sense.
+   *
+   * With the vault INSIDE the repository, `.git` lies above the vault where
+   * Obsidian cannot look. That arrangement is reachable only through the
+   * installer, which pairs nothing but an existing repository, so the answer
+   * is yes; a repository that later disappears is reported by the runner as
+   * `REPO_MISSING`, which every command already handles.
    */
   async vaultHasRepository(): Promise<boolean> {
+    const gitDir = this.vaultPathOf(".git");
+    if (gitDir === null) return true;
     try {
-      return await this.app.vault.adapter.exists(".git");
+      return await this.app.vault.adapter.exists(gitDir);
     } catch {
       return false;
     }
+  }
+
+  /**
+   * "Where the repository is", for a window that has to name it: the vault,
+   * or a folder inside it.
+   */
+  private repoPlaceName(): string {
+    return this.rootOffset.kind === "repo-in-vault" ? `the folder ${this.rootOffset.offset}/` : "this vault";
+  }
+
+  /**
+   * The folder a NEW pairing would put the repository in, typed by the user,
+   * checked before it goes anywhere near a claim. Returns the normalised
+   * offset, or a reason it is refused. The runner refuses the same things
+   * again, but a refusal here has a face and a reason; a refusal there is a
+   * line in a log the user has not opened.
+   */
+  private checkRepoFolderChoice(raw: string): { ok: true; offset: string } | { ok: false; reason: string } {
+    const offset = normalizeOffset(raw);
+    if (offset === null) {
+      return {
+        ok: false,
+        reason: "A folder inside this vault, written relative to the vault root: 'project' or 'Work/project'. No leading slash, no '..', no quotes.",
+      };
+    }
+    const cfg = this.app.vault.configDir.replace(/^\/+|\/+$/g, "");
+    if (offset === cfg || offset.startsWith(`${cfg}/`)) {
+      return { ok: false, reason: `${cfg}/ is Obsidian's own configuration folder and cannot be the repository.` };
+    }
+    if (offset === VAULT_TRASH_DIR || offset.startsWith(`${VAULT_TRASH_DIR}/`)) {
+      return { ok: false, reason: `${VAULT_TRASH_DIR}/ is Obsidian's trash and cannot be the repository.` };
+    }
+    return { ok: true, offset };
   }
 
   /**
@@ -1700,11 +1882,16 @@ export default class NativeGitBridgePlugin extends Plugin {
     const lines: string[] = [];
     const actions: ResultModalAction[] = [];
 
+    // Once paired, the repository has a place: the vault, or a folder inside
+    // it. Before pairing it is always "this vault" — the folder is chosen by
+    // pairing, and a stale offset from an earlier pairing must not be shown.
+    const layout = paired ? describeRootOffset(this.rootOffset) : "";
+    const place = paired ? this.repoPlaceName() : "this vault";
+    const subject = place === "this vault" ? "This vault" : `The repository folder ${this.rootOffset.kind === "repo-in-vault" ? this.rootOffset.offset : ""}/`;
     lines.push(
-      hasRepo
-        ? "This vault is a git repository."
-        : "This vault is NOT a git repository yet.",
+      hasRepo ? `${subject} is a git repository.` : `${subject} is NOT a git repository yet.`,
       `Paired with Termux: ${paired ? `yes (${s.profileId || "profile unknown"})` : "no"}`,
+      ...(layout ? [layout] : []),
       ""
     );
 
@@ -1712,14 +1899,11 @@ export default class NativeGitBridgePlugin extends Plugin {
       lines.push(
         "Termux has to know this vault before it can do anything here. Pairing works even before the repository exists.",
         "1. Pair this vault (Termux generates the token and answers).",
-        "2. Then come back here to create or clone the repository."
+        "2. Then come back here to create or clone the repository.",
+        "",
+        "The repository is normally the vault itself. It can instead be one folder inside the vault — the rest of the vault then stays outside git — and that is decided when pairing, because Termux writes the folder into the profile it creates."
       );
-      actions.push({
-        label: "Pair this vault",
-        cta: true,
-        keepOpen: true,
-        onClick: () => void this.cmdPairThisVault(),
-      });
+      actions.push(...this.pairActions());
       new ResultModal(this.app, "Set up the repository", lines, { actions }).open();
       return;
     }
@@ -1727,8 +1911,8 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (!hasRepo) {
       lines.push(
         "Two ways to give it one:",
-        "• Start fresh — create an empty repository here and, if you want, commit what the vault already contains. You can add a remote afterwards.",
-        "• Clone an existing one — the vault keeps the files it already has; anything that exists on both sides is reported and you decide, nothing is overwritten silently.",
+        `• Start fresh — create an empty repository in ${place} and, if you want, commit what ${place === "this vault" ? "the vault" : "that folder"} already contains. You can add a remote afterwards.`,
+        `• Clone an existing one — ${place === "this vault" ? "the vault" : "the folder"} keeps the files it already has; anything that exists on both sides is reported and you decide, nothing is overwritten silently.`,
         "",
         "Credentials never come through the plugin. Set them up once in Termux (a credential helper, an SSH key, or `gh auth login`) — see docs/setup.md."
       );
@@ -1777,11 +1961,7 @@ export default class NativeGitBridgePlugin extends Plugin {
           "Termux has to know this vault before it can create or clone anything here.",
           "Pairing works even before the repository exists.",
         ],
-        {
-          actions: [
-            { label: "Pair this vault", cta: true, keepOpen: true, onClick: () => void this.cmdPairThisVault() },
-          ],
-        }
+        { actions: this.pairActions() }
       ).open();
       return false;
     }
@@ -1842,7 +2022,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     new CommitMessageModal(
       this.app,
       {
-        title: "Create a repository in this vault",
+        title: `Create a repository in ${this.repoPlaceName()}`,
         placeholder: "main",
         submitLabel: "Create repository",
         initial: "main",
@@ -1861,8 +2041,8 @@ export default class NativeGitBridgePlugin extends Plugin {
           {
             title: "Commit what is here?",
             body: [
-              `A new repository on branch '${branch}' will be created in this vault.`,
-              "Confirm to also make a first commit containing every file the vault currently holds (the plugin's runtime folder is excluded automatically).",
+              `A new repository on branch '${branch}' will be created in ${this.repoPlaceName()}.`,
+              `Confirm to also make a first commit containing every file ${this.rootOffset.kind === "repo-in-vault" ? "that folder" : "the vault"} currently holds (the plugin's runtime folder is excluded automatically).`,
               "Decline to create the repository empty and commit later, after reviewing what is in it.",
             ],
             confirmLabel: "Create and commit everything",
@@ -1949,7 +2129,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     new CommitMessageModal(
       this.app,
       {
-        title: "Clone into this vault",
+        title: `Clone into ${this.repoPlaceName()}`,
         placeholder: "https://github.com/you/vault.git",
         submitLabel: "Clone",
         initial: "",
@@ -4173,6 +4353,7 @@ export default class NativeGitBridgePlugin extends Plugin {
         Platform: Platform.isAndroidApp ? "Android app" : Platform.isMobile ? "mobile" : "desktop",
         "Obsidian requires": this.manifest.minAppVersion,
         "Profile for this vault": s.profileId || "(none yet)",
+        "Repository root": describeRootOffset(this.rootOffset) || "the vault root",
         "Protected paths (effective)": this.effectiveProtectedPaths().join(", ") || "(none)",
         "Termux integration": String(s.termuxIntegrationEnabled),
       },
@@ -4417,6 +4598,23 @@ export default class NativeGitBridgePlugin extends Plugin {
       vaultInRepo: d.vaultInRepo,
       repoInVault: d.repoInVault,
     });
+    // Remember what the runner said, so the next load knows the layout before
+    // its first round trip. The runner is the authority (it holds both
+    // directories); a pairing file is only the first word, and an older
+    // runner that reports nothing means one root, which the store already says.
+    if (d.vaultInRepo !== undefined || d.repoInVault !== undefined) {
+      const rememberVault = this.rootOffset.kind === "vault-in-repo" ? this.rootOffset.offset : "";
+      const rememberRepo = this.rootOffset.kind === "repo-in-vault" ? this.rootOffset.offset : "";
+      const s = this.deviceSettings;
+      if (s.vaultInRepo !== rememberVault || s.repoInVault !== rememberRepo) {
+        this.deviceSettings = this.store.write({ vaultInRepo: rememberVault, repoInVault: rememberRepo });
+        this.log.add(
+          "info",
+          "pairing",
+          describeRootOffset(this.rootOffset) || "The repository root and the vault root are the same folder."
+        );
+      }
+    }
     // `.gitignore` rides along with every status (v18): the file menu decides
     // synchronously whether a path is ignored, so the cache has to be there
     // before it is asked — and a startup round trip to warm a cache would
@@ -7691,6 +7889,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     report.pluginSide["Termux integration"] = String(s.termuxIntegrationEnabled);
     report.pluginSide["Pairing token set"] = s.authToken ? "yes" : "no";
     report.pluginSide["Profile for this vault"] = s.profileId || "(none yet)";
+    report.pluginSide["Repository root"] = describeRootOffset(this.rootOffset) || "the vault root";
     report.pluginSide["Protected paths (manual)"] = s.protectedPaths.join(", ") || "(none)";
     report.pluginSide["Protected paths (derived from sparse)"] =
       (s.autoProtectSparse ? s.derivedProtectedPaths.join(", ") : "(auto-protect off)") || "(none)";
