@@ -259,7 +259,10 @@ var DEFAULT_DEVICE_SETTINGS = {
   opTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
   onOpenAction: "nothing",
   autoSyncOnClose: false,
-  periodicSyncMinutes: 0,
+  // 15 by default (the user's rule, 2026-09-04) — and a tick with nothing
+  // local to send is declined before it reaches Termux (`localWorkPending`),
+  // which is what makes a default other than 0 affordable.
+  periodicSyncMinutes: 15,
   minAutoSyncIntervalMinutes: 15,
   wifiOnly: false,
   skipOnLowBattery: false,
@@ -718,6 +721,13 @@ function worktreeLabel(index, worktree) {
   if (index !== "." && worktree === "D") return `${label(index)} to the index, missing from the worktree`;
   if (index !== "." && worktree !== ".") return `${label(index)} (index), ${label(worktree)} (worktree)`;
   return label(index !== "." ? index : worktree);
+}
+function isPathProtected(path, protectedPaths) {
+  const p = path.replace(/\/+$/, "");
+  return protectedPaths.some((base) => {
+    const b = base.replace(/\/+$/, "");
+    return p === b || p.startsWith(b + "/");
+  });
 }
 function evaluateSparseSafety(statusProtectedRaw, stagedProtectedRaw, protectedPaths, now = /* @__PURE__ */ new Date()) {
   const violations = [];
@@ -1921,14 +1931,18 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
         })();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("Sync when Obsidian closes / goes to background").setDesc("Queues a sync request during the close transition; Termux may finish it after Obsidian is gone.").addToggle(
+    new import_obsidian4.Setting(containerEl).setName("Sync when Obsidian goes to the background").setDesc(
+      "Queues a sync as Obsidian leaves the screen. On Android the trigger does not reach Termux while Obsidian is hidden: the sync runs when you come back, if that is within about 13 minutes; later than that it is dropped. Nothing runs while Obsidian is away, and nothing is queued when there is nothing local to send."
+    ).addToggle(
       (t) => t.setValue(s.autoSyncOnClose).onChange((v) => {
         void (async () => {
           await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
         })();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("Periodic sync while Obsidian is open (minutes, 0 = off)").addText(
+    new import_obsidian4.Setting(containerEl).setName("Periodic sync while Obsidian is open (minutes, 0 = off)").setDesc(
+      "Every tick first asks what the plugin already knows \u2014 edits since the last sync, uncommitted changes, commits the remote does not have. A tick with nothing local to send is skipped without contacting Termux."
+    ).addText(
       (t) => t.setValue(String(s.periodicSyncMinutes)).onChange((v) => {
         void (async () => {
           const n = Math.max(0, Math.floor(Number(v) || 0));
@@ -2523,6 +2537,14 @@ function untrackedTargets(untracked, scope) {
   if (at.length > 0) return at;
   if (untracked.some((u) => u.endsWith("/") && bare.startsWith(u))) return [bare];
   return [];
+}
+
+// src/ops/autoSyncGate.ts
+function localWorkPending(e) {
+  if (e.editsSinceSync) return true;
+  if (e.status === null) return true;
+  const s = e.status;
+  return s.ahead > 0 || s.staged > 0 || s.unstaged > 0 || s.untracked > 0 || s.conflicted > 0;
 }
 
 // src/ops/OperationLock.ts
@@ -6913,6 +6935,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.runningPath = null;
     this.lastStatus = null;
     this.lastAutoSyncMs = 0;
+    /** Every qualifying vault event bumps this; a sync that pushed records where it stood when it STARTED. */
+    this.editCount = 0;
+    this.editsSyncedUpTo = 0;
+    /** One log line per stretch of skipped ticks, not one per tick. */
+    this.periodicSkipLogged = false;
     this.statusPollId = null;
     /**
      * Ask Termux to pair THIS vault, without re-running the installer.
@@ -7184,6 +7211,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
     this.registerFileMenu();
+    this.registerEditTracking();
     this.app.workspace.onLayoutReady(() => {
       void this.startupChecks();
     });
@@ -7438,6 +7466,53 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     ).open();
   }
   /**
+   * Obsidian reported a vault change since the last successful sync — inside
+   * the repository and outside the protected paths. The freshest evidence the
+   * periodic sync's gate has (`localWorkPending`); cleared by a sync that
+   * pushed, never by a commit, because a commit the remote does not have is
+   * still work to send.
+   */
+  get editsSinceSync() {
+    return this.editCount > this.editsSyncedUpTo;
+  }
+  /** The gate's evidence, from what the plugin already holds. */
+  autoSyncEvidence() {
+    const st = this.lastStatus?.status;
+    return {
+      editsSinceSync: this.editsSinceSync,
+      status: st ? {
+        ahead: st.ahead,
+        staged: st.staged.length,
+        unstaged: st.unstaged.length,
+        untracked: st.untracked.length,
+        conflicted: st.conflicted.length
+      } : null
+    };
+  }
+  /**
+   * Vault events feed the gate. Every path is a VAULT path; only what maps
+   * into the repository and lies outside the protected paths counts — a
+   * protected path can never be committed from here, so an edit there is not
+   * work to send.
+   */
+  registerEditTracking() {
+    const seen = (path) => {
+      const inRepo = this.repoPathOf(path);
+      if (inRepo === null) return;
+      if (isPathProtected(inRepo, this.effectiveProtectedPaths())) return;
+      this.editCount++;
+    };
+    this.registerEvent(this.app.vault.on("modify", (f) => seen(f.path)));
+    this.registerEvent(this.app.vault.on("create", (f) => seen(f.path)));
+    this.registerEvent(this.app.vault.on("delete", (f) => seen(f.path)));
+    this.registerEvent(
+      this.app.vault.on("rename", (f, oldPath) => {
+        seen(f.path);
+        seen(oldPath);
+      })
+    );
+  }
+  /**
    * (Re)start the status auto-refresh timer (Settings → "Auto-refresh
    * status"). Fires only while the status panel exists, Obsidian is visible
    * and nothing is in flight — every refresh is a Termux round trip.
@@ -7518,6 +7593,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     const minGap = s.minAutoSyncIntervalMinutes * 6e4;
     if (Date.now() - this.lastAutoSyncMs < minGap) return;
     if (!this.autoActionAllowed()) return;
+    if (!localWorkPending(this.autoSyncEvidence())) {
+      if (!this.periodicSkipLogged) {
+        this.periodicSkipLogged = true;
+        this.log.add("info", "auto", `Automatic sync (${reason}) skipped: nothing local to send. Further skips are not logged until a sync runs.`);
+      }
+      return;
+    }
+    this.periodicSkipLogged = false;
     this.lastAutoSyncMs = Date.now();
     this.log.add("info", "auto", `Automatic sync (${reason}).`);
     await this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
@@ -7529,6 +7612,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     if (this.lock.active) return;
     const minGap = s.minAutoSyncIntervalMinutes * 6e4;
     if (Date.now() - this.lastAutoSyncMs < minGap) return;
+    if (!localWorkPending(this.autoSyncEvidence())) return;
     this.lastAutoSyncMs = Date.now();
     try {
       const req = createRequest(
@@ -11048,6 +11132,7 @@ ${procs.join("\n")}`
   async cmdSync(message, silent = false) {
     if (!await this.guardPathLimits()) return;
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : void 0;
+    const editsAtStart = this.editCount;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
       message: message ?? mergeMsg ?? this.renderedSlotMessage("sync")
@@ -11065,6 +11150,7 @@ ${procs.join("\n")}`
     }
     this.absorbStatusData(result.data ?? {});
     this.store.setValue(LAST_SYNC_KEY, (/* @__PURE__ */ new Date()).toLocaleString());
+    this.editsSyncedUpTo = Math.max(this.editsSyncedUpTo, editsAtStart);
     const lines = [
       `Steps: ${(result.data?.steps ?? "").split(",").join(" \u2192 ")}`,
       `Committed: ${result.data?.committed ?? "false"} \xB7 Pushed: ${result.data?.pushed ?? "false"}`

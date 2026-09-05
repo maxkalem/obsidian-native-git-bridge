@@ -118,6 +118,7 @@ function makeApp(adapter: MemAdapter): Any {
   const openedViews: Array<{ type: string; state?: Any }> = [];
   /** Test hook: real view instances registered as open panes, by view type. */
   const leaves: Record<string, Any[]> = {};
+  const vaultListeners: Record<string, Any[]> = {};
   let activeFile: Any = null;
   const collectMenu = (path: string): { titles: string[]; head: string } => {
     const titles: string[] = [];
@@ -135,6 +136,10 @@ function makeApp(adapter: MemAdapter): Any {
     setActiveFile: (path: string) => {
       activeFile = { path };
     },
+    /** Test hook: fire a vault event the plugin subscribed to. */
+    fireVault: (name: string, ...args: Any[]) => {
+      for (const cb of vaultListeners[name] ?? []) cb(...args);
+    },
     appId: "test-app-id",
     vault: {
       configDir: ".obsidian",
@@ -146,6 +151,12 @@ function makeApp(adapter: MemAdapter): Any {
       // Missing until the first cmdSync orchestration test called it (§10: a
       // stub hides a missing member until something calls it).
       getFiles: () => [] as Any[],
+      // The periodic-sync gate listens to vault events (modify/create/delete/
+      // rename); the fake records the listeners so a test can fire one.
+      on: (name: string, cb: Any) => {
+        (vaultListeners[name] ??= []).push(cb);
+        return {};
+      },
     },
     workspace: {
       onLayoutReady: (cb: () => void) => {
@@ -2297,15 +2308,70 @@ describe("commit messages (0.6.7 item 6)", () => {
     });
     await h.plugin.cmdSync();
     expect(messages).toEqual(["vault sync (native git bridge)"]);
+    // The automatic paths run only when there is something to send (the gate
+    // below); an edit Obsidian reported is what makes them go.
+    h.app.fireVault("modify", { path: "Notes/a.md" });
     await (h.plugin as Any).maybeAutoSync("periodic");
     expect(messages[1]).toBe("vault auto commit (native git bridge)");
     // The fire-and-forget close path writes the request and never polls; the
     // message is read from the request file itself.
     (h.plugin as Any).lastAutoSyncMs = 0;
+    h.app.fireVault("modify", { path: "Notes/b.md" });
     await (h.plugin as Any).queueSyncAndForget();
     const reqFile = requestFiles(h.adapter).at(-1)!;
     const req = JSON.parse(h.adapter.files.get(reqFile)!);
     expect(req.args.message).toBe("vault sync on close (native git bridge)");
+  });
+
+  it("the automatic sync is declined while nothing local is waiting to be sent", async () => {
+    // The user's rule (2026-09-04): sync every 15 minutes by default, but a
+    // tick with nothing to send does not contact Termux. Evidence is what the
+    // plugin already holds — vault edits since the last sync, the last status.
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    let syncs = 0;
+    answerWith(h, (req: Any) => {
+      if (req.action === "sync") syncs++;
+      return okSync;
+    });
+    // One sync establishes a clean, pushed status and covers every edit so far.
+    await h.plugin.cmdSync();
+    expect(syncs).toBe(1);
+    (h.plugin as Any).lastAutoSyncMs = 0;
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(syncs).toBe(1);
+    const skipped = h.plugin.log.list().filter((e) => /skipped: nothing local to send/.test(e.message));
+    expect(skipped).toHaveLength(1);
+    // A second idle tick is not logged again: one line per stretch, not per tick.
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(h.plugin.log.list().filter((e) => /skipped: nothing local/.test(e.message))).toHaveLength(1);
+    // An edit under a PROTECTED path is not work to send.
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Private/AgentsMemory"] });
+    h.app.fireVault("modify", { path: "Private/AgentsMemory/note.md" });
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(syncs).toBe(1);
+    // An ordinary edit is.
+    h.app.fireVault("create", { path: "Notes/new.md" });
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(syncs).toBe(2);
+    // The sync-on-close path obeys the same gate.
+    (h.plugin as Any).lastAutoSyncMs = 0;
+    const before = requestFiles(h.adapter).length;
+    await (h.plugin as Any).queueSyncAndForget();
+    expect(requestFiles(h.adapter).length).toBe(before);
+    // A commit the remote never got (ahead > 0 in the last status) is enough
+    // on its own, with no edit at all.
+    (h.plugin as Any).lastAutoSyncMs = 0;
+    answerWith(h, (req: Any) => {
+      if (req.action === "sync") syncs++;
+      return { ...okSync, data: { ...okSync.data, branchInfo: "# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -0" } };
+    });
+    await h.plugin.cmdSync();
+    (h.plugin as Any).lastAutoSyncMs = 0;
+    const syncsBefore = syncs;
+    await (h.plugin as Any).maybeAutoSync("periodic");
+    expect(syncs).toBe(syncsBefore + 1);
   });
 
   it("a slot template with {{date}} is rendered before it is sent", async () => {

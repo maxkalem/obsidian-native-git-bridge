@@ -158,7 +158,10 @@ export const DEFAULT_DEVICE_SETTINGS: DeviceLocalSettings = {
   opTimeoutSeconds: DEFAULT_TIMEOUT_SECONDS,
   onOpenAction: "nothing",
   autoSyncOnClose: false,
-  periodicSyncMinutes: 0,
+  // 15 by default (the user's rule, 2026-09-04) — and a tick with nothing
+  // local to send is declined before it reaches Termux (`localWorkPending`),
+  // which is what makes a default other than 0 affordable.
+  periodicSyncMinutes: 15,
   minAutoSyncIntervalMinutes: 15,
   wifiOnly: false,
   skipOnLowBattery: false,

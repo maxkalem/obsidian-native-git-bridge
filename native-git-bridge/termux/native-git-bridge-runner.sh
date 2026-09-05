@@ -892,6 +892,57 @@ sparse_safety_raw() {
   SAFE_STATUS="$GIT_OUT"
   run_git diff --cached --name-status -- "$@" || true
   SAFE_STAGED="$GIT_OUT"
+  merge_in_progress && subtract_merge_incoming "$@"
+}
+
+# During a merge, what the OTHER side brought into a protected path is not a
+# violation. The gate's two promises are that a sparse omission is never
+# committed as a deletion and that nothing THIS device changed under a
+# protected path is committed; an index entry that is byte-identical to
+# MERGE_HEAD's is neither — it is the remote's own content, and the merge
+# commit that carries it records exactly what the remote already has.
+#
+# Without this, a merge that ADDS files under a protected path can never be
+# committed on a sparse device: `git status` and `diff --cached` both report
+# them against HEAD, the gate refuses on any output, and the only exits are
+# abort-merge or a fast-forward. A real device hit it on 2026-09-04 — the PC
+# had committed hundreds of files under two protected paths, the sync's merge
+# stopped on an unrelated conflict, and both attempts to commit the merge came
+# back SAFETY_BLOCKED listing every one of them; the user aborted.
+#
+# The rule: an index entry is the remote's when `diff --cached MERGE_HEAD`
+# does not list it (index == MERGE_HEAD). Everything else stays: untracked
+# files, worktree changes, unmerged entries, and any index entry that differs
+# from BOTH sides. Only lines are removed; nothing is ever added.
+subtract_merge_incoming() { # $@ = protected paths; filters SAFE_STATUS / SAFE_STAGED
+  local -A ours=()
+  local p line st path kept
+  while IFS= read -r p; do
+    [ -n "$p" ] && ours["$p"]=1
+  done < <(git -c core.quotePath=false diff --cached --name-only MERGE_HEAD -- "$@" 2>/dev/null || true)
+  kept=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    st="${line:0:2}"
+    path="${line:3}"
+    case "$path" in *" -> "*) path="${path##* -> }" ;; esac
+    [ -z "$path" ] && path="?"
+    if [ "$st" = "??" ] || [ "${st:1:1}" != " " ] || [[ "$st" == *U* ]] || [ "$st" = "AA" ] || [ "$st" = "DD" ] || [ -n "${ours[$path]+x}" ]; then
+      kept+="$line"$'\n'
+    fi
+  done <<< "$SAFE_STATUS"
+  SAFE_STATUS="${kept%$'\n'}"
+  kept=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    st="${line%%$'\t'*}"
+    path="${line##*$'\t'}"
+    [ -z "$path" ] && path="?"
+    if [[ "$st" == U* ]] || [ -n "${ours[$path]+x}" ]; then
+      kept+="$line"$'\n'
+    fi
+  done <<< "$SAFE_STAGED"
+  SAFE_STAGED="${kept%$'\n'}"
 }
 
 # ---- actions -----------------------------------------------------------------

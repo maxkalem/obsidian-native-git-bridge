@@ -739,8 +739,10 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Sync when Obsidian closes / goes to background")
-      .setDesc("Queues a sync request during the close transition; Termux may finish it after Obsidian is gone.")
+      .setName("Sync when Obsidian goes to the background")
+      .setDesc(
+        "Queues a sync as Obsidian leaves the screen. On Android the trigger does not reach Termux while Obsidian is hidden: the sync runs when you come back, if that is within about 13 minutes; later than that it is dropped. Nothing runs while Obsidian is away, and nothing is queued when there is nothing local to send."
+      )
       .addToggle((t) =>
         t.setValue(s.autoSyncOnClose).onChange((v) => { void (async () => {
           await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
@@ -749,6 +751,9 @@ export class NativeGitBridgeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Periodic sync while Obsidian is open (minutes, 0 = off)")
+      .setDesc(
+        "Every tick first asks what the plugin already knows — edits since the last sync, uncommitted changes, commits the remote does not have. A tick with nothing local to send is skipped without contacting Termux."
+      )
       .addText((t) =>
         t.setValue(String(s.periodicSyncMinutes)).onChange((v) => { void (async () => {
           const n = Math.max(0, Math.floor(Number(v) || 0));

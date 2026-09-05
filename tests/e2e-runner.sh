@@ -2456,6 +2456,85 @@ git checkout -- . 2>/dev/null || true
 git reset -q 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# phase 12b: a merge that brings the OTHER device's additions into a protected
+# path can be committed here. On the device (2026-09-04) the PC had committed
+# hundreds of files under two protected paths; the sync's merge stopped on an
+# unrelated conflict, and both attempts to commit the merge came back
+# SAFETY_BLOCKED listing every one of them, because the gate reports anything
+# under a protected path that differs from HEAD. The remote's own content,
+# byte-identical to MERGE_HEAD, is not this device's change and must pass;
+# anything that differs from BOTH sides must still be refused.
+# ---------------------------------------------------------------------------
+echo "# phase 12b: a merge commit may carry the remote's additions under a protected path"
+cd "$ROOT/vault"
+git merge --abort >/dev/null 2>&1 || true
+git fetch -q origin && git reset -q --hard "origin/$MAIN_BRANCH"
+git sparse-checkout reapply 2>/dev/null || true
+# The other device adds files under BOTH protected paths and edits a shared
+# line; this device edits the same line, so the merge has to stop.
+git -C "$ROOT/other" pull -q --no-rebase >/dev/null 2>&1
+mkdir -p "$ROOT/other/Private/Hidden/from-pc" "$ROOT/other/Projects/Archive"
+printf 'written on the PC\n' > "$ROOT/other/Private/Hidden/from-pc/note.md"
+printf 'archived on the PC\n' > "$ROOT/other/Projects/Archive/pc-archive.md"
+sed -i '20s/.*/рядок 20 — PC/' "$ROOT/other/Notes/shared.md"
+git -C "$ROOT/other" add -A >/dev/null 2>&1
+git -C "$ROOT/other" commit -qm "other device: files under protected paths" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+sed -i '20s/.*/рядок 20 — phone/' Notes/shared.md
+sync_req "r-20260810T090030Z-prot01" "e2e: sync that stops on the shared line"
+RES="$RUNTIME/results/r-20260810T090030Z-prot01.json"
+check 'jq -e ".error.code == \"CONFLICT\"" "$RES" >/dev/null' "the merge stops on the shared line"
+check 'git status --porcelain -- Private/Hidden | grep -q "^A  Private/Hidden/from-pc/note.md"' "…and the index carries the PC's addition under a protected path (the device's state, reproduced)"
+check '[ ! -e Private/Hidden/from-pc/note.md ]' "…which the sparse checkout keeps off the disk"
+req "r-20260810T090031Z-prot02" resolve-conflict "$TOKEN" '{"path":"Notes/shared.md","side":"ours","protectedPaths":["Private/Hidden","Projects/Archive"]}'
+bash "$RUNNER"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260810T090031Z-prot02.json" >/dev/null' "the conflict is resolved"
+req "r-20260810T090032Z-prot03" commit "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: merge with the PC files"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T090032Z-prot03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "the merge commit is NOT blocked by the remote's additions"
+check '[ "$(jq -r ".data.committed" "$RES")" = "true" ]' "…a commit was created"
+check '[ ! -e "$(git rev-parse --git-path MERGE_HEAD)" ]' "…and the merge is finished"
+check 'git ls-tree -r --name-only HEAD | grep -qx "Private/Hidden/from-pc/note.md"' "…HEAD carries the PC's file exactly as the remote has it"
+check 'git ls-tree -r --name-only HEAD | grep -qx "Projects/Archive/pc-archive.md"' "…in both protected paths"
+check '[ ! -e Private/Hidden/from-pc/note.md ] && [ ! -e Projects/Archive/pc-archive.md ]' "…and neither file exists on this device's disk"
+check 'git ls-files -v Private/Hidden/from-pc/note.md | grep -q "^S"' "…they are skip-worktree entries, like the rest of the protected content"
+check 'grep -q "phone" Notes/shared.md' "…and the resolved line is ours"
+
+echo "# phase 12b: what differs from BOTH sides under a protected path still blocks"
+git push -q origin HEAD 2>/dev/null || true
+git -C "$ROOT/other" pull -q --no-rebase >/dev/null 2>&1
+printf 'second PC note\n' > "$ROOT/other/Private/Hidden/from-pc/second.md"
+sed -i '21s/.*/рядок 21 — PC/' "$ROOT/other/Notes/shared.md"
+git -C "$ROOT/other" add -A >/dev/null 2>&1
+git -C "$ROOT/other" commit -qm "other device: a second protected file" >/dev/null 2>&1
+git -C "$ROOT/other" push -q origin HEAD
+sed -i '21s/.*/рядок 21 — phone/' Notes/shared.md
+sync_req "r-20260810T090033Z-prot04" "e2e: sync that stops again"
+check 'jq -e ".error.code == \"CONFLICT\"" "$RUNTIME/results/r-20260810T090033Z-prot04.json" >/dev/null' "the second merge stops too"
+# Plant an index entry under a protected path that neither side has: plumbing,
+# because porcelain git refuses to stage outside the sparse definition — a buggy
+# tool or a JS git would not.
+TAMPER_BLOB="$(printf 'tampered on the phone\n' | git hash-object -w --stdin)"
+git update-index --add --cacheinfo "100644,$TAMPER_BLOB,Private/Hidden/from-pc/tampered.md"
+HEAD_BEFORE="$(git rev-parse HEAD)"
+req "r-20260810T090034Z-prot05" commit "$TOKEN" '{"protectedPaths":["Private/Hidden","Projects/Archive"],"message":"e2e: must block"}'
+bash "$RUNNER"
+RES="$RUNTIME/results/r-20260810T090034Z-prot05.json"
+check 'jq -e ".error.code == \"SAFETY_BLOCKED\"" "$RES" >/dev/null' "a protected-path entry that matches neither side is refused"
+check 'jq -er ".data.stagedProtected" "$RES" | grep -q "tampered.md"' "…and the refusal names the tampered path"
+check '! jq -er ".data.stagedProtected" "$RES" | grep -q "second.md"' "…but NOT the PC's own addition"
+check '! jq -er ".data.statusProtected" "$RES" | grep -q "second.md"' "…in either listing"
+check '[ "$(git rev-parse HEAD)" = "$HEAD_BEFORE" ]' "…and no commit was created"
+git merge --abort >/dev/null 2>&1 || true
+git fetch -q origin && git reset -q --hard "origin/$MAIN_BRANCH"
+git sparse-checkout reapply 2>/dev/null || true
+
+cd "$ROOT/vault"
+git checkout -- . 2>/dev/null || true
+git reset -q 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # phase 13: repairing an object database that git was killed in the middle of.
 #
 # A zero-byte file under .git/objects is what remains when git created the file

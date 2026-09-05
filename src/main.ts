@@ -30,8 +30,9 @@ import {
   parseStatusPorcelainV2,
   sparseExclusionPaths,
 } from "./git/parsers";
-import { evaluateSparseSafety, type SparseRepairPlan } from "./git/sparseSafety";
+import { evaluateSparseSafety, isPathProtected, type SparseRepairPlan } from "./git/sparseSafety";
 import { untrackedTargets } from "./git/untrackedTargets";
+import { localWorkPending } from "./ops/autoSyncGate";
 import {
   hasControlChars,
   validateProtectedPaths,
@@ -678,6 +679,7 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.addSettingTab(new NativeGitBridgeSettingTab(this.app, this));
     this.registerCommands();
     this.registerFileMenu();
+    this.registerEditTracking();
 
     this.app.workspace.onLayoutReady(() => {
       void this.startupChecks();
@@ -982,6 +984,62 @@ export default class NativeGitBridgePlugin extends Plugin {
 
 
   private lastAutoSyncMs = 0;
+  /**
+   * Obsidian reported a vault change since the last successful sync — inside
+   * the repository and outside the protected paths. The freshest evidence the
+   * periodic sync's gate has (`localWorkPending`); cleared by a sync that
+   * pushed, never by a commit, because a commit the remote does not have is
+   * still work to send.
+   */
+  private get editsSinceSync(): boolean {
+    return this.editCount > this.editsSyncedUpTo;
+  }
+  /** Every qualifying vault event bumps this; a sync that pushed records where it stood when it STARTED. */
+  private editCount = 0;
+  private editsSyncedUpTo = 0;
+  /** One log line per stretch of skipped ticks, not one per tick. */
+  private periodicSkipLogged = false;
+
+  /** The gate's evidence, from what the plugin already holds. */
+  private autoSyncEvidence(): Parameters<typeof localWorkPending>[0] {
+    const st = this.lastStatus?.status;
+    return {
+      editsSinceSync: this.editsSinceSync,
+      status: st
+        ? {
+            ahead: st.ahead,
+            staged: st.staged.length,
+            unstaged: st.unstaged.length,
+            untracked: st.untracked.length,
+            conflicted: st.conflicted.length,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Vault events feed the gate. Every path is a VAULT path; only what maps
+   * into the repository and lies outside the protected paths counts — a
+   * protected path can never be committed from here, so an edit there is not
+   * work to send.
+   */
+  private registerEditTracking(): void {
+    const seen = (path: string) => {
+      const inRepo = this.repoPathOf(path);
+      if (inRepo === null) return;
+      if (isPathProtected(inRepo, this.effectiveProtectedPaths())) return;
+      this.editCount++;
+    };
+    this.registerEvent(this.app.vault.on("modify", (f) => seen(f.path)));
+    this.registerEvent(this.app.vault.on("create", (f) => seen(f.path)));
+    this.registerEvent(this.app.vault.on("delete", (f) => seen(f.path)));
+    this.registerEvent(
+      this.app.vault.on("rename", (f, oldPath) => {
+        seen(f.path);
+        seen(oldPath);
+      })
+    );
+  }
 
   private statusPollId: number | null = null;
 
@@ -1074,6 +1132,17 @@ export default class NativeGitBridgePlugin extends Plugin {
     const minGap = s.minAutoSyncIntervalMinutes * 60_000;
     if (Date.now() - this.lastAutoSyncMs < minGap) return;
     if (!this.autoActionAllowed()) return;
+    // Nothing local to send means no round trip: the user's rule. Decided
+    // from what is already known — vault edits since the last sync and the
+    // last status — never by asking git, which is the cost being avoided.
+    if (!localWorkPending(this.autoSyncEvidence())) {
+      if (!this.periodicSkipLogged) {
+        this.periodicSkipLogged = true;
+        this.log.add("info", "auto", `Automatic sync (${reason}) skipped: nothing local to send. Further skips are not logged until a sync runs.`);
+      }
+      return;
+    }
+    this.periodicSkipLogged = false;
     this.lastAutoSyncMs = Date.now();
     this.log.add("info", "auto", `Automatic sync (${reason}).`);
     await this.cmdSync(this.renderedSlotMessage("auto-commit"), true);
@@ -1086,6 +1155,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     if (this.lock.active) return;
     const minGap = s.minAutoSyncIntervalMinutes * 60_000;
     if (Date.now() - this.lastAutoSyncMs < minGap) return;
+    // Same gate as the periodic sync: a request with nothing to send would
+    // only be executed on the way BACK (see the setting's description), and
+    // would then push nothing.
+    if (!localWorkPending(this.autoSyncEvidence())) return;
     this.lastAutoSyncMs = Date.now();
     try {
       const req = createRequest(
@@ -5301,6 +5374,9 @@ export default class NativeGitBridgePlugin extends Plugin {
     // the user's pick): the runner's fixed fallback stops being reachable
     // from here, but stays for old plugins.
     const mergeMsg = this.lastStatus?.mergeInProgress ? this.lastStatus.mergeMsg : undefined;
+    // Edits that arrive while the sync runs are NOT covered by it: remember
+    // where the count stood when the request left, not when the result came.
+    const editsAtStart = this.editCount;
     const result = await this.runOperation("sync", {
       protectedPaths: this.effectiveProtectedPaths(),
       message: message ?? mergeMsg ?? this.renderedSlotMessage("sync"),
@@ -5321,6 +5397,10 @@ export default class NativeGitBridgePlugin extends Plugin {
     }
     this.absorbStatusData(result.data ?? {});
     this.store.setValue(LAST_SYNC_KEY, new Date().toLocaleString());
+    // Everything Obsidian reported edited before the request left went into
+    // this sync; what it did not push (an ignored file, say) the next status
+    // reports, and the gate reads that too.
+    this.editsSyncedUpTo = Math.max(this.editsSyncedUpTo, editsAtStart);
     const lines = [
       `Steps: ${(result.data?.steps ?? "").split(",").join(" → ")}`,
       `Committed: ${result.data?.committed ?? "false"} · Pushed: ${result.data?.pushed ?? "false"}`,
