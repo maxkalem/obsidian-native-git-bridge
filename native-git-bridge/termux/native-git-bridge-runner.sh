@@ -136,15 +136,26 @@ redact_url() {
 
 # ---- validation helpers ------------------------------------------------------
 
-valid_id() { printf '%s' "$1" | grep -Eq '^r-[0-9A-Za-z.TZ:-]{1,64}$'; }
+# The validators below are bash pattern tests, not `grep` pipelines: every
+# request and every profile read runs several of them, and on the phone each
+# pipeline was a process spawn — a status round trip spent about a fifth of
+# its processes here. `LC_ALL=C` is set locally where a byte-wise answer is
+# the point (a control byte inside a multi-byte sequence must still be seen).
+valid_id() { [[ "$1" =~ ^r-[0-9A-Za-z.TZ:-]{1,64}$ ]]; }
+
+# True when $1 holds a control character, judged byte by byte.
+has_cntrl() {
+  local LC_ALL=C
+  [[ "$1" == *[[:cntrl:]]* ]]
+}
 
 # Opaque profile id. It is also a FILE NAME (profiles/<id>.conf), so the
 # charset is deliberately tiny: no dots, no slashes, nothing to traverse with.
-valid_profile_id() { printf '%s' "$1" | grep -Eq '^p-[0-9a-f]{8,32}$'; }
+valid_profile_id() { [[ "$1" =~ ^p-[0-9a-f]{8,32}$ ]]; }
 
 # Tokens are compared verbatim; the charset only has to keep the profile file
 # (KEY="value" lines) parsable and unambiguous.
-valid_token() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9._-]{8,128}$'; }
+valid_token() { [[ "$1" =~ ^[A-Za-z0-9._-]{8,128}$ ]]; }
 
 # A remote URL is user input, so it is validated on both sides and never
 # interpolated into a shell string (git is called with argv arrays).
@@ -199,7 +210,7 @@ valid_abs_path() {
     *) return 1 ;;
   esac
   case "$p" in *'"'*|*'\'*) return 1 ;; esac
-  printf '%s' "$p" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+  has_cntrl "$p" && return 1
   return 0
 }
 
@@ -218,7 +229,7 @@ valid_repo_offset() {
     /*|*/|*//*|*\\*|*'"'*|~*|:*) return 1 ;;
     .|./*|*/.|*/./*|..|../*|*/..|*/../*) return 1 ;;
   esac
-  printf '%s' "$o" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+  has_cntrl "$o" && return 1
   return 0
 }
 
@@ -241,7 +252,7 @@ valid_rel_path() {
   case "$lower" in
     .git|.git/*|*/.git|*/.git/*) return 1 ;;
   esac
-  printf '%s' "$p" | LC_ALL=C grep -q '[[:cntrl:]]' && return 1
+  has_cntrl "$p" && return 1
   return 0
 }
 
@@ -255,6 +266,10 @@ valid_rel_path() {
 NGB_FIELD_MAX_BYTES="${NGB_FIELD_MAX_BYTES:-4194304}"
 JSON_TMPDIR=""
 
+# Creates the directory on first use and prints it. Call it in the CURRENT
+# shell (`json_tmpdir >/dev/null`, then read $JSON_TMPDIR) rather than in a
+# `$(…)`: inside a subshell the assignment is lost and every caller would
+# mint a directory of its own, which json_cleanup never sees.
 json_tmpdir() {
   [ -n "$JSON_TMPDIR" ] || JSON_TMPDIR="$(mktemp -d)"
   printf '%s' "$JSON_TMPDIR"
@@ -262,9 +277,22 @@ json_tmpdir() {
 
 json_cleanup() { [ -n "$JSON_TMPDIR" ] && rm -rf "$JSON_TMPDIR"; JSON_TMPDIR=""; }
 
+# Byte length of $1 into BYTE_LEN, without a process. `${#s}` counts
+# CHARACTERS under a UTF-8 locale and bytes under C; bash re-reads the locale
+# when LC_ALL is assigned, and `local` puts it back on return. This replaced a
+# `wc -c` per field: a status result has over twenty fields, and on the phone
+# every one of those was a process — the spawns are where a status round trip
+# spends its seconds, not git's own work.
+BYTE_LEN=0
+byte_len() {
+  local LC_ALL=C
+  BYTE_LEN="${#1}"
+}
+
 # obj_from_fields name1 value1 name2 value2 ... -> JSON object on stdout
 obj_from_fields() {
-  local dir; dir="$(json_tmpdir)"
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  local dir="$JSON_TMPDIR"
   local -a args=()
   local filter="{" first=1 name value f i=0
   while [ "$#" -ge 2 ]; do
@@ -272,7 +300,8 @@ obj_from_fields() {
     i=$((i + 1))
     f="$dir/f$i"
     printf '%s' "$value" > "$f"
-    if [ "$(wc -c < "$f")" -gt "$NGB_FIELD_MAX_BYTES" ]; then
+    byte_len "$value"
+    if [ "$BYTE_LEN" -gt "$NGB_FIELD_MAX_BYTES" ]; then
       head -c "$NGB_FIELD_MAX_BYTES" "$f" > "$f.cut" && mv "$f.cut" "$f"
       printf '\n(truncated by runner)' >> "$f"
     fi
@@ -290,7 +319,8 @@ write_result() {
   local id="$1" action="$2" ok="$3" ec="$4" data="$5" err="$6" started="$7"
   mkdir -p "$RES_DIR" 2>/dev/null || true
   local tmp="$RES_DIR/$id.json.tmp"
-  local dir; dir="$(json_tmpdir)"
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  local dir="$JSON_TMPDIR"
   [ -n "$data" ] || data='null'
   [ -n "$err" ] || err='null'
   printf '%s' "$data" > "$dir/data.json"
@@ -355,7 +385,7 @@ read_profile_file() { # $1 file -> validated P_* ; 1 = unusable
   [ "$P_FORMAT" = "$PROFILE_FORMAT" ] || {
     log "PROFILE ignoring $(basename "$1"): unsupported format '$P_FORMAT'"; return 1; }
   valid_profile_id "$P_ID" || { log "PROFILE ignoring $(basename "$1"): invalid id"; return 1; }
-  [ "$P_ID.conf" = "$(basename "$1")" ] || {
+  [ "$P_ID.conf" = "${1##*/}" ] || {
     log "PROFILE ignoring $(basename "$1"): id does not match the file name"; return 1; }
   valid_token "$P_TOKEN" || { log "PROFILE ignoring $P_ID: invalid token"; return 1; }
   valid_abs_path "$P_REPO" || { log "PROFILE ignoring $P_ID: invalid repo dir"; return 1; }
@@ -445,7 +475,8 @@ profile_file_for_vault() { # $1 absolute vault dir -> prints conf path, empty if
 # OUTER repository. The ceiling stops discovery at the repository's own parent,
 # and the toplevel comparison proves which repository answered.
 pin_git_to_repo() {
-  export GIT_CEILING_DIRECTORIES="$(dirname "$NGB_REPO_DIR")"
+  local parent="${NGB_REPO_DIR%/*}"
+  export GIT_CEILING_DIRECTORIES="${parent:-/}"
   export GIT_DISCOVERY_ACROSS_FILESYSTEM=0
 }
 
@@ -459,6 +490,7 @@ pin_git_to_repo() {
 # same protocol as everything else.
 PROFILE_STATE="unusable"
 PROFILE_UNHEALTHY_REASON=""
+CANON_REPO=""; CANON_REPO_FOR=""
 repo_is_usable() {
   PROFILE_STATE="unusable"
   PROFILE_UNHEALTHY_REASON=""
@@ -470,11 +502,25 @@ repo_is_usable() {
     PROFILE_UNHEALTHY_REASON="The repository directory is not accessible ($NGB_REPO_DIR)."
     return 1; }
   pin_git_to_repo
-  local top err
-  err="$(git rev-parse --show-toplevel 2>&1 >/dev/null)"
-  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  if [ -z "$top" ] || [ "$(realpath "$top" 2>/dev/null || printf '%s' "$top")" != \
-       "$(realpath "$NGB_REPO_DIR" 2>/dev/null || printf '%s' "$NGB_REPO_DIR")" ]; then
+  # One git process for both answers: stdout is the toplevel, stderr the
+  # reason when there is none. A profile is activated several times per run
+  # (once to count work, once to drain, once to clean up), so a second
+  # process here was three more per round trip on the phone.
+  local top err errf
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  errf="$JSON_TMPDIR/toplevel.$BASHPID.err"
+  top="$(git rev-parse --show-toplevel 2>"$errf" || true)"
+  err=""; [ -s "$errf" ] && err="$(<"$errf")"
+  # git prints the toplevel with symlinks already resolved, so it is compared
+  # against the canonical repository directory, which is cached per run and
+  # per directory; only a mismatch pays for a second realpath, in case git's
+  # spelling and realpath's ever differ.
+  if [ "$CANON_REPO_FOR" != "$NGB_REPO_DIR" ]; then
+    CANON_REPO="$(realpath "$NGB_REPO_DIR" 2>/dev/null || printf '%s' "$NGB_REPO_DIR")"
+    CANON_REPO_FOR="$NGB_REPO_DIR"
+  fi
+  if [ -z "$top" ] || { [ "$top" != "$CANON_REPO" ] && \
+       [ "$(realpath "$top" 2>/dev/null || printf '%s' "$top")" != "$CANON_REPO" ]; }; then
     # No repository of its own. Either it never had one (bootstrap) or it lost
     # it while sitting inside another repository — and the ceiling above makes
     # both look the same, which is what keeps a nested pair apart: git here can
@@ -520,6 +566,9 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   # both roots between them. Empty when the runtime path is not of the
   # expected shape, and every reader treats empty as "the roots coincide".
   NGB_VAULT_DIR="$(vault_dir_of_runtime_dir "$NGB_RUNTIME_DIR")"
+  # Lazily: the first status of this activation computes it (two realpath
+  # processes); an activation that only cleans up never pays for it.
+  NGB_ROOT_OFFSET_READY=0
   REQ_DIR="$NGB_RUNTIME_DIR/requests"
   PROC_DIR="$NGB_RUNTIME_DIR/processing"
   RES_DIR="$NGB_RUNTIME_DIR/results"
@@ -528,7 +577,10 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
   PROG_DIR="$NGB_RUNTIME_DIR/progress"
   if [ -d "$NGB_RUNTIME_DIR" ] || mkdir -p "$NGB_RUNTIME_DIR" 2>/dev/null; then
     LOG_FILE="$NGB_RUNTIME_DIR/runner.log"
-    mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR" "$PROG_DIR" 2>/dev/null || true
+    # Only when one is missing: a profile is activated several times per run.
+    [ -d "$REQ_DIR" ] && [ -d "$RES_DIR" ] && [ -d "$CAN_DIR" ] && [ -d "$DONE_DIR" ] && \
+      [ -d "$PROC_DIR" ] && [ -d "$PROG_DIR" ] ||
+      mkdir -p "$REQ_DIR" "$RES_DIR" "$CAN_DIR" "$DONE_DIR" "$PROC_DIR" "$PROG_DIR" 2>/dev/null || true
   else
     LOG_FILE="$NGB_CONFIG_DIR/runner.log"
   fi
@@ -544,7 +596,7 @@ activate_profile() { # $1 conf file -> 0 usable, 1 skip (PROFILE_UNHEALTHY_REASO
 write_profile_marker() {
   local f="$NGB_RUNTIME_DIR/profile.json" want
   want="$(printf '{"profileId":"%s","repoDir":"%s"}' "$PROFILE_ID" "$NGB_REPO_DIR")"
-  [ "$(cat "$f" 2>/dev/null || true)" = "$want" ] && return 0
+  [ -r "$f" ] && [ "$(<"$f")" = "$want" ] && return 0
   printf '%s\n' "$want" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f" 2>/dev/null || true
 }
 
@@ -624,7 +676,8 @@ config_dir_of_runtime_dir() { # $1 .../<config>/plugins/native-git-bridge/runtim
 vault_dir_of_runtime_dir() { # $1 .../<config>/plugins/native-git-bridge/runtime
   local c; c="$(config_dir_of_runtime_dir "$1")"
   [ -n "$c" ] || { printf '%s' ""; return 0; }
-  dirname "$c"
+  # The parent, in bash: the path is absolute and holds a slash by construction.
+  case "$c" in */*) printf '%s' "${c%/*}" ;; *) printf '.' ;; esac
 }
 
 # Canonical form for comparing two directories, falling back to the string
@@ -641,15 +694,23 @@ canon_dir() { realpath "$1" 2>/dev/null || printf '%s' "${1%/}"; }
 # absolute path is `repoPathHint`, a device-local string the user typed, and
 # one place already misused it as a vault path. The runner knows both
 # directories with certainty, so the runner is what says it.
-root_offset_of() { # prints "<vaultInRepo>\n<repoInVault>"
-  local v r a="" b=""
+#
+# Computed ONCE per profile activation into the two globals (the directories
+# do not move while a profile is active), because every status and every
+# mutating action's result reports them and the two `realpath` calls per
+# report were four processes a round trip on the phone.
+NGB_VAULT_IN_REPO=""; NGB_REPO_IN_VAULT=""; NGB_ROOT_OFFSET_READY=0
+compute_root_offset() {
+  local v r
+  [ "$NGB_ROOT_OFFSET_READY" = 1 ] && return 0
+  NGB_ROOT_OFFSET_READY=1
+  NGB_VAULT_IN_REPO=""; NGB_REPO_IN_VAULT=""
   v="$(canon_dir "${NGB_VAULT_DIR:-}")"
   r="$(canon_dir "${NGB_REPO_DIR:-}")"
   if [ -n "$v" ] && [ -n "$r" ] && [ "$v" != "$r" ]; then
-    case "$v" in "$r"/*) a="${v#"$r"/}" ;; esac
-    case "$r" in "$v"/*) b="${r#"$v"/}" ;; esac
+    case "$v" in "$r"/*) NGB_VAULT_IN_REPO="${v#"$r"/}" ;; esac
+    case "$r" in "$v"/*) NGB_REPO_IN_VAULT="${r#"$v"/}" ;; esac
   fi
-  printf '%s\n%s\n' "$a" "$b"
 }
 
 dir_is_own_worktree() { # $1 dir
@@ -930,24 +991,39 @@ run_git() {
   # core.pager pointing at a program that does not exist, and an interactive
   # queue run has the tty that would engage it. `cat` rather than unsetting:
   # a command-line -c overrides every scope, deterministically.
-  local out_f err_f before
-  out_f="$(mktemp)"
+  #
+  # Process count matters here more than anywhere else: this runs for every
+  # git call, and a status round trip on the phone spends its seconds in
+  # process spawns rather than in git. So the capture files live in the
+  # per-request temp directory under this shell's own pid (a process
+  # substitution has a pid of its own, so two runs can never share a file),
+  # stdout is read with `$(<…)` rather than `cat`, and the stderr redaction and
+  # the progress file's in-place redaction run only when git actually wrote
+  # something to stderr — for a status that is nothing.
+  local out_f err_f before after
+  # In THIS shell, not in a $(…): the directory is created on first use and
+  # the variable has to survive into the caller, or every call would mint one.
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  out_f="$JSON_TMPDIR/git.$BASHPID.out"
   if [ -n "$NGB_PROG_FILE" ]; then
     before="$(progress_bytes)"
     git -c core.quotePath=false -c core.pager=cat "$@" > "$out_f" 2>> "$NGB_PROG_FILE"
     GIT_EC=$?
-    GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
-    progress_redact
-    progress_trim
+    after="$(progress_bytes)"
+    if [ "$after" -gt "$before" ]; then
+      GIT_ERR="$(tail -c +$((before + 1)) "$NGB_PROG_FILE" 2>/dev/null | collapse_cr | redact_url)"
+      progress_redact
+      [ "$after" -gt "$NGB_PROG_MAX_BYTES" ] && progress_trim
+    else
+      GIT_ERR=""
+    fi
   else
-    err_f="$(mktemp)"
+    err_f="$JSON_TMPDIR/git.$BASHPID.err"
     git -c core.quotePath=false -c core.pager=cat "$@" > "$out_f" 2> "$err_f"
     GIT_EC=$?
-    GIT_ERR="$(cat "$err_f" | redact_url)"
-    rm -f "$err_f"
+    if [ -s "$err_f" ]; then GIT_ERR="$(redact_url < "$err_f")"; else GIT_ERR=""; fi
   fi
-  GIT_OUT="$(cat "$out_f")"
-  rm -f "$out_f"
+  GIT_OUT="$(<"$out_f")"
   return $GIT_EC
 }
 
@@ -1043,16 +1119,37 @@ collect_untracked_children() {
   UNTRACKED_CHILDREN="$(git ls-files --others --exclude-standard -z -- "${dirs[@]}" 2>/dev/null | tr '\0' '\n')"
 }
 
+# Every field below rides on every status AND on every mutating action's
+# result, so this runs on every round trip. It is written for the number of
+# processes it starts, not for the number of lines it takes: on the phone a
+# status cost 10–15 s where a diff-file cost 3–5 s over the same transport,
+# and the difference was about twenty extra spawns here — `git rev-parse`
+# once per path, `git config --get` once per key, an `awk` per scope field, a
+# `wc` per JSON field. The same commands run in milliseconds on a laptop,
+# which is why it was never noticed there. Every collapse below keeps the
+# reported fields byte-for-byte; the e2e suite counts the git processes a
+# status takes and fails if the number creeps back up.
 collect_status_fields() {
   run_git status --porcelain=v2 --branch || true; local branch_info="$GIT_OUT"
-  local sparse_enabled sparse_cone sparse_list skip_count last_commit remote_url
+  local sparse_enabled="" sparse_cone="" sparse_list skip_count last_commit remote_url
+  # Five paths inside .git, one process: `--git-path` may be repeated and
+  # prints one line per path, in order. Answering them one at a time was five.
+  local gp_merge_head gp_merge_msg gp_rebase_merge gp_rebase_apply gp_shallow
+  {
+    read -r gp_merge_head || gp_merge_head=""
+    read -r gp_merge_msg || gp_merge_msg=""
+    read -r gp_rebase_merge || gp_rebase_merge=""
+    read -r gp_rebase_apply || gp_rebase_apply=""
+    read -r gp_shallow || gp_shallow=""
+  } < <(git rev-parse --git-path MERGE_HEAD --git-path MERGE_MSG --git-path rebase-merge \
+          --git-path rebase-apply --git-path shallow 2>/dev/null || true)
   # During a merge, expose git's own prepared MERGE_MSG ("Merge branch … \n\n
   # # Conflicts: …") so the plugin can prefill the commit modal after a manual
   # resolution and auto-use it for sync.
   local merge_active=false merge_msg=""
-  if [ -e "$(git rev-parse --git-path MERGE_HEAD)" ]; then
+  if [ -n "$gp_merge_head" ] && [ -e "$gp_merge_head" ]; then
     merge_active=true
-    merge_msg="$(cat "$(git rev-parse --git-path MERGE_MSG)" 2>/dev/null || true)"
+    [ -r "$gp_merge_msg" ] && merge_msg="$(<"$gp_merge_msg")"
   fi
   # An unfinished rebase looks nothing like an unfinished merge: there is no
   # MERGE_HEAD, only a state DIRECTORY, and which of the two it is depends on
@@ -1060,33 +1157,36 @@ collect_status_fields() {
   # rebase-apply for the older am backend). Reported so the panel can offer the
   # way out; nothing here starts a rebase.
   local rebase_active=false
-  if [ -d "$(git rev-parse --git-path rebase-merge)" ] || [ -d "$(git rev-parse --git-path rebase-apply)" ]; then
+  if { [ -n "$gp_rebase_merge" ] && [ -d "$gp_rebase_merge" ]; } || \
+     { [ -n "$gp_rebase_apply" ] && [ -d "$gp_rebase_apply" ]; }; then
     rebase_active=true
   fi
-  sparse_enabled="$(git config --get core.sparseCheckout 2>/dev/null || true)"
-  sparse_cone="$(git config --get core.sparseCheckoutCone 2>/dev/null || true)"
+  # Three configuration values, one process. `--get-regexp` prints `key value`
+  # for every match in every scope, lowest scope last, so the LAST line per
+  # key is what `--get` would have answered. The keys arrive lowercased. This
+  # is a whitelist of three keys, never a bare `--list`: that would read
+  # `credential.helper`'s value, and a helper line can embed a secret.
+  local is_shallow=false partial_filter="" cfg_key cfg_val
+  while read -r cfg_key cfg_val; do
+    case "$cfg_key" in
+      core.sparsecheckout) sparse_enabled="$cfg_val" ;;
+      core.sparsecheckoutcone) sparse_cone="$cfg_val" ;;
+      remote.origin.partialclonefilter) partial_filter="$cfg_val" ;;
+    esac
+  done < <(git config --get-regexp '^(core\.sparsecheckout|core\.sparsecheckoutcone|remote\.origin\.partialclonefilter)$' 2>/dev/null || true)
   sparse_list="$(git sparse-checkout list 2>/dev/null || true)"
   # Only the COUNT is needed by the plugin; the full list can be megabytes.
+  # Not skipped when sparse is off: a real device has run with sparse OFF and
+  # thousands of skip-worktree bits still set, and the panel's "Hidden files"
+  # row is how that state is seen at all.
   skip_count="$(git ls-files -v 2>/dev/null | grep -c '^S ' || true)"
   last_commit="$(git log -1 --format='%H%x09%cI%x09%s' 2>/dev/null || true)"
+  # `remote get-url`, not the `remote.origin.url` key: get-url applies
+  # insteadOf rewrites, and that is the URL git actually talks to.
   remote_url="$(git remote get-url origin 2>/dev/null | redact_url || true)"
   # Repository footprint (v14): the settings UI shows the repository's ACTUAL
   # state, so both facts ride along with every status.
-  local is_shallow=false partial_filter=""
-  [ -f "$(git rev-parse --git-path shallow 2>/dev/null)" ] && is_shallow=true
-  partial_filter="$(git config --get remote.origin.partialclonefilter 2>/dev/null || true)"
-  # Whether TERMUX-SIDE credentials exist that a re-clone could authenticate
-  # with: the profile's own credential file with something in it, or a global
-  # helper in Termux's own gitconfig (inherited by any future clone). The
-  # vault repository's LOCAL helper deliberately does not count — it lives in
-  # the vault's .git/config, dies with the old .git on a re-clone, and
-  # credentials are never reused from inside the vault (rule 11). The plugin
-  # uses this to decide whether a re-clone can authenticate non-interactively
-  # or must be handed to a Termux terminal (v15 interactive mode). Only the
-  # FACT travels, never a helper's value: a helper line can embed a secret.
-  local creds_configured=false
-  [ -s "$NGB_CONFIG_DIR/creds/$PROFILE_ID" ] && creds_configured=true
-  [ -n "$(git config --global --get credential.helper 2>/dev/null || true)" ] && creds_configured=true
+  [ -n "$gp_shallow" ] && [ -f "$gp_shallow" ] && is_shallow=true
   # Which scopes hold an identity and a credential helper — presence and scope
   # ONLY, never a value (the user's rule; --name-only is what guarantees it).
   # One process answers every scope. `--show-scope` needs git 2.26+; on an
@@ -1105,18 +1205,42 @@ collect_status_fields() {
       done
     done
   fi
-  local user_name_scopes user_email_scopes cred_helper_scopes
-  user_name_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="user.name"{print $1}')"
-  user_email_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="user.email"{print $1}')"
-  cred_helper_scopes="$(printf '%s\n' "$scoped_keys" | awk '$2=="credential.helper"{print $1}')"
+  # Split the scope list in bash rather than with an awk per field. The same
+  # pass answers whether a GLOBAL credential helper exists, which used to be
+  # its own `git config --global --get` — and that one READ the value, where
+  # this only sees the key.
+  local user_name_scopes="" user_email_scopes="" cred_helper_scopes="" global_helper=false
+  while IFS=$'\t' read -r sc key; do
+    case "$key" in
+      user.name) user_name_scopes="${user_name_scopes}${sc}"$'\n' ;;
+      user.email) user_email_scopes="${user_email_scopes}${sc}"$'\n' ;;
+      credential.helper)
+        cred_helper_scopes="${cred_helper_scopes}${sc}"$'\n'
+        [ "$sc" = "global" ] && global_helper=true ;;
+    esac
+  done <<< "$scoped_keys"
+  user_name_scopes="${user_name_scopes%$'\n'}"
+  user_email_scopes="${user_email_scopes%$'\n'}"
+  cred_helper_scopes="${cred_helper_scopes%$'\n'}"
+  # Whether TERMUX-SIDE credentials exist that a re-clone could authenticate
+  # with: the profile's own credential file with something in it, or a global
+  # helper in Termux's own gitconfig (inherited by any future clone). The
+  # vault repository's LOCAL helper deliberately does not count — it lives in
+  # the vault's .git/config, dies with the old .git on a re-clone, and
+  # credentials are never reused from inside the vault (rule 11). The plugin
+  # uses this to decide whether a re-clone can authenticate non-interactively
+  # or must be handed to a Termux terminal (v15 interactive mode). Only the
+  # FACT travels, never a helper's value: a helper line can embed a secret.
+  local creds_configured=false
+  [ -s "$NGB_CONFIG_DIR/creds/$PROFILE_ID" ] && creds_configured=true
+  [ "$global_helper" = true ] && creds_configured=true
   collect_untracked_children
   # The two roots (v18). At most one is non-empty; both empty is "they
   # coincide", which is what every plugin below this version assumes and what
-  # every installation before ADR-003 actually is.
-  local vault_in_repo repo_in_vault offsets
-  offsets="$(root_offset_of)"
-  vault_in_repo="$(printf '%s' "$offsets" | sed -n 1p)"
-  repo_in_vault="$(printf '%s' "$offsets" | sed -n 2p)"
+  # every installation before ADR-003 actually is. Computed once per profile
+  # activation (`compute_root_offset`).
+  compute_root_offset
+  local vault_in_repo="$NGB_VAULT_IN_REPO" repo_in_vault="$NGB_REPO_IN_VAULT"
   # `.gitignore` rides along with status (v18) rather than being fetched: it is
   # a `cat` of one small file, no git process, and the plugin's file menu has
   # to decide synchronously whether a path is ignored. Warming that cache used
@@ -1309,7 +1433,8 @@ run_git_net() {
 }
 
 merge_data() { # $1 jsonA, $2 jsonB -> stdout merged (file-based: payloads can be large)
-  local dir; dir="$(json_tmpdir)"
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  local dir="$JSON_TMPDIR"
   printf '%s' "${1:-null}" > "$dir/a.json"
   printf '%s' "${2:-null}" > "$dir/b.json"
   jq -n --slurpfile a "$dir/a.json" --slurpfile b "$dir/b.json" \
@@ -2463,7 +2588,8 @@ action_diff_file() {
   case "$limit" in ""|*[!0-9]*) limit="$NGB_MAX_DIFF_BYTES" ;; esac
   [ "$limit" -gt "$NGB_FIELD_MAX_BYTES" ] && limit="$NGB_FIELD_MAX_BYTES"
 
-  local dir; dir="$(json_tmpdir)"
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  local dir="$JSON_TMPDIR"
   printf '%s' "$GIT_OUT" > "$dir/diff.raw"
   trim_diff_to_hunks "$dir/diff.raw" "$limit"
   [ "$DIFF_SHOWN" -lt "$DIFF_TOTAL_HUNKS" ] && truncated=true
@@ -2679,7 +2805,8 @@ action_apply_patch() {
     *) ERROR=$(err_json BAD_REQUEST "Invalid reverse flag." "" ""); return 1 ;;
   esac
 
-  local dir; dir="$(json_tmpdir)"
+  [ -n "$JSON_TMPDIR" ] || json_tmpdir >/dev/null
+  local dir="$JSON_TMPDIR"
   local pf="$dir/apply.patch"
   jq -r '.args.patch // ""' "$req_file" > "$pf"
   if [ ! -s "$pf" ]; then
@@ -4231,14 +4358,22 @@ process_request() {
   local id action token started
   started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-  if ! jq -e . "$req_file" >/dev/null 2>&1; then
+  # The six envelope fields in ONE jq process, NUL-separated (a string field
+  # may hold anything the plugin put there, and only NUL cannot). Six separate
+  # `jq -r` calls were six processes per request on the phone. The same jq
+  # run is the parse check: an unparsable file yields nothing at all.
+  local -a env_fields=()
+  mapfile -d '' -t env_fields < <(jq -j '[.id, .action, .token, .profileId, .createdAt, (.timeoutSeconds // 90)]
+      | map(if . == null then "" else tostring end) | map(. + "\u0000") | add' "$req_file" 2>/dev/null || true)
+  if [ "${#env_fields[@]}" -ne 6 ]; then
     log "SKIP unparsable request file $(basename "$req_file")"
     mv "$req_file" "$DONE_DIR/" 2>/dev/null || rm -f "$req_file"
     return
   fi
-  id=$(jq -r '.id // empty' "$req_file")
-  action=$(jq -r '.action // empty' "$req_file")
-  token=$(jq -r '.token // empty' "$req_file")
+  id="${env_fields[0]}"
+  action="${env_fields[1]}"
+  token="${env_fields[2]}"
+  local claimed_profile="${env_fields[3]}" created="${env_fields[4]}" timeout_s="${env_fields[5]}"
 
   if ! valid_id "$id"; then
     log "SKIP request with invalid id"
@@ -4256,8 +4391,6 @@ process_request() {
   # also names its profile, the two must agree: a request file copied from
   # another vault is a mistake (or a replay) and never runs here. The profile is
   # LOOKED UP, never taken from the request - no repoDir, no path, ever.
-  local claimed_profile
-  claimed_profile=$(jq -r '.profileId // empty' "$req_file")
   if [ -n "$claimed_profile" ] && [ "$claimed_profile" != "$PROFILE_ID" ]; then
     log "PROFILE mismatch for $id (request claims $claimed_profile, this is $PROFILE_ID)"
     write_result "$id" "$action" false 1 'null' \
@@ -4278,10 +4411,8 @@ process_request() {
   # user with a commit). Grace covers the documented manual-recovery run.
   # Unparsable timestamps fail OPEN (execute) so a broken clock cannot brick
   # the bridge; the plugin additionally writes a cancel flag on timeout.
-  local created created_s now_s timeout_s
-  created=$(jq -r '.createdAt // empty' "$req_file")
-  timeout_s=$(jq -r '.timeoutSeconds // 90' "$req_file")
-  printf '%s' "$timeout_s" | grep -Eq '^[0-9]{1,5}$' || timeout_s=90
+  local created_s now_s
+  [[ "$timeout_s" =~ ^[0-9]{1,5}$ ]] || timeout_s=90
   if [ -n "$created" ] && created_s="$(date -u -d "$created" +%s 2>/dev/null)"; then
     now_s="$(date -u +%s)"
     if [ $((now_s - created_s)) -gt $((timeout_s + NGB_EXPIRY_GRACE)) ]; then
@@ -4638,7 +4769,7 @@ while :; do
     read_profile_file "$conf" || continue
     for f in "$P_RUNTIME"/requests/*.json; do
       [ -e "$f" ] || continue
-      QUEUE+=("$(printf '%s\t%s\t%s' "$(basename "$f")" "$conf" "$f")")
+      QUEUE+=("$(printf '%s\t%s\t%s' "${f##*/}" "$conf" "$f")")
     done
   done
 
@@ -4660,7 +4791,7 @@ while :; do
       ACTIVE_CONF="$conf"
     fi
     # Claim atomically: if another process took it first, mv fails and we skip.
-    claimed="$PROC_DIR/$(basename "$f")"
+    claimed="$PROC_DIR/${f##*/}"
     if mv "$f" "$claimed" 2>/dev/null; then
       process_request "$claimed"
       rm -f "$claimed.retried"   # completed: forget any interruption marker

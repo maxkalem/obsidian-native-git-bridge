@@ -98,6 +98,8 @@ import { DiffView, NGB_DIFF_VIEW, type DiffLoadResult, type DiffViewState } from
 import { overrideWarning } from "./git/diffBudget";
 import { ConflictView, NGB_CONFLICT_VIEW } from "./ui/ConflictView";
 import { FileHistoryView, NGB_FILE_HISTORY_VIEW } from "./ui/FileHistoryView";
+import { ExplorerSignsController } from "./ui/ExplorerSignsController";
+import { computeExplorerSigns, type ExplorerSigns } from "./ui/explorerSigns";
 import { runSelfCheck } from "./bridge/selfCheck";
 import { isValidBranchName, redactRemoteUrl, remoteFileUrl, validateRemoteUrl } from "./git/remoteUrl";
 import {
@@ -211,6 +213,13 @@ interface SharedUiPrefs {
    */
   showChangeWords: boolean;
   /**
+   * Git signs in Obsidian's own file explorer: a letter beside a changed
+   * file (M, A, D, U, !) and a dot on every folder holding one. On by default.
+   * Cosmetic and about reading, so shared through data.json; the data behind
+   * it is the status the panel already holds, so no device does extra work.
+   */
+  showExplorerSigns: boolean;
+  /**
    * Name the file above the Git context menu's entries.
    *
    * On by default: a panel row truncates its name to one line and the file
@@ -278,6 +287,7 @@ const DEFAULT_SHARED_PREFS: SharedUiPrefs = {
   showInvisibles: false,
   keepLineSelection: false,
   showChangeWords: true,
+  showExplorerSigns: true,
   showMenuHeader: true,
   openOutputForLongOps: false,
   inlineDiffUnit: "word",
@@ -358,6 +368,18 @@ export default class NativeGitBridgePlugin extends Plugin {
   client!: BridgeClient;
   lock!: OperationLock;
   statusBar: StatusBarController | null = null;
+  /**
+   * The file explorer's signs: a lookup table rebuilt from every status, and
+   * the controller that paints it onto rows it does not own. The table is
+   * kept here rather than derived on demand because the explorer asks per
+   * row, thousands of times on a real vault, and the status changes once.
+   */
+  private explorerSignTable: ExplorerSigns = { files: new Map(), folders: new Map() };
+  explorerSigns = new ExplorerSignsController(
+    this.app,
+    () => this.explorerSignTable,
+    () => this.sharedPrefs.showExplorerSigns
+  );
 
   private activeCancel: CancelToken | null = null;
   /**
@@ -687,8 +709,12 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.registerCommands();
     this.registerFileMenu();
     this.registerEditTracking();
+    this.explorerSigns.attach(this);
 
     this.app.workspace.onLayoutReady(() => {
+      // The explorer exists only once the layout does; its first pass paints
+      // whatever the last status left (nothing, on a fresh start).
+      this.explorerSigns.schedule();
       void this.startupChecks();
     });
     this.registerAutomaticActions();
@@ -4563,6 +4589,7 @@ export default class NativeGitBridgePlugin extends Plugin {
   async setSharedPref(patch: Partial<SharedUiPrefs>): Promise<void> {
     this.sharedPrefs = { ...this.sharedPrefs, ...patch };
     await this.saveData(this.sharedPrefs);
+    if (patch.showExplorerSigns !== undefined) this.explorerSigns.apply();
     // Re-render open diff panes (from their cached diff — no Termux round
     // trip) so wrap/invisibles toggles apply immediately; refresh the panels
     // so a tree/list toggle applies too.
@@ -4655,6 +4682,8 @@ export default class NativeGitBridgePlugin extends Plugin {
       credsConfigured: d.credsConfigured === undefined ? undefined : d.credsConfigured === "true",
     };
     this.statusStale = false;
+    this.explorerSignTable = computeExplorerSigns(status, this.rootOffset);
+    this.explorerSigns.schedule();
     this.maybeOfferPartialForSparse();
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();

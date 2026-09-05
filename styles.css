@@ -543,6 +543,13 @@
 .ngb-sv-kv-key { color: var(--text-muted); flex: 0 1 auto; }
 .ngb-sv-kv-val { color: var(--text-normal); text-align: right; overflow-wrap: anywhere; }
 
+/* ---- settings: a row that is a block of our own (version badges, a command
+   box, a note between sections). Obsidian's `.setting-item` is a flex row of
+   info + control; these rows hold neither, so the flex layout goes and the
+   block fills the width. ---- */
+.setting-item.ngb-setting-block { display: block; }
+.setting-item.ngb-setting-block > .ngb-settings-note { margin: 0; }
+
 /* ---- settings: collapsible rule managers (sparse / gitignore / exclude) ---- */
 .ngb-details { border: 1px solid var(--background-modifier-border); border-radius: var(--radius-s); margin: var(--size-4-2) 0; padding: 0 var(--size-4-2); }
 .ngb-details > summary { cursor: pointer; padding: var(--size-4-2) 0; display: flex; justify-content: space-between; align-items: baseline; gap: var(--size-4-2); font-weight: var(--font-medium); }
@@ -1269,3 +1276,32 @@
 .ngb-tone-warn { color: var(--text-warning, #e0ac00); }
 .ngb-tone-bad { color: var(--text-error); }
 .ngb-tone-accent { color: var(--text-accent); }
+
+/* ---------------------------------------- git signs in the file explorer */
+/* Decorations on Obsidian's own rows (`.nav-file-title` / `.nav-folder-title`),
+   painted by ExplorerSignsController from the last status. The rows are flex
+   containers of Obsidian's making, so a trailing span with `margin-left:auto`
+   sits at the right edge without touching the title's own layout; `flex: 0 0
+   auto` keeps a long name from squeezing the letter out, and `order` puts the
+   sign after whatever Obsidian appends later. Colours are the theme's own
+   semantic variables, so a light or dark theme keeps its meaning of red. */
+.ngb-sign {
+  flex: 0 0 auto;
+  order: 99;
+  margin-left: auto;
+  padding-left: var(--size-4-2);
+  font-size: 0.72em;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  opacity: 0.9;
+}
+.ngb-sign-modified { color: var(--text-warning, #e0ac00); }
+.ngb-sign-added, .ngb-sign-untracked { color: var(--text-success, #08b94e); }
+.ngb-sign-untracked { opacity: 0.7; }
+.ngb-sign-deleted, .ngb-sign-conflict { color: var(--text-error); }
+/* Folders carry a dot, smaller and quieter than a file's letter: it says
+   "look inside", not what happened. */
+.ngb-sign-folder { font-size: 0.6em; opacity: 0.75; }
+.ngb-sign-folder.ngb-sign-changed { color: var(--text-warning, #e0ac00); }
+.ngb-sign-folder.ngb-sign-conflict { color: var(--text-error); opacity: 1; }

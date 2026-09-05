@@ -104,6 +104,29 @@ check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "status reports spa
 check 'jq -er ".data.sparseList" "$RES" | grep -q "Hidden"' "status lists sparse patterns"
 check '[ "$(jq -r ".data.skipWorktreeCount" "$RES")" -ge 1 ]' "status reports skip-worktree count"
 
+echo "# test: a status run starts a bounded number of git processes"
+# On the phone a status round trip spent its seconds in process spawns, not
+# in git: 23 git processes per run before v18's collapse, 14 after (plus a
+# hundred non-git ones, cut to about fifty). This counts the git processes
+# of one whole run — activation, the action, cleanup — through a PATH shim,
+# so a `git config --get` added per key, or a `rev-parse` per path, shows up
+# here as a number rather than as ten seconds on a device months later.
+SHIM="$ROOT/git-shim"; mkdir -p "$SHIM"
+REAL_GIT="$(command -v git)"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/git-calls.log"\nexec "%s" "$@"\n' "$ROOT" "$REAL_GIT" > "$SHIM/git"
+chmod +x "$SHIM/git"
+rm -f "$ROOT/git-calls.log"
+req "r-20260803T100003Z-stat00" status "$TOKEN"
+PATH="$SHIM:$PATH" bash "$RUNNER"
+GIT_SPAWNS="$(wc -l < "$ROOT/git-calls.log" | tr -d ' ')"
+check 'jq -e ".ok == true" "$RUNTIME/results/r-20260803T100003Z-stat00.json" >/dev/null' "status through the counting shim still answers"
+check '[ "$GIT_SPAWNS" -le 15 ]' "one status run starts at most 15 git processes (this run: $GIT_SPAWNS; it was 23 before the v18 collapse)"
+check '[ "$(grep -c "^rev-parse --git-path" "$ROOT/git-calls.log")" = "1" ]' "…the five .git paths are asked for in ONE rev-parse"
+check '[ "$(grep -c "^config --get " "$ROOT/git-calls.log")" = "0" ]' "…and no configuration key is fetched one process at a time"
+check '[ "$(grep -c "^config --get-regexp" "$ROOT/git-calls.log")" = "1" ]' "…one --get-regexp over the whitelisted keys answers them all"
+check '! grep -q "^config --list" "$ROOT/git-calls.log" || ! grep "^config --list" "$ROOT/git-calls.log" | grep -qv -- "--name-only"' \
+  "…and every config listing carries --name-only (a value never leaves git)"
+
 echo "# test: status enumerates files inside untracked directories (untrackedChildren)"
 # git status collapses a fully untracked directory into one "dir/" entry; the
 # plugin needs the files inside as actionable rows, so the runner lists them.

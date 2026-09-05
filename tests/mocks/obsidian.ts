@@ -417,10 +417,30 @@ export class PluginSettingTab {
   app: Any;
   plugin: Any;
   containerEl = fakeEl();
+  /**
+   * The declarative half (1.13+): the tab is data, and `update()` is what the
+   * real class calls to re-read it. Counted, so a test can say "a change that
+   * alters the structure re-reads the definitions" — and NOT one that does
+   * not, since every update re-renders the page.
+   */
+  settingItems: Any[] = [];
+  __updates = 0;
   constructor(app: Any, plugin: Any) {
     this.app = app;
     this.plugin = plugin;
   }
+  getSettingDefinitions(): Any[] {
+    return [];
+  }
+  update(): void {
+    this.__updates += 1;
+    this.settingItems = this.getSettingDefinitions();
+  }
+  refreshDomState(): void {}
+  getControlValue(_key: string): unknown {
+    return undefined;
+  }
+  setControlValue(_key: string, _value: unknown): void | Promise<void> {}
   display(): void {}
   hide(): void {}
 }
@@ -507,6 +527,16 @@ export class Plugin {
   }
   registerInterval(id: number): number {
     return id;
+  }
+  /**
+   * Component.register: an unload callback. Remembered so a test can run the
+   * unload path (the explorer signs detach through it) rather than swallowed —
+   * §10's stub trap again: this member was missing until the controller
+   * called it and every orchestration test failed at load.
+   */
+  __unloaders: Array<() => void> = [];
+  register(cb: () => void): void {
+    this.__unloaders.push(cb);
   }
   onload(): void | Promise<void> {}
   onunload(): void {}

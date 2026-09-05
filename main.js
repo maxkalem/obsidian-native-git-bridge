@@ -1133,119 +1133,6 @@ var StatusModal = class extends import_obsidian2.Modal {
   }
 };
 
-// src/ui/colors.ts
-var DEFAULT_COLORS = {
-  dark: {
-    diffAddBg: "#1e4620",
-    diffAddHl: "#2f8f2f",
-    diffDelBg: "#4a1f22",
-    diffDelHl: "#AA1414",
-    conflictLocalBg: "#14361f",
-    conflictRemoteBg: "#12283f"
-  },
-  light: {
-    diffAddBg: "#d7f5d7",
-    diffAddHl: "#7fd07f",
-    diffDelBg: "#ffd9dc",
-    diffDelHl: "#AA1414",
-    conflictLocalBg: "#e6f7ec",
-    conflictRemoteBg: "#e3eefb"
-  }
-};
-var DIFF_COLOR_VARS = [
-  "--ngb-diff-ins-bg",
-  "--ngb-diff-ins-hl",
-  "--ngb-diff-del-bg",
-  "--ngb-diff-del-hl"
-];
-var CONFLICT_COLOR_VARS = [
-  "--ngb-conf-ours-bg",
-  "--ngb-conf-theirs-bg",
-  "--ngb-diff-del-hl",
-  "--ngb-diff-ins-hl"
-];
-function diffColorVars(set) {
-  return {
-    "--ngb-diff-ins-bg": set.diffAddBg,
-    "--ngb-diff-ins-hl": set.diffAddHl,
-    "--ngb-diff-del-bg": set.diffDelBg,
-    "--ngb-diff-del-hl": set.diffDelHl
-  };
-}
-function conflictColorVars(set) {
-  return {
-    "--ngb-conf-ours-bg": set.conflictLocalBg,
-    "--ngb-conf-theirs-bg": set.conflictRemoteBg,
-    "--ngb-diff-del-hl": set.diffDelHl,
-    "--ngb-diff-ins-hl": set.diffAddHl
-  };
-}
-var HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-function sanitizeColorSet(raw, mode) {
-  const base = DEFAULT_COLORS[mode];
-  const out = { ...base };
-  if (typeof raw !== "object" || raw === null) return out;
-  const r = raw;
-  for (const k of Object.keys(base)) {
-    const v = r[k];
-    if (typeof v === "string" && HEX.test(v)) out[k] = v;
-  }
-  return out;
-}
-
-// src/git/previousRepos.ts
-var PREVIOUS_GIT_PREFIX = "previous-git-";
-var DIR_RE = /^previous-git-\d{8}T\d{6}Z$/;
-function isPreviousRepoDir(name) {
-  return DIR_RE.test(name);
-}
-function parsePreviousRepo(text) {
-  let raw;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof raw !== "object" || raw === null) return null;
-  const r = raw;
-  if (typeof r.dir !== "string" || !isPreviousRepoDir(r.dir)) return null;
-  const num = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
-  const str = (v) => typeof v === "string" ? v : "";
-  return {
-    dir: r.dir,
-    createdAt: str(r.createdAt),
-    sizeKb: num(r.sizeKb),
-    commits: num(r.commits),
-    branch: str(r.branch),
-    lastCommit: str(r.lastCommit)
-  };
-}
-function formatSize(sizeKb) {
-  if (sizeKb <= 0) return "unknown size";
-  if (sizeKb < 1024) return `${sizeKb} KB`;
-  const mb = sizeKb / 1024;
-  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
-  return `${(mb / 1024).toFixed(1)} GB`;
-}
-function describePreviousRepo(r, now = /* @__PURE__ */ new Date()) {
-  const parts = [formatSize(r.sizeKb)];
-  if (r.commits > 0) parts.push(`${r.commits} commit${r.commits === 1 ? "" : "s"}`);
-  if (r.branch) parts.push(r.branch);
-  const days = daysSince(r.createdAt, now);
-  if (days !== null) parts.push(days === 0 ? "set aside today" : `set aside ${days} day${days === 1 ? "" : "s"} ago`);
-  return parts.join(" \xB7 ");
-}
-function daysSince(iso, now = /* @__PURE__ */ new Date()) {
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return null;
-  return Math.max(0, Math.floor((now.getTime() - t) / 864e5));
-}
-var REMIND_INTERVAL_MS = 24 * 60 * 60 * 1e3;
-function reposToRemindAbout(repos, state, now = Date.now()) {
-  if (now - state.lastRemindedAt < REMIND_INTERVAL_MS) return [];
-  return repos.filter((r) => !state.dismissed.includes(r.dir));
-}
-
 // src/ui/gitModals.ts
 var import_obsidian3 = require("obsidian");
 var CommitMessageModal = class extends import_obsidian3.Modal {
@@ -1292,15 +1179,15 @@ var CommitMessageModal = class extends import_obsidian3.Modal {
       (0, import_obsidian3.setIcon)(help, "help-circle");
       help.addEventListener("click", () => new TemplateVarsModal(this.app).open());
     }
-    const note = c.createDiv({ cls: "ngb-invalid" });
+    const note2 = c.createDiv({ cls: "ngb-invalid" });
     const doSubmit = () => {
       const msg = ta.value.trim();
       if (msg.length === 0) {
-        note.setText("Commit message must not be empty.");
+        note2.setText("Commit message must not be empty.");
         return;
       }
       if (msg.length > 1e3) {
-        note.setText("Commit message is longer than 1000 characters.");
+        note2.setText("Commit message is longer than 1000 characters.");
         return;
       }
       this.resolved = true;
@@ -1456,662 +1343,697 @@ var ConflictModal = class extends import_obsidian3.Modal {
   }
 };
 
+// src/ui/colors.ts
+var DEFAULT_COLORS = {
+  dark: {
+    diffAddBg: "#1e4620",
+    diffAddHl: "#2f8f2f",
+    diffDelBg: "#4a1f22",
+    diffDelHl: "#AA1414",
+    conflictLocalBg: "#14361f",
+    conflictRemoteBg: "#12283f"
+  },
+  light: {
+    diffAddBg: "#d7f5d7",
+    diffAddHl: "#7fd07f",
+    diffDelBg: "#ffd9dc",
+    diffDelHl: "#AA1414",
+    conflictLocalBg: "#e6f7ec",
+    conflictRemoteBg: "#e3eefb"
+  }
+};
+var DIFF_COLOR_VARS = [
+  "--ngb-diff-ins-bg",
+  "--ngb-diff-ins-hl",
+  "--ngb-diff-del-bg",
+  "--ngb-diff-del-hl"
+];
+var CONFLICT_COLOR_VARS = [
+  "--ngb-conf-ours-bg",
+  "--ngb-conf-theirs-bg",
+  "--ngb-diff-del-hl",
+  "--ngb-diff-ins-hl"
+];
+function diffColorVars(set) {
+  return {
+    "--ngb-diff-ins-bg": set.diffAddBg,
+    "--ngb-diff-ins-hl": set.diffAddHl,
+    "--ngb-diff-del-bg": set.diffDelBg,
+    "--ngb-diff-del-hl": set.diffDelHl
+  };
+}
+function conflictColorVars(set) {
+  return {
+    "--ngb-conf-ours-bg": set.conflictLocalBg,
+    "--ngb-conf-theirs-bg": set.conflictRemoteBg,
+    "--ngb-diff-del-hl": set.diffDelHl,
+    "--ngb-diff-ins-hl": set.diffAddHl
+  };
+}
+var HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+function sanitizeColorSet(raw, mode) {
+  const base = DEFAULT_COLORS[mode];
+  const out = { ...base };
+  if (typeof raw !== "object" || raw === null) return out;
+  const r = raw;
+  for (const k of Object.keys(base)) {
+    const v = r[k];
+    if (typeof v === "string" && HEX.test(v)) out[k] = v;
+  }
+  return out;
+}
+
+// src/git/previousRepos.ts
+var PREVIOUS_GIT_PREFIX = "previous-git-";
+var DIR_RE = /^previous-git-\d{8}T\d{6}Z$/;
+function isPreviousRepoDir(name) {
+  return DIR_RE.test(name);
+}
+function parsePreviousRepo(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw;
+  if (typeof r.dir !== "string" || !isPreviousRepoDir(r.dir)) return null;
+  const num = (v) => typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0;
+  const str = (v) => typeof v === "string" ? v : "";
+  return {
+    dir: r.dir,
+    createdAt: str(r.createdAt),
+    sizeKb: num(r.sizeKb),
+    commits: num(r.commits),
+    branch: str(r.branch),
+    lastCommit: str(r.lastCommit)
+  };
+}
+function formatSize(sizeKb) {
+  if (sizeKb <= 0) return "unknown size";
+  if (sizeKb < 1024) return `${sizeKb} KB`;
+  const mb = sizeKb / 1024;
+  if (mb < 1024) return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
+function describePreviousRepo(r, now = /* @__PURE__ */ new Date()) {
+  const parts = [formatSize(r.sizeKb)];
+  if (r.commits > 0) parts.push(`${r.commits} commit${r.commits === 1 ? "" : "s"}`);
+  if (r.branch) parts.push(r.branch);
+  const days = daysSince(r.createdAt, now);
+  if (days !== null) parts.push(days === 0 ? "set aside today" : `set aside ${days} day${days === 1 ? "" : "s"} ago`);
+  return parts.join(" \xB7 ");
+}
+function daysSince(iso, now = /* @__PURE__ */ new Date()) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  return Math.max(0, Math.floor((now.getTime() - t) / 864e5));
+}
+var REMIND_INTERVAL_MS = 24 * 60 * 60 * 1e3;
+function reposToRemindAbout(repos, state, now = Date.now()) {
+  if (now - state.lastRemindedAt < REMIND_INTERVAL_MS) return [];
+  return repos.filter((r) => !state.dismissed.includes(r.dir));
+}
+
+// src/git/ignoreFile.ts
+function parseIgnoreEntries(raw) {
+  return raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
+}
+function ignoreEntryMatches(entries, path) {
+  const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
+  return entries.some((e) => variants.includes(e));
+}
+function trackedPathsAmong(status, paths) {
+  const tracked = /* @__PURE__ */ new Set();
+  for (const e of [...status.staged, ...status.unstaged, ...status.conflicted]) {
+    tracked.add(e.path);
+    if (e.origPath !== void 0) tracked.add(e.origPath);
+  }
+  return paths.filter((p) => tracked.has(p));
+}
+
 // src/settings/SettingsTab.ts
 var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
-    // ------------------------------------------------ collapsible rule managers
-    /**
-     * Which sections the user has expanded. Add/remove actions re-render the
-     * whole tab (display()), which would otherwise collapse every <details>
-     * back to its default state — remembering titles here keeps them open.
-     */
-    this.openSections = /* @__PURE__ */ new Set();
   }
-  display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    const s = this.plugin.deviceSettings;
-    if (!import_obsidian4.Platform.isAndroidApp) {
-      containerEl.createDiv({
-        cls: "ngb-warning",
-        text: "Native Git Bridge works on Android only: it delegates every Git operation to the real git binary inside Termux, triggered through a companion app. There is nothing to configure on this device \u2014 on desktop, use git directly or the obsidian-git plugin. Settings appear when you open this tab on your Android device (they are stored per device and never synced through the vault)."
-      });
-      return;
+  // ---------------------------------------------------------------- storage
+  getControlValue(key) {
+    const [store, field] = splitKey(key);
+    switch (store) {
+      case "device":
+        return this.plugin.deviceSettings[field];
+      case "shared":
+        return this.plugin.sharedPrefs[field];
+      case "color": {
+        const [theme = "", name = ""] = field.split(".");
+        const set = theme === "dark" ? this.plugin.sharedPrefs.colorsDark : this.plugin.sharedPrefs.colorsLight;
+        return set[name];
+      }
+      case "footprint": {
+        const fp = this.plugin.footprintState();
+        return field === "shallow" ? fp?.shallow ?? false : fp?.partial ?? false;
+      }
+      case "slot":
+        return this.plugin.deviceSettings[field];
     }
-    const advice = this.plugin.versionAdvice();
-    const stale = (part) => advice.some((a) => a.part === part);
-    const badge = (text, part) => ver.createSpan({
-      cls: stale(part) ? "ngb-version-badge ngb-version-stale" : "ngb-version-badge",
-      text
-    });
-    const ver = containerEl.createDiv({ cls: "ngb-version-row" });
-    badge(`Plugin ${this.plugin.manifest.version}`, "plugin");
-    const rv = this.plugin.lastRunnerVersion;
-    badge(
-      rv === 0 ? `Runner: unknown` : rv < RUNNER_MIN_VERSION ? `Runner v${rv} (needs v${RUNNER_MIN_VERSION})` : `Runner v${rv}`,
-      "runner"
-    );
-    badge(
-      this.plugin.lastCompanionVersion !== "" ? `Companion ${this.plugin.lastCompanionVersion}` : "Companion: not seen yet",
-      "companion"
-    );
-    for (const a of advice) {
-      const box = containerEl.createDiv({ cls: "ngb-warning" });
-      box.createDiv({ text: a.text });
-      const btns = box.createDiv({ cls: "ngb-add-row" });
-      const button = (text, cta, onClick) => {
-        const b = btns.createEl("button", { text, cls: cta ? "mod-cta" : void 0 });
-        b.addEventListener("click", onClick);
-      };
-      if (a.part === "runner") {
-        button("Copy command & open Termux", true, () => this.plugin.copyCommandAndOpenTermux());
-        if (a.kind === "newer-half") {
-          button("Open latest release", false, () => this.plugin.openLatestRelease());
+    return void 0;
+  }
+  async setControlValue(key, value) {
+    const [store, field] = splitKey(key);
+    switch (store) {
+      case "device":
+        await this.plugin.updateDeviceSettings(this.deviceWrite(field, value));
+        if (field === "enabledOnThisDevice") this.update();
+        if (field === "statusRefreshSeconds") this.plugin.restartStatusPoll();
+        return;
+      case "shared":
+        await this.plugin.setSharedPref(this.sharedWrite(field, value));
+        if (field === "customColors") this.update();
+        return;
+      case "color": {
+        const [theme = "", name = ""] = field.split(".");
+        if (typeof value !== "string") return;
+        const prefKey = theme === "dark" ? "colorsDark" : "colorsLight";
+        await this.plugin.setSharedPref({
+          [prefKey]: { ...this.plugin.sharedPrefs[prefKey], [name]: value }
+        });
+        return;
+      }
+      case "footprint": {
+        if (field === "shallow") {
+          if (value === true) await this.plugin.cmdShallowEnable();
+          else await this.plugin.cmdUnshallow();
+        } else {
+          if (value === true) await this.plugin.cmdPartialEnable();
+          else await this.plugin.cmdPartialDisable();
         }
-      } else if (a.part === "companion") {
-        button("Update companion app", true, () => this.plugin.openLatestRelease());
-        if (a.kind === "update-available" && this.plugin.stayOnCompanionAvailable()) {
-          button("Stay on this companion\u2026", false, () => this.plugin.cmdStayOnCompanion());
+        this.update();
+        return;
+      }
+      case "slot": {
+        if (typeof value !== "string") return;
+        const slot = field;
+        if (value === NEW_TEMPLATE) {
+          promptNewTemplate(this.app, async (msg) => {
+            await this.plugin.setSharedPref({
+              commitTemplates: [...this.plugin.sharedPrefs.commitTemplates, msg]
+            });
+            await this.plugin.updateDeviceSettings({ [slot]: msg });
+            this.update();
+          });
+          this.update();
+          return;
         }
-      } else {
-        button("Open latest release", true, () => this.plugin.openLatestRelease());
-        if (a.kind === "newer-half") {
-          button("Copy link to the matching APK", false, () => this.plugin.copyMatchingApkLink());
-        }
+        await this.plugin.updateDeviceSettings({ [slot]: value });
+        return;
       }
     }
-    containerEl.createEl("p", {
-      cls: "ngb-settings-note",
-      text: "All settings below are stored on this device only (never synced through the vault), so each device can be enabled and configured independently."
-    });
-    if (this.plugin.store.isVolatile) {
-      containerEl.createDiv({
-        cls: "ngb-warning",
-        text: "Device-local storage is unavailable; settings will not survive an app restart. Check available storage / WebView state."
-      });
+  }
+  /**
+   * The value a device control writes, clamped the way the old text inputs
+   * clamped it: a number control already refuses non-numbers, and the ranges
+   * below are the ones the operations can live with.
+   */
+  deviceWrite(field, value) {
+    const d = DEFAULT_DEVICE_SETTINGS;
+    switch (field) {
+      case "authToken":
+      case "repoPathHint":
+      case "companionUriTemplate":
+        return { [field]: String(value ?? "").trim() };
+      case "opTimeoutSeconds":
+        return { opTimeoutSeconds: clampInt(value, 10, 3600, d.opTimeoutSeconds) };
+      case "statusRefreshSeconds":
+        return { statusRefreshSeconds: clampInt(value, 0, 86400, 0) };
+      case "shallowDepth":
+        return { shallowDepth: clampInt(value, 1, 1e5, d.shallowDepth) };
+      case "recentCommitMessagesMax":
+        return { recentCommitMessagesMax: clampInt(value, 0, 50, d.recentCommitMessagesMax) };
+      case "periodicSyncMinutes":
+        return { periodicSyncMinutes: clampInt(value, 0, 1e5, 0) };
+      case "minAutoSyncIntervalMinutes":
+        return { minAutoSyncIntervalMinutes: clampInt(value, 1, 1e5, d.minAutoSyncIntervalMinutes) };
+      case "rowsPerGroup":
+        return { rowsPerGroup: clampInt(value, 1, 1e5, d.rowsPerGroup) };
+      case "diffLimitKb":
+        return { diffLimitKb: clampInt(value, 1, 1e5, d.diffLimitKb) };
+      default:
+        return { [field]: value };
     }
-    new import_obsidian4.Setting(containerEl).setName("Setup (one line in Termux)").setHeading();
-    const cmd = this.plugin.installCommand();
-    const cmdBox = containerEl.createDiv({ cls: "ngb-cmd" });
-    cmdBox.setText(cmd);
-    cmdBox.setAttribute("aria-label", "Install command");
-    new import_obsidian4.Setting(containerEl).setName("Install command").setDesc(
-      "Install Termux (F-Droid) and the Git Bridge Companion app, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you."
-    ).addButton(
-      (b) => (
-        // Copying alone left the user to find Termux themselves; the plugin
-        // method copies, notices, and brings Termux forward (or the way to
-        // GET it when the companion reports it missing).
-        b.setButtonText("Copy command & open Termux").setCta().onClick(
-          () => this.plugin.copyCommandAndOpenTermux()
-        )
-      )
-    );
+  }
+  sharedWrite(field, value) {
+    if (field === "commitDateFormat") {
+      const v = String(value ?? "");
+      return { commitDateFormat: v.trim() === "" ? DEFAULT_COMMIT_DATE_FORMAT : v };
+    }
+    return { [field]: value };
+  }
+  // ------------------------------------------------------------ definitions
+  getSettingDefinitions() {
+    if (!import_obsidian4.Platform.isAndroidApp) {
+      return [
+        block("Android only", (el) => {
+          el.createDiv({
+            cls: "ngb-warning",
+            text: "Native Git Bridge works on Android only: it delegates every Git operation to the real git binary inside Termux, triggered through a companion app. There is nothing to configure on this device \u2014 on desktop, use git directly or the obsidian-git plugin. Settings appear when you open this tab on your Android device (they are stored per device and never synced through the vault)."
+          });
+        })
+      ];
+    }
+    const s = this.plugin.deviceSettings;
+    return [
+      ...this.versionItems(),
+      block("Storage note", (el) => {
+        el.createEl("p", {
+          cls: "ngb-settings-note",
+          text: "All settings below are stored on this device only (never synced through the vault), so each device can be enabled and configured independently."
+        });
+        if (this.plugin.store.isVolatile) {
+          el.createDiv({
+            cls: "ngb-warning",
+            text: "Device-local storage is unavailable; settings will not survive an app restart. Check available storage / WebView state."
+          });
+        }
+      }),
+      { type: "group", heading: "Setup (one line in Termux)", items: this.setupItems(s) },
+      { type: "group", heading: "Repository rules", items: this.rulesItems() },
+      { type: "group", heading: "File context menu", items: this.menuItems() },
+      { type: "group", heading: "Commit messages", items: this.commitMessageItems() },
+      { type: "group", heading: "Notifications", items: this.notificationItems() },
+      { type: "group", heading: "Repository footprint (this device)", items: this.footprintItems() },
+      { type: "group", heading: "Automatic actions", items: this.automaticItems() },
+      { type: "group", heading: "Advanced", items: this.advancedItems() }
+    ];
+  }
+  /**
+   * Versions first: three parts update independently, so "which versions do
+   * I actually have here" is the first question when something misbehaves.
+   * Badges plus one advice box per finding, each carrying the buttons its
+   * `kind` earns (the four-state model): below the floor gets the one fix, an
+   * available update gets the update plus the stay-put route, and a HALF
+   * NEWER than this build gets both exits of that choice.
+   */
+  versionItems() {
+    return [
+      block("Versions", (el) => {
+        const advice = this.plugin.versionAdvice();
+        const stale = (part) => advice.some((a) => a.part === part);
+        const ver = el.createDiv({ cls: "ngb-version-row" });
+        const badge = (text, part) => ver.createSpan({
+          cls: stale(part) ? "ngb-version-badge ngb-version-stale" : "ngb-version-badge",
+          text
+        });
+        badge(`Plugin ${this.plugin.manifest.version}`, "plugin");
+        const rv = this.plugin.lastRunnerVersion;
+        badge(
+          rv === 0 ? `Runner: unknown` : rv < RUNNER_MIN_VERSION ? `Runner v${rv} (needs v${RUNNER_MIN_VERSION})` : `Runner v${rv}`,
+          "runner"
+        );
+        badge(
+          this.plugin.lastCompanionVersion !== "" ? `Companion ${this.plugin.lastCompanionVersion}` : "Companion: not seen yet",
+          "companion"
+        );
+        for (const a of advice) {
+          const box = el.createDiv({ cls: "ngb-warning" });
+          box.createDiv({ text: a.text });
+          const btns = box.createDiv({ cls: "ngb-add-row" });
+          const button = (text, cta, onClick) => {
+            const b = btns.createEl("button", { text, cls: cta ? "mod-cta" : void 0 });
+            b.addEventListener("click", onClick);
+          };
+          if (a.part === "runner") {
+            button("Copy command & open Termux", true, () => this.plugin.copyCommandAndOpenTermux());
+            if (a.kind === "newer-half") button("Open latest release", false, () => this.plugin.openLatestRelease());
+          } else if (a.part === "companion") {
+            button("Update companion app", true, () => this.plugin.openLatestRelease());
+            if (a.kind === "update-available" && this.plugin.stayOnCompanionAvailable()) {
+              button("Stay on this companion\u2026", false, () => this.plugin.cmdStayOnCompanion());
+            }
+          } else {
+            button("Open latest release", true, () => this.plugin.openLatestRelease());
+            if (a.kind === "newer-half") {
+              button("Copy link to the matching APK", false, () => this.plugin.copyMatchingApkLink());
+            }
+          }
+        }
+      })
+    ];
+  }
+  setupItems(s) {
     const localCmd = this.plugin.installCommandLocal();
-    if (localCmd !== null) {
-      const localBox = containerEl.createDiv({ cls: "ngb-cmd" });
-      localBox.setText(localCmd);
-      localBox.setAttribute("aria-label", "Offline install command");
-      new import_obsidian4.Setting(containerEl).setName("Install without a network").setDesc(
-        "The Termux scripts ship inside this plugin's folder, so the vault on this device already carries them. This command installs and updates the runner from there \u2014 no GitHub, no downloads. Useful on a bad connection, and when the runner is behind after the plugin arrived through vault sync."
-      ).addButton(
-        (b) => b.setButtonText("Copy offline command & open Termux").onClick(
-          () => this.plugin.copyLocalCommandAndOpenTermux()
-        )
-      );
-    }
-    new import_obsidian4.Setting(containerEl).setName("Setup guide").setDesc(
-      "The three parts in order (Termux, companion app, one pasted command) with the current state of this device and one-tap actions."
-    ).addButton(
-      (b) => b.setButtonText("Open setup guide").setCta().onClick(() => this.plugin.openSetupGuide("Setup guide."))
-    );
-    new import_obsidian4.Setting(containerEl).setName("Companion app checklist").setDesc(
-      "Opens the Git Bridge Companion setup screen: Termux detected, 'Run commands in Termux' permission, and a live round-trip test. Open it whenever operations time out."
-    ).addButton(
-      (b) => b.setButtonText("Open companion setup").onClick(() => void this.plugin.openCompanionSetup())
-    );
-    new import_obsidian4.Setting(containerEl).setName("Enable on this device").setDesc("Master switch. Off by default on every new device.").addToggle(
-      (t) => t.setValue(s.enabledOnThisDevice).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ enabledOnThisDevice: v });
-          this.refreshTab();
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Termux integration").setDesc("Allow this plugin to queue requests for the Termux runner.").addToggle(
-      (t) => t.setValue(s.termuxIntegrationEnabled).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ termuxIntegrationEnabled: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Pairing token").setDesc(
-      "Paste the token printed by the Termux installer. It authenticates requests between this plugin and the runner. Stored locally; never logged."
-    ).addText((t) => {
-      t.inputEl.type = "password";
-      t.setPlaceholder("token from installer").setValue(s.authToken).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ authToken: v.trim() });
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Profile for this vault").setDesc(
-      s.profileId ? `Termux serves this vault as ${s.profileId}. Every vault on the device has its own profile and its own token; one runner drains them all.` : "This vault has no Termux profile yet. Pairing asks the runner for one; it generates the token in Termux and answers with it."
-    ).addButton(
-      (b) => b.setButtonText(s.profileId ? "Pair again" : "Pair this vault").onClick(() => void this.plugin.cmdPairThisVault())
-    );
-    new import_obsidian4.Setting(containerEl).setName("Repository for this vault").setDesc(
-      "Create a repository here, clone an existing one into this vault, or change the remote. Everything that needs a password stays in Termux; this only does the parts that carry no secret."
-    ).addButton(
-      (b) => b.setButtonText("Set up repository").onClick(() => void this.plugin.cmdSetupRepository())
-    );
-    this.renderPreviousReposSetting(containerEl);
-    new import_obsidian4.Setting(containerEl).setName("Repository path (informational)").setDesc("The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.").addText(
-      (t) => t.setValue(s.repoPathHint).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ repoPathHint: v.trim() });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Repository rules").setHeading();
-    containerEl.createEl("p", {
-      cls: "ngb-settings-note",
-      text: "Sparse exclusions, .gitignore and .git/info/exclude, managed per item. Each section is collapsed because these lists can get long."
-    });
-    this.renderProtectedPathsSection(containerEl, s);
-    this.renderSparseSection(containerEl);
-    this.renderGitignoreSection(containerEl);
-    this.renderExcludeSection(containerEl);
-    new import_obsidian4.Setting(containerEl).setName("File context menu").setHeading();
-    containerEl.createEl("p", {
-      cls: "ngb-settings-note",
-      text: "Which Git entries appear on right click / long tap of a file or folder. Stage/Unstage is always shown while the bridge is enabled."
-    });
-    new import_obsidian4.Setting(containerEl).setName("Show .gitignore commands").setDesc("Add to / remove from .gitignore (shared, synced through git).").addToggle(
-      (t) => t.setValue(s.menuGitignore).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ menuGitignore: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Show sparse commands").setDesc("Hide on this device / show again (sparse checkout exclusions).").addToggle(
-      (t) => t.setValue(s.menuSparse).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ menuSparse: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Show .git exclude commands").setDesc("Add to / remove from .git/info/exclude (this clone only, never synced).").addToggle(
-      (t) => t.setValue(s.menuExclude).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ menuExclude: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Rows shown per group").setDesc(
-      "How many rows the status panel draws in each group before it offers the rest. Every group can be long at once, and a folder of a few thousand new files arrives as one Git entry that expands into a row each. The group's count always states the true total. Device-local: what it costs is render time here."
-    ).addDropdown((d) => {
-      for (const n of ROWS_PER_GROUP_CHOICES) d.addOption(String(n), String(n));
-      d.setValue(String(s.rowsPerGroup)).onChange((v) => {
-        void (async () => {
-          const n = Number(v);
-          if (!Number.isFinite(n) || n <= 0) return;
-          await this.plugin.updateDeviceSettings({ rowsPerGroup: n });
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Delete new files permanently").setDesc(
-      "Off: deleting untracked files moves them to Obsidian's trash (.trash in the vault), which is the only way back for a file Git never recorded. On: they are deleted from disk. Device-local, because what it decides is whether .trash grows on this device."
-    ).addToggle(
-      (t) => t.setValue(s.deleteUntrackedPermanently).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ deleteUntrackedPermanently: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Commit messages").setHeading();
-    const tplRow = containerEl.createDiv();
-    const slotBox = containerEl.createDiv();
+    return [
+      // A dedicated class (not <pre>) so long URLs wrap on narrow phone screens.
+      block("Install command", (el) => {
+        const cmdBox = el.createDiv({ cls: "ngb-cmd" });
+        cmdBox.setText(this.plugin.installCommand());
+        cmdBox.setAttribute("aria-label", "Install command");
+      }),
+      {
+        name: "Install command",
+        desc: "Install Termux (F-Droid) and the Git Bridge Companion app, then paste this single command into Termux. It finds your vault automatically, installs git/jq/openssh, links storage, enables the companion trigger, verifies the repo and pairs with this plugin \u2014 no manual token copying. The Companion app has a 'Set up Termux' button that copies this command and opens Termux for you.",
+        // Copying alone left the user to find Termux themselves; the plugin
+        // method copies, notices, and brings Termux forward (or the way to GET
+        // it when the companion reports it missing).
+        action: () => this.plugin.copyCommandAndOpenTermux()
+      },
+      ...localCmd === null ? [] : [
+        block("Offline install command", (el) => {
+          const localBox = el.createDiv({ cls: "ngb-cmd" });
+          localBox.setText(localCmd);
+          localBox.setAttribute("aria-label", "Offline install command");
+        }),
+        {
+          name: "Install without a network",
+          desc: "The Termux scripts ship inside this plugin's folder, so the vault on this device already carries them. This command installs and updates the runner from there \u2014 no GitHub, no downloads. Useful on a bad connection, and when the runner is behind after the plugin arrived through vault sync.",
+          action: () => this.plugin.copyLocalCommandAndOpenTermux()
+        }
+      ],
+      {
+        name: "Setup guide",
+        desc: "The three parts in order (Termux, companion app, one pasted command) with the current state of this device and one-tap actions.",
+        action: () => this.plugin.openSetupGuide("Setup guide.")
+      },
+      {
+        name: "Companion app checklist",
+        desc: "Opens the Git Bridge Companion setup screen: Termux detected, 'Run commands in Termux' permission, and a live round-trip test. Open it whenever operations time out.",
+        action: () => void this.plugin.openCompanionSetup()
+      },
+      {
+        name: "Enable on this device",
+        desc: "Master switch. Off by default on every new device.",
+        control: { type: "toggle", key: "device.enabledOnThisDevice" }
+      },
+      {
+        name: "Termux integration",
+        desc: "Allow this plugin to queue requests for the Termux runner.",
+        control: { type: "toggle", key: "device.termuxIntegrationEnabled" }
+      },
+      // A password input has no declarative form; the row is drawn by hand so
+      // the token is never shown in clear on a screen somebody else can see.
+      {
+        name: "Pairing token",
+        desc: "Paste the token printed by the Termux installer. It authenticates requests between this plugin and the runner. Stored locally; never logged.",
+        aliases: ["token", "pairing"],
+        render: (setting) => {
+          setting.addText((t) => {
+            t.inputEl.type = "password";
+            t.setPlaceholder("token from installer").setValue(this.plugin.deviceSettings.authToken).onChange((v) => void this.setControlValue("device.authToken", v));
+          });
+        }
+      },
+      {
+        name: "Profile for this vault",
+        desc: s.profileId ? `Termux serves this vault as ${s.profileId}. Every vault on the device has its own profile and its own token; one runner drains them all.` : "This vault has no Termux profile yet. Pairing asks the runner for one; it generates the token in Termux and answers with it. Pairing is also where the repository's place is decided: the vault itself, or one folder inside it (use Set up repository for that).",
+        aliases: ["pair", "pairing"],
+        action: () => void this.plugin.cmdPairThisVault()
+      },
+      {
+        name: "Repository for this vault",
+        desc: "Create a repository here or in one folder of the vault, clone an existing one, or change the remote. Everything that needs a password stays in Termux; this only does the parts that carry no secret.",
+        aliases: ["clone", "init", "remote", "set up repository"],
+        action: () => void this.plugin.cmdSetupRepository()
+      },
+      // Only shown when there is something to show: a repository set aside by
+      // a re-clone. It is invisible otherwise, and a permanent empty row would
+      // just be a question nobody has. The listing is async, so the row draws
+      // itself hidden and appears when the manifests have been read.
+      {
+        name: "Previous repository copies",
+        desc: "Checking\u2026",
+        searchable: false,
+        render: (setting) => {
+          setting.settingEl.hide();
+          void (async () => {
+            const repos = await this.plugin.listPreviousRepos();
+            if (repos.length === 0) return;
+            const total = repos.reduce((n, r) => n + r.sizeKb, 0);
+            setting.setDesc(
+              `${repos.length === 1 ? "One earlier repository was" : `${repos.length} earlier repositories were`} set aside by a re-clone and still use ${formatSize(total)}. Their history is intact; deleting is final.`
+            );
+            setting.addButton(
+              (b) => b.setButtonText("Review").onClick(() => this.plugin.showPreviousRepoModal(repos, "Previous repository copies"))
+            );
+            setting.settingEl.show();
+          })();
+        }
+      },
+      {
+        name: "Repository path (informational)",
+        desc: "The repo path as seen from Termux, e.g. /storage/emulated/0/Documents/Vault. The runner config is authoritative.",
+        control: { type: "text", key: "device.repoPathHint", placeholder: "/storage/emulated/0/\u2026" }
+      }
+    ];
+  }
+  // ------------------------------------------------- the four rule managers
+  rulesItems() {
+    return [
+      note(
+        "Protected paths, sparse exclusions, .gitignore and .git/info/exclude, each on a page of its own because the lists can get long. A page shows how many entries it holds."
+      ),
+      this.protectedPathsPage(),
+      this.sparsePage(),
+      this.gitignorePage(),
+      this.excludePage()
+    ];
+  }
+  protectedPathsPage() {
+    const cur = () => this.plugin.deviceSettings;
+    return {
+      type: "page",
+      name: "Protected paths",
+      desc: "Paths the safety gate never lets a commit touch: the manual list plus, by default, everything the repository's sparse rules hide.",
+      displayValue: () => `${this.plugin.effectiveProtectedPaths().length} effective`,
+      items: [
+        {
+          name: "Auto-protect sparse exclusions",
+          desc: "Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).",
+          control: { type: "toggle", key: "device.autoProtectSparse" }
+        },
+        note(
+          !cur().autoProtectSparse ? "Auto-protect is off: only the manual paths below are protected." : cur().derivedProtectedPaths.length ? `Derived from sparse checkout: ${cur().derivedProtectedPaths.join(", ")}` : "Derived from sparse checkout: none yet (run Status once to read them from git)."
+        ),
+        {
+          type: "list",
+          heading: "Manual paths",
+          emptyState: "No manual paths. Add a folder that must never be committed as a deletion from this device.",
+          items: cur().protectedPaths.map((p) => ({ name: p })),
+          onDelete: (index) => {
+            const p = cur().protectedPaths[index];
+            if (p === void 0) return;
+            void this.plugin.updateDeviceSettings({ protectedPaths: cur().protectedPaths.filter((x) => x !== p) }).then(() => this.update());
+          },
+          addItem: {
+            name: "Add manual path",
+            action: () => this.promptEntry("Add a protected path", "Folder/Subfolder", "Protect", async (v) => {
+              const res = validateProtectedPaths([...cur().protectedPaths, v]);
+              if (!res.ok) {
+                new import_obsidian4.Notice(`Rejected "${res.offending}": ${res.reason}`);
+                return;
+              }
+              await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
+              this.update();
+            })
+          }
+        }
+      ]
+    };
+  }
+  sparsePage() {
+    const sparse = this.plugin.lastKnownSparse();
+    const excls = this.plugin.deviceSettings.derivedProtectedPaths;
+    return {
+      type: "page",
+      name: "Sparse checkout exclusions",
+      desc: "Paths hidden from THIS device's working tree (non-cone sparse checkout, applied by git in Termux). Hiding never deletes anything from the repository; removing an exclusion materializes the files again.",
+      displayValue: () => this.plugin.lastKnownSparse() ? `${this.plugin.deviceSettings.derivedProtectedPaths.length} hidden` : "run Status to load",
+      items: [
+        ...sparse && sparse.enabled === false ? [note("Sparse checkout is not enabled in this repository. Hiding the first path enables it.")] : [],
+        {
+          type: "list",
+          heading: "Hidden on this device",
+          emptyState: sparse ? "Nothing is hidden on this device." : "Run Status once to read the sparse rules from git.",
+          items: excls.map((p) => ({ name: p })),
+          onDelete: (index) => {
+            const p = excls[index];
+            if (p !== void 0) void this.plugin.cmdSparseExclude(p, false).then(() => this.update());
+          },
+          addItem: {
+            name: "Hide a path on this device",
+            action: () => this.promptEntry(
+              "Hide a path on this device",
+              "Folder/Subfolder",
+              "Hide",
+              (v) => this.plugin.cmdSparseExclude(v, true).then(() => this.update())
+            )
+          }
+        }
+      ]
+    };
+  }
+  gitignorePage() {
+    const entries = parseIgnoreEntries(this.plugin.currentGitignoreLines().join("\n"));
+    return {
+      type: "page",
+      name: ".gitignore",
+      desc: "A tracked file: entries apply to ALL devices once the change is committed and synced.",
+      displayValue: () => `${parseIgnoreEntries(this.plugin.currentGitignoreLines().join("\n")).length} entries \xB7 shared`,
+      items: [
+        {
+          type: "list",
+          heading: "Entries",
+          emptyState: "No entries, or the file has not been read yet \u2014 Reload from Termux reads it.",
+          items: entries.map((e) => ({ name: e })),
+          onDelete: (index) => {
+            const e = entries[index];
+            if (e !== void 0) void this.plugin.gitignoreRemove(e).then(() => this.update());
+          },
+          addItem: {
+            name: "Add an entry",
+            action: () => this.promptEntry(
+              "Add to .gitignore",
+              "pattern, e.g. /Scratch/ or *.tmp",
+              "Add",
+              (v) => this.plugin.gitignoreAdd(v).then(() => this.update())
+            )
+          }
+        },
+        {
+          name: "Reload from Termux",
+          desc: "Read the file again through the runner (one round trip). The list above is the copy the last status brought.",
+          action: () => void this.plugin.loadGitignore().then(() => this.update())
+        }
+      ]
+    };
+  }
+  excludePage() {
+    const entries = this.plugin.currentExcludeLines();
+    return {
+      type: "page",
+      name: ".git/info/exclude",
+      desc: "Local ignore rules stored inside .git \u2014 they never reach the remote or other devices. Managed through the Termux runner.",
+      displayValue: () => `${this.plugin.currentExcludeLines().length} entries \xB7 this clone only`,
+      items: [
+        {
+          type: "list",
+          heading: "Entries",
+          emptyState: "No entries loaded. Load from Termux reads the file.",
+          items: entries.map((e) => ({ name: e })),
+          onDelete: (index) => {
+            const e = entries[index];
+            if (e === void 0) return;
+            const path = e.replace(/^\//, "").replace(/\/$/, "");
+            void this.plugin.cmdExcludeChange(path, false).then(() => this.update());
+          },
+          addItem: {
+            name: "Add to exclude",
+            action: () => this.promptEntry(
+              "Add to .git/info/exclude",
+              "Folder/Subfolder",
+              "Exclude",
+              (v) => this.plugin.cmdExcludeChange(v, true).then(() => this.update())
+            )
+          }
+        },
+        {
+          name: "Load from Termux",
+          desc: "Read the current file through the runner (one round trip).",
+          action: () => void this.plugin.refreshExcludeList().then(() => this.update())
+        }
+      ]
+    };
+  }
+  /** One-line text prompt for the add rows; `onDone` may be async. */
+  promptEntry(title, placeholder, submitLabel, onDone) {
+    new CommitMessageModal(this.app, { title, placeholder, submitLabel, initial: "" }, async (v) => {
+      if (v === null) return;
+      const trimmed = v.trim();
+      if (trimmed !== "") await onDone(trimmed);
+    }).open();
+  }
+  // ------------------------------------------------------------------ groups
+  menuItems() {
+    return [
+      note("Which Git entries appear on right click / long tap of a file or folder. Stage/Unstage is always shown while the bridge is enabled."),
+      {
+        name: "Show .gitignore commands",
+        desc: "Add to / remove from .gitignore (shared, synced through git).",
+        control: { type: "toggle", key: "device.menuGitignore" }
+      },
+      {
+        name: "Show sparse commands",
+        desc: "Hide on this device / show again (sparse checkout exclusions).",
+        control: { type: "toggle", key: "device.menuSparse" }
+      },
+      {
+        name: "Show .git exclude commands",
+        desc: "Add to / remove from .git/info/exclude (this clone only, never synced).",
+        control: { type: "toggle", key: "device.menuExclude" }
+      },
+      {
+        name: "Rows shown per group",
+        desc: "How many rows the status panel draws in each group before it offers the rest. Every group can be long at once, and a folder of a few thousand new files arrives as one Git entry that expands into a row each. The group's count always states the true total. Device-local: what it costs is render time here.",
+        control: {
+          type: "dropdown",
+          key: "device.rowsPerGroup",
+          options: Object.fromEntries(ROWS_PER_GROUP_CHOICES.map((n) => [String(n), String(n)]))
+        }
+      },
+      {
+        name: "Delete new files permanently",
+        desc: "Off: deleting untracked files moves them to Obsidian's trash (.trash in the vault), which is the only way back for a file Git never recorded. On: they are deleted from disk. Device-local, because what it decides is whether .trash grows on this device.",
+        control: { type: "toggle", key: "device.deleteUntrackedPermanently" }
+      }
+    ];
+  }
+  commitMessageItems() {
+    const templates = this.plugin.sharedPrefs.commitTemplates;
     const templateIo = {
       get: () => this.plugin.sharedPrefs.commitTemplates,
       set: (next) => this.plugin.setSharedPref({ commitTemplates: next }),
-      onChanged: () => {
-        renderTemplateRow();
-        renderSlots();
-      }
+      onChanged: () => this.update()
     };
-    const renderTemplateRow = () => {
-      tplRow.empty();
-      new import_obsidian4.Setting(tplRow).setName("Message templates").setDesc(
-        `${this.plugin.sharedPrefs.commitTemplates.length} template(s). The commit window and the three automatic triggers below pick from this list; {{date}} becomes the current date and time using the format below. Shared across devices (data.json).`
-      ).addButton(
-        (b) => b.setButtonText("Manage templates\u2026").onClick(
-          () => new TemplateManagerModal(this.app, templateIo).open()
-        )
-      );
+    const slot = (name, desc, key) => {
+      const cur = this.plugin.deviceSettings[key];
+      const options = {};
+      if (!templates.includes(cur)) options[cur] = `${cur} (not in the list)`;
+      for (const t of templates) options[t] = t;
+      options[NEW_TEMPLATE] = "+ New template\u2026";
+      return { name, desc, control: { type: "dropdown", key: `slot.${key}`, options } };
     };
-    const slotSetting = (name, desc, key) => {
-      const patchFor = (v) => key === "syncOnCloseTemplate" ? { syncOnCloseTemplate: v } : key === "autoCommitTemplate" ? { autoCommitTemplate: v } : { syncTemplate: v };
-      new import_obsidian4.Setting(slotBox).setName(name).setDesc(desc).addDropdown((d) => {
-        const cur = this.plugin.deviceSettings[key];
-        const list = this.plugin.sharedPrefs.commitTemplates;
-        if (!list.includes(cur)) d.addOption(cur, `${cur} (not in the list)`);
-        for (const t of list) d.addOption(t, t);
-        d.addOption("__new__", "+ New template\u2026");
-        d.setValue(cur).onChange((v) => {
-          void (async () => {
-            if (v === "__new__") {
-              promptNewTemplate(this.app, async (msg) => {
-                await this.plugin.setSharedPref({
-                  commitTemplates: [...this.plugin.sharedPrefs.commitTemplates, msg]
-                });
-                await this.plugin.updateDeviceSettings(patchFor(msg));
-                renderTemplateRow();
-                renderSlots();
-              });
-              renderSlots();
-              return;
-            }
-            await this.plugin.updateDeviceSettings(patchFor(v));
-          })();
-        });
-      });
-    };
-    const renderSlots = () => {
-      slotBox.empty();
-      slotSetting(
+    return [
+      {
+        name: "Message templates",
+        desc: `${templates.length} template(s). The commit window and the three automatic triggers below pick from this list; {{date}} becomes the current date and time using the format below. Shared across devices (data.json).`,
+        action: () => new TemplateManagerModal(this.app, templateIo).open()
+      },
+      slot(
         "Sync-on-close message",
         "What the fire-and-forget sync commits with when Obsidian goes to the background. Device-local.",
         "syncOnCloseTemplate"
-      );
-      slotSetting(
-        "Automatic sync message",
-        "What the periodic sync and sync-on-open commit with. Device-local.",
-        "autoCommitTemplate"
-      );
-      slotSetting(
+      ),
+      slot("Automatic sync message", "What the periodic sync and sync-on-open commit with. Device-local.", "autoCommitTemplate"),
+      slot(
         "Sync message",
         "What the Sync command commits with when you did not type a message. A merge in progress always uses git's own prepared merge message instead. Device-local.",
         "syncTemplate"
-      );
-    };
-    renderTemplateRow();
-    renderSlots();
-    new import_obsidian4.Setting(containerEl).setName("{{date}} format").setDesc(
-      "Tokens: YYYY, YY, MM, DD, HH, mm, ss (the same spelling obsidian-git uses). Local time on each device. Shared across devices."
-    ).addText(
-      (t) => t.setValue(this.plugin.sharedPrefs.commitDateFormat).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({
-            commitDateFormat: v.trim() === "" ? DEFAULT_COMMIT_DATE_FORMAT : v
-          });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Recently typed messages to remember").setDesc(
-      "The commit window offers this many of your recent messages beside the templates. 0 turns the list off. The list is typing history and stays on this device."
-    ).addText(
-      (t) => t.setValue(String(s.recentCommitMessagesMax)).onChange((v) => {
-        void (async () => {
-          const n = parseInt(v, 10);
-          if (Number.isFinite(n) && n >= 0 && n <= 50) {
-            await this.plugin.updateDeviceSettings({ recentCommitMessagesMax: n });
-          }
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Notifications").setHeading();
-    new import_obsidian4.Setting(containerEl).setName("Show a result window on success").setDesc(
-      "Off: successful operations only update the status panel (and the log). Failures, conflicts and safety blocks are always shown as a window."
-    ).addToggle(
-      (t) => t.setValue(s.showSuccessModals).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ showSuccessModals: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Short messages").setDesc(
-      "Where brief informational messages go. Note: a plugin cannot raise native Android toasts, so the choices are Obsidian's own notice, the status panel, or the log only."
-    ).addDropdown(
-      (d) => d.addOption("notice", "Obsidian notice (toast)").addOption("status-only", "Status panel only").addOption("log-only", "Operation log only").setValue(s.notificationMode).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({
-            notificationMode: v
-          });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Name the file above the Git menu").setDesc(
-      "Show the folder and the file name at the top of the Git context menu, above the entries. On by default: a panel row truncates the name and the file explorer shows no path at all, so without it the menu can offer 'Discard changes' over a file it never identifies. A deep path costs two or three rows. Cosmetic and shared across devices (stored in data.json)."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.showMenuHeader).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ showMenuHeader: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Spell the change out in the status panel").setDesc(
-      "Show 'modified', 'conflicted' or 'deleted' beside a file name. On by default. Mobile only \u2014 on desktop the tooltip carries it \u2014 and the change letter at the end of the row states it either way, so turning this off gives long names more room. Cosmetic and shared across devices (stored in data.json)."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.showChangeWords).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ showChangeWords: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Open the output panel for long operations").setDesc(
-      "Show what Termux is saying, by itself, once an operation has run for 30 seconds. Off by default: a panel that appears on its own takes a slot in the sidebar while you are reading something else. Either way, tapping the state line in the Git panel (the one that counts the seconds) opens it. Cosmetic and shared across devices."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.openOutputForLongOps).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ openOutputForLongOps: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Wrap long lines").setDesc(
-      "Wrap lines in the diff and conflict panes instead of scrolling horizontally. In the conflict pane the line numbers and the Keep buttons stay pinned to the left edge while the text scrolls, so no control can end up out of reach. Cosmetic and shared across devices (stored in data.json)."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.wrapDiffLines).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ wrapDiffLines: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Show invisible characters in diffs").setDesc(
-      "Render whitespace as glyphs in the diff pane: \xB7 space, \u2192 tab, \u240D CR. Makes leading/trailing whitespace visible. Note: copying from the diff then copies the glyphs, not the original whitespace."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.showInvisibles).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ showInvisibles: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Compare changed lines by").setDesc(
-      "What gets highlighted inside a line that changed, in the diff pane, the file history and the conflict pane. Words suit prose: 'brown' becoming 'red' is one word replaced. Characters suit paths, identifiers and numbers, where one letter is the whole edit."
-    ).addDropdown(
-      (d) => d.addOption("word", "Words").addOption("char", "Characters").setValue(this.plugin.sharedPrefs.inlineDiffUnit).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ inlineDiffUnit: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Keep line selection when opening another file").setDesc(
-      "The diff pane is reused for every diff. Off: opening another file leaves line-selection mode, so a diff never arrives already in it. On: the mode stays. The ticked lines are dropped either way \u2014 they point at lines of the diff that was on screen."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.keepLineSelection).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ keepLineSelection: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Show raw conflict markers").setDesc(
-      "In the conflict pane: show the file's <<<<<<< / ======= / >>>>>>> lines as they really are, with the side labels and Keep buttons on separate rows. Off: the markers stay hidden under those rows."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.showConflictMarkers).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ showConflictMarkers: v });
-        })();
-      })
-    );
-    this.renderColorSection(containerEl);
-    new import_obsidian4.Setting(containerEl).setName("Diff size limit").setDesc(
-      "How much of one diff the pane builds at a time. The runner keeps whole hunks within the limit and never a partial one, and the pane says how many it left out, with a one-tap way to fetch the rest for that diff alone. Every diff line costs about a dozen elements to draw, so this is a per-phone decision and stays device-local."
-    ).addDropdown((d) => {
-      for (const kb of DIFF_LIMIT_CHOICES_KB) {
-        d.addOption(String(kb), kb >= 1024 ? `${kb / 1024} MB` : `${kb} KB`);
+      ),
+      {
+        name: "{{date}} format",
+        desc: "Tokens: YYYY, YY, MM, DD, HH, mm, ss (the same spelling obsidian-git uses). Local time on each device. Shared across devices.",
+        control: { type: "text", key: "shared.commitDateFormat", placeholder: DEFAULT_COMMIT_DATE_FORMAT }
+      },
+      {
+        name: "Recently typed messages to remember",
+        desc: "The commit window offers this many of your recent messages beside the templates. 0 turns the list off. The list is typing history and stays on this device.",
+        control: { type: "number", key: "device.recentCommitMessagesMax", min: 0, max: 50, step: 1 }
       }
-      d.setValue(String(s.diffLimitKb)).onChange((v) => {
-        void (async () => {
-          const n = parseInt(v, 10);
-          if (!Number.isFinite(n) || n <= 0) return;
-          await this.plugin.updateDeviceSettings({ diffLimitKb: n });
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Auto-refresh status (seconds)").setDesc(
-      "While the status panel is open, run a status this often to pick up outside changes. 0 disables it. Each refresh wakes Termux \u2014 consider battery before choosing a small interval. Device-local."
-    ).addText((t) => {
-      t.inputEl.inputMode = "numeric";
-      t.setPlaceholder("0").setValue(String(s.statusRefreshSeconds)).onChange((v) => {
-        void (async () => {
-          const n = parseInt(v, 10);
-          if (!Number.isFinite(n) || n < 0) return;
-          await this.plugin.updateDeviceSettings({ statusRefreshSeconds: n });
-          this.plugin.restartStatusPoll();
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Repository footprint (this device)").setHeading();
-    const fp = this.plugin.footprintState();
-    const fpNote = !this.plugin.footprintAvailable() ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once." : fp === null ? "The repository's state has not been read yet this session \u2014 a toggle checks it first, then asks to confirm." : "";
-    if (fpNote !== "") {
-      containerEl.createEl("p", { text: fpNote, cls: "setting-item-description" });
-    }
-    new import_obsidian4.Setting(containerEl).setName("Shallow history").setDesc(
-      "Keep only the newest commits on this device; the remote and your other devices keep everything. The history panels here reach only what stays, and enabling this also clears this device's reflog \u2014 without that the old commits stay pinned and nothing is freed. Turning it off downloads the full history back. Space returns after Clean up repository storage."
-    ).addToggle((t) => {
-      t.setValue(fp?.shallow ?? false).setDisabled(!this.plugin.footprintAvailable()).onChange((v) => {
-        void (async () => {
-          if (v) await this.plugin.cmdShallowEnable();
-          else await this.plugin.cmdUnshallow();
-          this.refreshTab();
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Shallow depth").setDesc("How many newest commits stay when shallow history is enabled. Takes effect on the next enable.").addText((t) => {
-      t.inputEl.inputMode = "numeric";
-      t.setPlaceholder("100").setValue(String(s.shallowDepth)).onChange((v) => {
-        void (async () => {
-          const n = parseInt(v, 10);
-          if (!Number.isFinite(n) || n < 1 || n > 1e5) return;
-          await this.plugin.updateDeviceSettings({ shallowDepth: n });
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Partial clone (blob:none)").setDesc(
-      "Fetch file content on demand instead of holding all of it. With sparse checkout the hidden files' content is never downloaded at all \u2014 but 'Show again' and old file versions then need the network. Turning it off downloads everything back first. Run Clean up repository storage after enabling to shed content that is already downloaded."
-    ).addToggle((t) => {
-      t.setValue(fp?.partial ?? false).setDisabled(!this.plugin.footprintAvailable()).onChange((v) => {
-        void (async () => {
-          if (v) await this.plugin.cmdPartialEnable();
-          else await this.plugin.cmdPartialDisable();
-          this.refreshTab();
-        })();
-      });
-    });
-    new import_obsidian4.Setting(containerEl).setName("Automatic actions").setHeading();
-    new import_obsidian4.Setting(containerEl).setName("When Obsidian opens").setDesc(
-      "Pull brings work in and changes nothing you have not seen. Sync also commits and pushes, so on every launch it publishes whatever is lying around \u2014 including the workspace file Obsidian rewrites just by being opened. Nothing is the default."
-    ).addDropdown(
-      (d) => d.addOption("nothing", "Nothing").addOption("pull", "Pull").addOption("sync", "Sync (commit and push too)").setValue(s.onOpenAction).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({
-            onOpenAction: v
-          });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Sync when Obsidian goes to the background").setDesc(
-      "Queues a sync the moment Obsidian starts losing the screen, while Android still lets it reach Termux. If that moment is missed, Android holds the trigger until you come back and the sync runs then, if that is within about 13 minutes; later than that it is dropped. Nothing is queued when there is nothing local to send."
-    ).addToggle(
-      (t) => t.setValue(s.autoSyncOnClose).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ autoSyncOnClose: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Periodic sync while Obsidian is open (minutes, 0 = off)").setDesc(
-      "Every tick first asks what the plugin already knows \u2014 edits since the last sync, uncommitted changes, commits the remote does not have. A tick with nothing local to send is skipped without contacting Termux."
-    ).addText(
-      (t) => t.setValue(String(s.periodicSyncMinutes)).onChange((v) => {
-        void (async () => {
-          const n = Math.max(0, Math.floor(Number(v) || 0));
-          await this.plugin.updateDeviceSettings({ periodicSyncMinutes: n });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Minimum interval between automatic syncs (minutes)").addText(
-      (t) => t.setValue(String(s.minAutoSyncIntervalMinutes)).onChange((v) => {
-        void (async () => {
-          const n = Math.max(1, Math.floor(Number(v) || 15));
-          await this.plugin.updateDeviceSettings({ minAutoSyncIntervalMinutes: n });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Only sync on Wi-Fi (best effort)").setDesc("Uses the WebView network API when available; skipped silently when the API is missing.").addToggle(
-      (t) => t.setValue(s.wifiOnly).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ wifiOnly: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Skip automatic sync when battery is low (best effort)").addToggle(
-      (t) => t.setValue(s.skipOnLowBattery).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ skipOnLowBattery: v });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Advanced").setHeading();
-    new import_obsidian4.Setting(containerEl).setName("Operation log").setDesc(
-      "Recent bridge operations (URLs redacted). Lives here since the panel strip slot went to the tree/list toggle; also available as the 'Open operation log' command."
-    ).addButton(
-      (b) => b.setButtonText("Open").onClick(() => this.plugin.openOperationLog())
-    );
-    new import_obsidian4.Setting(containerEl).setName("Operation timeout (seconds)").setDesc(
-      `How long to wait for the runner before giving up. Default ${DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds}. Fetch, pull, push and sync never get less than ${MIN_NETWORK_TIMEOUT_SECONDS}s whatever is set here, and cloning has its own much larger budget: those wait for a network, not for git. Giving up does not stop the runner \u2014 it finishes what it started, and a result that lands later is picked up \u2014 so a short value buys nothing but alarming windows.`
-    ).addText(
-      (t) => t.setValue(String(s.opTimeoutSeconds)).onChange((v) => {
-        void (async () => {
-          const n = Math.min(3600, Math.max(10, Math.floor(Number(v) || DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds)));
-          await this.plugin.updateDeviceSettings({ opTimeoutSeconds: n });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Companion intent URI template").setDesc('Advanced. "{id}" is replaced by the request id; change it only if the companion app uses a custom scheme.').addText(
-      (t) => t.setValue(s.companionUriTemplate).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ companionUriTemplate: v.trim() });
-        })();
-      })
-    );
-    new import_obsidian4.Setting(containerEl).setName("Reset device-local settings").setDesc("Restores all settings on this device to defaults. The vault and repository are not touched.").addButton(
-      (b) => b.setButtonText("Reset").setDestructive().onClick(() => {
-        new ConfirmModal(
-          this.app,
-          {
-            title: "Reset device-local settings?",
-            body: [
-              "This resets Native Git Bridge settings on this device only.",
-              "The repository, the vault, and other devices are not affected."
-            ],
-            confirmLabel: "Reset settings",
-            danger: true
-          },
-          async (confirmed) => {
-            if (!confirmed) return;
-            await this.plugin.resetDeviceSettings();
-            this.refreshTab();
-          }
-        ).open();
-      })
-    );
+    ];
   }
-  /**
-   * Re-render the whole tab. `update()` is the 1.13+ entry point; `display()`
-   * remains as the fallback for older builds (and is what this tab implements).
-   */
-  refreshTab() {
-    const anyThis = this;
-    if (typeof anyThis.update === "function") anyThis.update();
-    else this.display();
-  }
-  /** Collapsible <details> block with a title; open state survives re-renders. */
-  detailsSection(containerEl, title, hint) {
-    const det = containerEl.createEl("details", { cls: "ngb-details" });
-    if (this.openSections.has(title)) det.setAttribute("open", "");
-    det.addEventListener("toggle", () => {
-      if (det.hasAttribute("open")) this.openSections.add(title);
-      else this.openSections.delete(title);
-    });
-    const sum = det.createEl("summary");
-    sum.createSpan({ text: title });
-    const hintEl = sum.createSpan({ cls: "ngb-details-hint", text: hint });
-    return { body: det.createDiv({ cls: "ngb-details-body" }), hintEl };
-  }
-  /** One removable row: monospace text + a Remove button. */
-  /**
-   * `onRemove` and `addRow`'s `onAdd` may be async: removing a path writes
-   * device-local settings and then re-renders. Same reasoning as
-   * ConfirmModal.onDecision: the contract admits the promise, and the single
-   * `void` lives at the call below rather than at every caller.
-   */
-  entryRow(listEl, text, onRemove) {
-    const row = listEl.createDiv({ cls: "ngb-entry-row" });
-    row.createSpan({ cls: "ngb-entry-text", text });
-    if (onRemove) {
-      const btn = row.createEl("button", { text: "Remove" });
-      btn.addEventListener("click", () => void onRemove());
-    }
-  }
-  /** Input + Add button; `onAdd` receives the trimmed value. May be async. */
-  addRow(body, placeholder, label2, onAdd) {
-    const row = body.createDiv({ cls: "ngb-add-row" });
-    const input = row.createEl("input", { type: "text", placeholder });
-    const btn = row.createEl("button", { text: label2 });
-    btn.addEventListener("click", () => {
-      const v = input.value.trim();
-      if (v !== "") void onAdd(v);
-      input.value = "";
-    });
-  }
-  // Every section refreshes ONLY its own list in place. Re-rendering the whole
-  // tab (display()) on each add/remove resets the scroll position and makes
-  // the collapsibles flicker — the view visibly "jumps".
-  /**
-   * Colours for the diff and conflict panes.
-   *
-   * One toggle guards the whole thing: while it is off the panes use the
-   * theme's own values and there is nothing to configure, so nothing is shown.
-   * Switching it on reveals the pickers — light and dark separately, because
-   * one set of hex values cannot be legible in both.
-   */
-  /**
-   * Only shown when there is something to show: a repository set aside by a
-   * re-clone. It is invisible otherwise, and a permanent empty row would just
-   * be a question nobody has.
-   */
-  renderPreviousReposSetting(containerEl) {
-    const setting = new import_obsidian4.Setting(containerEl).setName("Previous repository copies").setDesc("Checking\u2026");
-    setting.settingEl.hide();
-    void (async () => {
-      const repos = await this.plugin.listPreviousRepos();
-      if (repos.length === 0) return;
-      const total = repos.reduce((n, r) => n + r.sizeKb, 0);
-      setting.setDesc(
-        `${repos.length === 1 ? "One earlier repository was" : `${repos.length} earlier repositories were`} set aside by a re-clone and still use ${formatSize(total)}. Their history is intact; deleting is final.`
-      );
-      setting.addButton(
-        (b) => b.setButtonText("Review").onClick(() => this.plugin.showPreviousRepoModal(repos, "Previous repository copies"))
-      );
-      setting.settingEl.show();
-    })();
-  }
-  renderColorSection(containerEl) {
-    new import_obsidian4.Setting(containerEl).setName("Custom colours in the diff and conflict panes").setDesc(
-      "Off: the panes follow your theme. On: the colours below are used. Cosmetic and shared across devices (stored in data.json)."
-    ).addToggle(
-      (t) => t.setValue(this.plugin.sharedPrefs.customColors).onChange((v) => {
-        void (async () => {
-          await this.plugin.setSharedPref({ customColors: v });
-          this.refreshTab();
-        })();
-      })
-    );
-    if (!this.plugin.sharedPrefs.customColors) return;
-    const fields = [
+  notificationItems() {
+    const colorFields = [
       { key: "diffAddBg", name: "Added line background", desc: "Diff pane" },
       { key: "diffAddHl", name: "Added characters", desc: "Diff pane, intra-line highlight" },
       { key: "diffDelBg", name: "Deleted line background", desc: "Diff pane" },
@@ -2119,153 +2041,244 @@ var NativeGitBridgeSettingTab = class extends import_obsidian4.PluginSettingTab 
       { key: "conflictLocalBg", name: "LOCAL side background", desc: "Conflict pane (yours)" },
       { key: "conflictRemoteBg", name: "REMOTE side background", desc: "Conflict pane (theirs)" }
     ];
-    for (const mode of ["dark", "light"]) {
-      const { body } = this.detailsSection(
-        containerEl,
-        mode === "dark" ? "Colours (dark theme)" : "Colours (light theme)",
-        ""
-      );
-      const prefKey = mode === "dark" ? "colorsDark" : "colorsLight";
-      for (const f of fields) {
-        new import_obsidian4.Setting(body).setName(f.name).setDesc(f.desc).addColorPicker(
-          (cp) => cp.setValue(this.plugin.sharedPrefs[prefKey][f.key]).onChange((v) => {
-            void (async () => {
-              await this.plugin.setSharedPref({
-                [prefKey]: { ...this.plugin.sharedPrefs[prefKey], [f.key]: v }
-              });
-            })();
+    const colorPage = (mode) => ({
+      type: "page",
+      name: mode === "dark" ? "Colours (dark theme)" : "Colours (light theme)",
+      visible: () => this.plugin.sharedPrefs.customColors,
+      items: [
+        ...colorFields.map(
+          (f) => ({
+            name: f.name,
+            desc: f.desc,
+            control: { type: "color", key: `color.${mode}.${f.key}` }
           })
-        );
-      }
-      new import_obsidian4.Setting(body).setName("Reset to the defaults").setDesc("Restores the values this plugin ships with for this theme.").addButton(
-        (b) => b.setButtonText("Reset").onClick(() => {
-          void (async () => {
-            await this.plugin.setSharedPref({ [prefKey]: { ...DEFAULT_COLORS[mode] } });
-            this.refreshTab();
-          })();
-        })
-      );
-    }
-  }
-  renderProtectedPathsSection(containerEl, s) {
-    const { body, hintEl } = this.detailsSection(containerEl, "Protected paths", "");
-    new import_obsidian4.Setting(body).setName("Auto-protect sparse exclusions").setDesc("Paths hidden by the repository's own sparse rules join the protected set automatically (read from git on every status).").addToggle(
-      (t) => t.setValue(s.autoProtectSparse).onChange((v) => {
-        void (async () => {
-          await this.plugin.updateDeviceSettings({ autoProtectSparse: v });
-          refresh();
-        })();
-      })
-    );
-    const derivedNote = body.createEl("p", { cls: "ngb-settings-note" });
-    const list = body.createDiv();
-    const invalidNote = body.createDiv({ cls: "ngb-invalid" });
-    const refresh = () => {
-      const cur = this.plugin.deviceSettings;
-      hintEl.setText(`${this.plugin.effectiveProtectedPaths().length} effective`);
-      derivedNote.setText(
-        !cur.autoProtectSparse ? "Auto-protect is off: only the manual paths below are protected." : cur.derivedProtectedPaths.length ? `Derived from sparse checkout: ${cur.derivedProtectedPaths.join(", ")}` : "Derived from sparse checkout: none yet (run Status once to read them from git)."
-      );
-      list.empty();
-      for (const p of cur.protectedPaths) {
-        this.entryRow(list, p, async () => {
-          await this.plugin.updateDeviceSettings({
-            protectedPaths: this.plugin.deviceSettings.protectedPaths.filter((x) => x !== p)
-          });
-          refresh();
-        });
-      }
-    };
-    refresh();
-    this.addRow(body, "Folder/Subfolder", "Add manual path", async (v) => {
-      const res = validateProtectedPaths([...this.plugin.deviceSettings.protectedPaths, v]);
-      if (!res.ok) {
-        invalidNote.setText(`Rejected "${res.offending}": ${res.reason}`);
-        return;
-      }
-      invalidNote.setText("");
-      await this.plugin.updateDeviceSettings({ protectedPaths: res.normalized });
-      refresh();
-    });
-  }
-  renderSparseSection(containerEl) {
-    const { body, hintEl } = this.detailsSection(containerEl, "Sparse checkout exclusions", "");
-    body.createEl("p", {
-      cls: "ngb-settings-note",
-      text: "Paths hidden from THIS device's working tree (non-cone sparse checkout, applied by git in Termux). Hiding never deletes anything from the repository; removing an exclusion materializes the files again."
-    });
-    const stateNote = body.createDiv({ cls: "ngb-invalid" });
-    const list = body.createDiv();
-    const refresh = () => {
-      const sparse = this.plugin.lastKnownSparse();
-      const excls = this.plugin.deviceSettings.derivedProtectedPaths;
-      hintEl.setText(sparse ? `${excls.length} hidden` : "run Status to load");
-      stateNote.setText(sparse && sparse.enabled === false ? "Sparse checkout is not enabled in this repository." : "");
-      list.empty();
-      for (const p of excls) {
-        this.entryRow(list, p, () => void this.plugin.cmdSparseExclude(p, false).then(refresh));
-      }
-    };
-    refresh();
-    this.addRow(
-      body,
-      "Folder/Subfolder",
-      "Hide path",
-      (v) => void this.plugin.cmdSparseExclude(v, true).then(refresh)
-    );
-  }
-  renderGitignoreSection(containerEl) {
-    const { body, hintEl } = this.detailsSection(containerEl, ".gitignore", "shared, synced through git");
-    body.createEl("p", {
-      cls: "ngb-settings-note",
-      text: ".gitignore is a tracked file: entries apply to ALL devices once the change is committed and synced."
-    });
-    const list = body.createDiv();
-    const refresh = () => {
-      void this.plugin.loadGitignore().then((entries) => {
-        hintEl.setText(`${entries.length} entries \xB7 shared, synced through git`);
-        list.empty();
-        for (const e of entries) {
-          this.entryRow(list, e, () => void this.plugin.gitignoreRemove(e).then(refresh));
+        ),
+        {
+          name: "Reset to the defaults",
+          desc: "Restores the values this plugin ships with for this theme.",
+          action: () => {
+            void this.plugin.setSharedPref({ [mode === "dark" ? "colorsDark" : "colorsLight"]: { ...DEFAULT_COLORS[mode] } }).then(() => this.update());
+          }
         }
-      });
-    };
-    refresh();
-    this.addRow(
-      body,
-      "pattern, e.g. /Scratch/ or *.tmp",
-      "Add entry",
-      (v) => void this.plugin.gitignoreAdd(v).then(refresh)
-    );
-  }
-  renderExcludeSection(containerEl) {
-    const { body, hintEl } = this.detailsSection(containerEl, ".git/info/exclude", "this clone only, never synced");
-    body.createEl("p", {
-      cls: "ngb-settings-note",
-      text: "Local ignore rules stored inside .git \u2014 they never reach the remote or other devices. Managed through the Termux runner; press Load to read the current file."
+      ]
     });
-    const list = body.createDiv();
-    const refresh = () => {
-      const entries = this.plugin.currentExcludeLines();
-      hintEl.setText(`${entries.length} entries \xB7 this clone only`);
-      list.empty();
-      for (const e of entries) {
-        const path = e.replace(/^\//, "").replace(/\/$/, "");
-        this.entryRow(list, e, () => void this.plugin.cmdExcludeChange(path, false).then(refresh));
+    return [
+      {
+        name: "Show a result window on success",
+        desc: "Off: successful operations only update the status panel (and the log). Failures, conflicts and safety blocks are always shown as a window.",
+        control: { type: "toggle", key: "device.showSuccessModals" }
+      },
+      {
+        name: "Short messages",
+        desc: "Where brief informational messages go. Note: a plugin cannot raise native Android toasts, so the choices are Obsidian's own notice, the status panel, or the log only.",
+        control: {
+          type: "dropdown",
+          key: "device.notificationMode",
+          options: { notice: "Obsidian notice (toast)", "status-only": "Status panel only", "log-only": "Operation log only" }
+        }
+      },
+      {
+        name: "Name the file above the Git menu",
+        desc: "Show the folder and the file name at the top of the Git context menu, above the entries. On by default: a panel row truncates the name and the file explorer shows no path at all, so without it the menu can offer 'Discard changes' over a file it never identifies. A deep path costs two or three rows. Cosmetic and shared across devices (stored in data.json).",
+        control: { type: "toggle", key: "shared.showMenuHeader" }
+      },
+      {
+        name: "Spell the change out in the status panel",
+        desc: "Show 'modified', 'conflicted' or 'deleted' beside a file name. On by default. Mobile only \u2014 on desktop the tooltip carries it \u2014 and the change letter at the end of the row states it either way, so turning this off gives long names more room. Cosmetic and shared across devices (stored in data.json).",
+        control: { type: "toggle", key: "shared.showChangeWords" }
+      },
+      {
+        name: "Git signs in the file explorer",
+        desc: "Mark changed files in Obsidian's file explorer with a letter (M modified, A added, D deleted, U untracked, ! conflict) and every folder holding one with a dot. On by default. Taken from the last status, so it is as current as the Git panel. Cosmetic and shared across devices (stored in data.json).",
+        control: { type: "toggle", key: "shared.showExplorerSigns" }
+      },
+      {
+        name: "Open the output panel for long operations",
+        desc: "Show what Termux is saying, by itself, once an operation has run for 30 seconds. Off by default: a panel that appears on its own takes a slot in the sidebar while you are reading something else. Either way, tapping the state line in the Git panel (the one that counts the seconds) opens it. Cosmetic and shared across devices.",
+        control: { type: "toggle", key: "shared.openOutputForLongOps" }
+      },
+      {
+        name: "Wrap long lines",
+        desc: "Wrap lines in the diff and conflict panes instead of scrolling horizontally. In the conflict pane the line numbers and the Keep buttons stay pinned to the left edge while the text scrolls, so no control can end up out of reach. Cosmetic and shared across devices (stored in data.json).",
+        control: { type: "toggle", key: "shared.wrapDiffLines" }
+      },
+      {
+        name: "Show invisible characters in diffs",
+        desc: "Render whitespace as glyphs in the diff pane: \xB7 space, \u2192 tab, \u240D CR. Makes leading/trailing whitespace visible. Note: copying from the diff then copies the glyphs, not the original whitespace.",
+        control: { type: "toggle", key: "shared.showInvisibles" }
+      },
+      {
+        name: "Compare changed lines by",
+        desc: "What gets highlighted inside a line that changed, in the diff pane, the file history and the conflict pane. Words suit prose: 'brown' becoming 'red' is one word replaced. Characters suit paths, identifiers and numbers, where one letter is the whole edit.",
+        control: { type: "dropdown", key: "shared.inlineDiffUnit", options: { word: "Words", char: "Characters" } }
+      },
+      {
+        name: "Keep line selection when opening another file",
+        desc: "The diff pane is reused for every diff. Off: opening another file leaves line-selection mode, so a diff never arrives already in it. On: the mode stays. The ticked lines are dropped either way \u2014 they point at lines of the diff that was on screen.",
+        control: { type: "toggle", key: "shared.keepLineSelection" }
+      },
+      {
+        name: "Show raw conflict markers",
+        desc: "In the conflict pane: show the file's <<<<<<< / ======= / >>>>>>> lines as they really are, with the side labels and Keep buttons on separate rows. Off: the markers stay hidden under those rows.",
+        control: { type: "toggle", key: "shared.showConflictMarkers" }
+      },
+      {
+        name: "Custom colours in the diff and conflict panes",
+        desc: "Off: the panes follow your theme. On: the colours on the two pages below are used. Cosmetic and shared across devices (stored in data.json).",
+        control: { type: "toggle", key: "shared.customColors" }
+      },
+      colorPage("dark"),
+      colorPage("light"),
+      {
+        name: "Diff size limit",
+        desc: "How much of one diff the pane builds at a time. The runner keeps whole hunks within the limit and never a partial one, and the pane says how many it left out, with a one-tap way to fetch the rest for that diff alone. Every diff line costs about a dozen elements to draw, so this is a per-phone decision and stays device-local.",
+        control: {
+          type: "dropdown",
+          key: "device.diffLimitKb",
+          options: Object.fromEntries(DIFF_LIMIT_CHOICES_KB.map((kb) => [String(kb), kb >= 1024 ? `${kb / 1024} MB` : `${kb} KB`]))
+        }
+      },
+      {
+        name: "Auto-refresh status (seconds)",
+        desc: "While the status panel is open, run a status this often to pick up outside changes. 0 disables it. Each refresh wakes Termux \u2014 consider battery before choosing a small interval. Device-local.",
+        control: { type: "number", key: "device.statusRefreshSeconds", min: 0, step: 1, placeholder: "0" }
       }
-    };
-    refresh();
-    new import_obsidian4.Setting(body).addButton(
-      (b) => b.setButtonText("Load from Termux").onClick(() => void this.plugin.refreshExcludeList().then(refresh))
-    );
-    this.addRow(
-      body,
-      "Folder/Subfolder",
-      "Add to exclude",
-      (v) => void this.plugin.cmdExcludeChange(v, true).then(refresh)
-    );
+    ];
+  }
+  footprintItems() {
+    const fp = this.plugin.footprintState();
+    const fpNote = !this.plugin.footprintAvailable() ? "Needs runner v14 on this device. Update the runner in Termux, then run Status once." : fp === null ? "The repository's state has not been read yet this session \u2014 a toggle checks it first, then asks to confirm." : "";
+    return [
+      ...fpNote === "" ? [] : [note(fpNote)],
+      {
+        name: "Shallow history",
+        desc: "Keep only the newest commits on this device; the remote and your other devices keep everything. The history panels here reach only what stays, and enabling this also clears this device's reflog \u2014 without that the old commits stay pinned and nothing is freed. Turning it off downloads the full history back. Space returns after Clean up repository storage.",
+        control: { type: "toggle", key: "footprint.shallow", disabled: () => !this.plugin.footprintAvailable() }
+      },
+      {
+        name: "Shallow depth",
+        desc: "How many newest commits stay when shallow history is enabled. Takes effect on the next enable.",
+        control: { type: "number", key: "device.shallowDepth", min: 1, max: 1e5, step: 1, placeholder: "100" }
+      },
+      {
+        name: "Partial clone (blob:none)",
+        desc: "Fetch file content on demand instead of holding all of it. With sparse checkout the hidden files' content is never downloaded at all \u2014 but 'Show again' and old file versions then need the network. Turning it off downloads everything back first. Run Clean up repository storage after enabling to shed content that is already downloaded.",
+        control: { type: "toggle", key: "footprint.partial", disabled: () => !this.plugin.footprintAvailable() }
+      }
+    ];
+  }
+  automaticItems() {
+    return [
+      {
+        name: "When Obsidian opens",
+        desc: "Pull brings work in and changes nothing you have not seen. Sync also commits and pushes, so on every launch it publishes whatever is lying around \u2014 including the workspace file Obsidian rewrites just by being opened. Nothing is the default.",
+        control: {
+          type: "dropdown",
+          key: "device.onOpenAction",
+          options: { nothing: "Nothing", pull: "Pull", sync: "Sync (commit and push too)" }
+        }
+      },
+      {
+        name: "Sync when Obsidian goes to the background",
+        desc: "Queues a sync the moment Obsidian starts losing the screen, while Android still lets it reach Termux. If that moment is missed, Android holds the trigger until you come back and the sync runs then, if that is within about 13 minutes; later than that it is dropped. Nothing is queued when there is nothing local to send.",
+        control: { type: "toggle", key: "device.autoSyncOnClose" }
+      },
+      {
+        name: "Periodic sync while Obsidian is open (minutes, 0 = off)",
+        desc: "Every tick first asks what the plugin already knows \u2014 edits since the last sync, uncommitted changes, commits the remote does not have. A tick with nothing local to send is skipped without contacting Termux.",
+        control: { type: "number", key: "device.periodicSyncMinutes", min: 0, step: 1 }
+      },
+      {
+        name: "Minimum interval between automatic syncs (minutes)",
+        desc: "A debounce between any two automatic syncs (periodic, on open, on close). Lower it to let them run closer together.",
+        control: { type: "number", key: "device.minAutoSyncIntervalMinutes", min: 1, step: 1 }
+      },
+      {
+        name: "Only sync on Wi-Fi (best effort)",
+        desc: "Uses the WebView network API when available; skipped silently when the API is missing.",
+        control: { type: "toggle", key: "device.wifiOnly" }
+      },
+      {
+        name: "Skip automatic sync when battery is low (best effort)",
+        control: { type: "toggle", key: "device.skipOnLowBattery" }
+      }
+    ];
+  }
+  advancedItems() {
+    return [
+      {
+        name: "Operation log",
+        desc: "Recent bridge operations (URLs redacted). Lives here since the panel strip slot went to the tree/list toggle; also available as the 'Open operation log' command.",
+        action: () => this.plugin.openOperationLog()
+      },
+      {
+        name: "Operation timeout (seconds)",
+        desc: `How long to wait for the runner before giving up. Default ${DEFAULT_DEVICE_SETTINGS.opTimeoutSeconds}. Fetch, pull, push and sync never get less than ${MIN_NETWORK_TIMEOUT_SECONDS}s whatever is set here, and cloning has its own much larger budget: those wait for a network, not for git. Giving up does not stop the runner \u2014 it finishes what it started, and a result that lands later is picked up \u2014 so a short value buys nothing but alarming windows.`,
+        control: { type: "number", key: "device.opTimeoutSeconds", min: 10, max: 3600, step: 1 }
+      },
+      {
+        name: "Companion intent URI template",
+        desc: 'Advanced. "{id}" is replaced by the request id; change it only if the companion app uses a custom scheme.',
+        control: { type: "text", key: "device.companionUriTemplate", placeholder: "nativegitbridge://run?id={id}" }
+      },
+      {
+        name: "Reset device-local settings",
+        desc: "Restores all settings on this device to defaults. The vault and repository are not touched.",
+        action: () => {
+          new ConfirmModal(
+            this.app,
+            {
+              title: "Reset device-local settings?",
+              body: [
+                "This resets Native Git Bridge settings on this device only.",
+                "The repository, the vault, and other devices are not affected."
+              ],
+              confirmLabel: "Reset settings",
+              danger: true
+            },
+            async (confirmed) => {
+              if (!confirmed) return;
+              await this.plugin.resetDeviceSettings();
+              this.update();
+            }
+          ).open();
+        }
+      }
+    ];
   }
 };
+var NEW_TEMPLATE = "__new__";
+function splitKey(key) {
+  const i = key.indexOf(".");
+  return i < 0 ? [key, ""] : [key.slice(0, i), key.slice(i + 1)];
+}
+function clampInt(value, min, max, fallback) {
+  const n = typeof value === "number" ? value : parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+function note(text) {
+  return {
+    name: "",
+    searchable: false,
+    render: (setting) => {
+      setting.settingEl.empty();
+      setting.settingEl.addClass("ngb-setting-block");
+      setting.settingEl.createEl("p", { cls: "ngb-settings-note", text });
+    }
+  };
+}
+function block(name, draw) {
+  return {
+    name,
+    searchable: false,
+    render: (setting) => {
+      setting.settingEl.empty();
+      setting.settingEl.addClass("ngb-setting-block");
+      draw(setting.settingEl);
+    }
+  };
+}
 
 // src/bridge/protocol.ts
 function makeRequestId(now, rand) {
@@ -3483,8 +3496,8 @@ var StatusView = class extends import_obsidian9.ItemView {
     iconBtn(NGB_ICON_PULL, "Pull", this.actions.pull, "pull", "sweep-down");
     iconBtn(NGB_ICON_PUSH, "Push", this.actions.push, "push", "sweep-up");
     iconBtn("refresh-cw", "Refresh status", this.actions.refresh, "status", "spin");
-    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
-    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    const strip2 = headEl.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip2.createDiv({ cls: "ngb-sv-strip-left" });
     const cancel = stripLeft.createEl("button", {
       cls: "clickable-icon ngb-sv-icon ngb-sv-icon-warn ngb-sv-cancel-slot"
     });
@@ -3496,7 +3509,7 @@ var StatusView = class extends import_obsidian9.ItemView {
     this.progressEl.addClass("ngb-sv-progress-tap");
     this.progressEl.setAttribute("aria-label", "Show what Termux is doing");
     this.progressEl.addEventListener("click", () => this.actions.openOutput());
-    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
+    const stripRight = strip2.createDiv({ cls: "ngb-sv-strip-right" });
     const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     const treeOn = d?.treeView === true;
     treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
@@ -4220,12 +4233,12 @@ function restoreHunk(currentText, hunk) {
   const next = [...lines.slice(0, at), ...hunk.after, ...lines.slice(at + hunk.before.length)];
   return { ok: true, text: next.join("\n"), changed: true };
 }
-function indexOfBlock(lines, block) {
-  if (block.length === 0) return -1;
-  for (let i = 0; i + block.length <= lines.length; i++) {
+function indexOfBlock(lines, block2) {
+  if (block2.length === 0) return -1;
+  for (let i = 0; i + block2.length <= lines.length; i++) {
     let hit = true;
-    for (let j = 0; j < block.length; j++) {
-      if (lines[i + j] !== block[j]) {
+    for (let j = 0; j < block2.length; j++) {
+      if (lines[i + j] !== block2[j]) {
         hit = false;
         break;
       }
@@ -4341,23 +4354,6 @@ function describeRestore(outcome, shortHash) {
       if (outcome.staged) return `Restored one block from ${shortHash} and staged it.`;
       return outcome.reason === "no-newline" ? `Restored one block from ${shortHash}. Stage it from the git panel.` : `Restored one block from ${shortHash}, but staging it failed.`;
   }
-}
-
-// src/git/ignoreFile.ts
-function parseIgnoreEntries(raw) {
-  return raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
-}
-function ignoreEntryMatches(entries, path) {
-  const variants = [`/${path}`, path, `/${path}/`, `${path}/`];
-  return entries.some((e) => variants.includes(e));
-}
-function trackedPathsAmong(status, paths) {
-  const tracked = /* @__PURE__ */ new Set();
-  for (const e of [...status.staged, ...status.unstaged, ...status.conflicted]) {
-    tracked.add(e.path);
-    if (e.origPath !== void 0) tracked.add(e.origPath);
-  }
-  return paths.filter((p) => tracked.has(p));
 }
 
 // src/git/objectStats.ts
@@ -4557,13 +4553,13 @@ var HistoryView = class extends import_obsidian10.ItemView {
     (0, import_obsidian10.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.addEventListener("click", () => void this.refresh());
     this.refreshBtn = refreshBtn;
-    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
-    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    const strip2 = headEl.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip2.createDiv({ cls: "ngb-sv-strip-left" });
     this.progressEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
     this.progressEl.addClass("ngb-sv-progress-tap");
     this.progressEl.setAttribute("aria-label", "Show what Termux is doing");
     this.progressEl.addEventListener("click", () => this.actions.openOutput());
-    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
+    const stripRight = strip2.createDiv({ cls: "ngb-sv-strip-right" });
     const treeBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     const treeOn = this.actions.treeView();
     treeBtn.setAttribute("aria-label", treeOn ? "Tree layout (tap for list)" : "List layout (tap for tree)");
@@ -5649,20 +5645,20 @@ function parseConflictFile(content) {
     const line = lines[i];
     const oursLabel = markerLabel(line, "<<<<<<<");
     if (oursLabel !== null) {
-      const block = tryParseBlock(lines, i);
-      if (block !== null) {
+      const block2 = tryParseBlock(lines, i);
+      if (block2 !== null) {
         flushPlain();
         segments.push({
           kind: "conflict",
           index: segments.length,
           oursLabel,
-          theirsLabel: block.theirsLabel,
-          ours: block.ours,
-          theirs: block.theirs,
-          base: block.base
+          theirsLabel: block2.theirsLabel,
+          ours: block2.ours,
+          theirs: block2.theirs,
+          base: block2.base
         });
         conflictCount++;
-        i = block.end + 1;
+        i = block2.end + 1;
         continue;
       }
     }
@@ -6185,6 +6181,205 @@ var FileHistoryView = class extends import_obsidian13.ItemView {
     });
     new import_obsidian13.Notice(describeRestore(outcome, e.hash.slice(0, 8)));
     if (outcome.kind === "restored") this.rerender();
+  }
+};
+
+// src/ui/explorerSigns.ts
+var EMPTY = { files: /* @__PURE__ */ new Map(), folders: /* @__PURE__ */ new Map() };
+var RANK = { conflict: 5, deleted: 4, added: 3, modified: 2, untracked: 1 };
+function strip(path) {
+  return path.replace(/\/+$/, "");
+}
+function signLetter(sign) {
+  switch (sign) {
+    case "conflict":
+      return "!";
+    case "deleted":
+      return "D";
+    case "added":
+      return "A";
+    case "modified":
+      return "M";
+    case "untracked":
+      return "U";
+  }
+}
+function signTitle(sign) {
+  switch (sign) {
+    case "conflict":
+      return "Conflict";
+    case "deleted":
+      return "Deleted";
+    case "added":
+      return "Added";
+    case "modified":
+      return "Modified";
+    case "untracked":
+      return "Untracked";
+    case "changed":
+      return "Changes inside";
+  }
+}
+function computeExplorerSigns(status, offset) {
+  if (!status) return EMPTY;
+  const files = /* @__PURE__ */ new Map();
+  const put = (repoPath, sign) => {
+    const v = toVault(offset, strip(repoPath));
+    if (v === null || v === "") return;
+    const have = files.get(v);
+    if (have === void 0 || RANK[sign] > RANK[have]) files.set(v, sign);
+  };
+  for (const e of status.conflicted) put(e.path, "conflict");
+  for (const e of status.staged) {
+    if (e.index === "D") put(e.path, "deleted");
+    else if (e.index === "A") put(e.path, "added");
+    else put(e.path, "modified");
+    if (e.origPath) put(e.origPath, "deleted");
+  }
+  for (const e of status.unstaged) {
+    if (e.worktree === "D") put(e.path, "deleted");
+    else put(e.path, "modified");
+  }
+  for (const u of status.untracked) {
+    if (u.endsWith("/")) {
+      const children = status.untrackedChildren?.[u];
+      if (children && children.length > 0) {
+        for (const c of children) put(c, "untracked");
+      } else {
+        const v = toVault(offset, strip(u));
+        if (v !== null && v !== "") files.set(v, "untracked");
+      }
+    } else {
+      put(u, "untracked");
+    }
+  }
+  const folders = /* @__PURE__ */ new Map();
+  for (const [path, sign] of files) {
+    const parts = path.split("/");
+    for (let i = parts.length - 1; i >= 1; i--) {
+      const folder = parts.slice(0, i).join("/");
+      const want = sign === "conflict" ? "conflict" : "changed";
+      const have = folders.get(folder);
+      if (have === "conflict") continue;
+      if (have === void 0 || want === "conflict") folders.set(folder, want);
+    }
+  }
+  return { files, folders };
+}
+
+// src/ui/ExplorerSignsController.ts
+var ExplorerSignsController = class {
+  constructor(app, signs, enabled) {
+    this.app = app;
+    this.signs = signs;
+    this.enabled = enabled;
+    this.observers = [];
+    this.observed = /* @__PURE__ */ new WeakSet();
+    this.timer = null;
+  }
+  /**
+   * Hooks in; the first paint is the plugin's `onLayoutReady` callback's job
+   * (the explorer exists only once the layout does), and every layout change
+   * after that — an explorer opened later, a popout — schedules one here.
+   */
+  attach(plugin) {
+    plugin.registerEvent(this.app.workspace.on("layout-change", () => this.schedule()));
+    plugin.register(() => this.detach());
+  }
+  /** Re-paint soon: coalesces the bursts a status refresh and a re-render produce. */
+  schedule() {
+    if (this.timer !== null) return;
+    this.timer = window.setTimeout(() => {
+      this.timer = null;
+      this.apply();
+    }, 50);
+  }
+  /** Paint now. Idempotent: a row already carrying the right sign is left alone. */
+  apply() {
+    const containers = this.explorerContainers();
+    for (const c of containers) this.observe(c);
+    const on = this.enabled();
+    const signs = this.signs();
+    try {
+      for (const c of containers) {
+        const rows = c.querySelectorAll(".nav-file-title, .nav-folder-title");
+        for (const row of Array.from(rows)) {
+          const path = row.getAttribute("data-path");
+          if (!path) continue;
+          const isFolder = row.hasClass("nav-folder-title");
+          let letter = "";
+          let kind = "";
+          let title = "";
+          if (on) {
+            if (isFolder) {
+              const s = signs.folders.get(path);
+              if (s) {
+                letter = "\u25CF";
+                kind = s;
+                title = signTitle(s);
+              }
+            } else {
+              const s = signs.files.get(path);
+              if (s) {
+                letter = signLetter(s);
+                kind = s;
+                title = signTitle(s);
+              }
+            }
+          }
+          this.paintRow(row, letter, kind, title, isFolder);
+        }
+      }
+    } finally {
+      for (const mo of this.observers) mo.takeRecords();
+    }
+  }
+  paintRow(row, letter, kind, title, isFolder) {
+    const existing = row.querySelector(".ngb-sign");
+    if (letter === "") {
+      if (existing) existing.remove();
+      row.removeClass("ngb-signed");
+      return;
+    }
+    const cls = `ngb-sign ngb-sign-${kind}${isFolder ? " ngb-sign-folder" : ""}`;
+    if (existing) {
+      if (existing.className !== cls) existing.className = cls;
+      if (existing.textContent !== letter) existing.setText(letter);
+      if (existing.getAttribute("aria-label") !== title) existing.setAttribute("aria-label", title);
+    } else {
+      const span = row.createSpan({ cls, text: letter });
+      span.setAttribute("aria-label", title);
+    }
+    row.addClass("ngb-signed");
+  }
+  explorerContainers() {
+    const out = [];
+    for (const leaf of this.app.workspace.getLeavesOfType("file-explorer")) {
+      const el = leaf.view.containerEl;
+      if (el) out.push(el);
+    }
+    return out;
+  }
+  observe(container) {
+    if (this.observed.has(container) || typeof MutationObserver === "undefined") return;
+    this.observed.add(container);
+    const mo = new MutationObserver(() => this.schedule());
+    mo.observe(container, { childList: true, subtree: true });
+    this.observers.push(mo);
+  }
+  /** Remove every sign and stop watching; the explorer is left as Obsidian built it. */
+  detach() {
+    for (const mo of this.observers) mo.disconnect();
+    this.observers = [];
+    this.observed = /* @__PURE__ */ new WeakSet();
+    if (this.timer !== null) {
+      window.clearTimeout(this.timer);
+      this.timer = null;
+    }
+    for (const c of this.explorerContainers()) {
+      for (const s of Array.from(c.querySelectorAll(".ngb-sign"))) s.remove();
+      for (const r of Array.from(c.querySelectorAll(".ngb-signed"))) r.removeClass("ngb-signed");
+    }
   }
 };
 
@@ -6719,8 +6914,8 @@ Retrying every second.`
     (0, import_obsidian15.setIcon)(refreshBtn, "refresh-cw");
     refreshBtn.addEventListener("click", () => void this.tick());
     this.refreshBtn = refreshBtn;
-    const strip = headEl.createDiv({ cls: "ngb-sv-strip" });
-    const stripLeft = strip.createDiv({ cls: "ngb-sv-strip-left" });
+    const strip2 = headEl.createDiv({ cls: "ngb-sv-strip" });
+    const stripLeft = strip2.createDiv({ cls: "ngb-sv-strip-left" });
     const cancel = stripLeft.createEl("button", {
       cls: "clickable-icon ngb-sv-icon ngb-sv-icon-warn ngb-sv-cancel-slot"
     });
@@ -6729,7 +6924,7 @@ Retrying every second.`
     cancel.addEventListener("click", () => this.actions.cancel());
     this.cancelBtn = cancel;
     this.headlineEl = stripLeft.createSpan({ cls: "ngb-sv-progress-text" });
-    const stripRight = strip.createDiv({ cls: "ngb-sv-strip-right" });
+    const stripRight = strip2.createDiv({ cls: "ngb-sv-strip-right" });
     const histBtn = stripRight.createEl("button", { cls: "clickable-icon ngb-sv-icon" });
     histBtn.setAttribute("aria-label", "Repository history");
     (0, import_obsidian15.setIcon)(histBtn, "history");
@@ -6864,6 +7059,7 @@ var DEFAULT_SHARED_PREFS = {
   showInvisibles: false,
   keepLineSelection: false,
   showChangeWords: true,
+  showExplorerSigns: true,
   showMenuHeader: true,
   openOutputForLongOps: false,
   inlineDiffUnit: "word",
@@ -6907,6 +7103,18 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     super(...arguments);
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS };
     this.statusBar = null;
+    /**
+     * The file explorer's signs: a lookup table rebuilt from every status, and
+     * the controller that paints it onto rows it does not own. The table is
+     * kept here rather than derived on demand because the explorer asks per
+     * row, thousands of times on a real vault, and the status changes once.
+     */
+    this.explorerSignTable = { files: /* @__PURE__ */ new Map(), folders: /* @__PURE__ */ new Map() };
+    this.explorerSigns = new ExplorerSignsController(
+      this.app,
+      () => this.explorerSignTable,
+      () => this.sharedPrefs.showExplorerSigns
+    );
     this.activeCancel = null;
     /**
      * Every request currently in flight, oldest first (insertion order).
@@ -7233,7 +7441,9 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.registerCommands();
     this.registerFileMenu();
     this.registerEditTracking();
+    this.explorerSigns.attach(this);
     this.app.workspace.onLayoutReady(() => {
+      this.explorerSigns.schedule();
       void this.startupChecks();
     });
     this.registerAutomaticActions();
@@ -10482,6 +10692,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
   async setSharedPref(patch) {
     this.sharedPrefs = { ...this.sharedPrefs, ...patch };
     await this.saveData(this.sharedPrefs);
+    if (patch.showExplorerSigns !== void 0) this.explorerSigns.apply();
     for (const leaf of this.app.workspace.getLeavesOfType(NGB_DIFF_VIEW)) {
       const view = leaf.view;
       if (view instanceof DiffView) view.refreshDisplay();
@@ -10554,6 +10765,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       credsConfigured: d.credsConfigured === void 0 ? void 0 : d.credsConfigured === "true"
     };
     this.statusStale = false;
+    this.explorerSignTable = computeExplorerSigns(status, this.rootOffset);
+    this.explorerSigns.schedule();
     this.maybeOfferPartialForSparse();
     this.applyStatusToStatusBar(status);
     this.pushStatusToView();

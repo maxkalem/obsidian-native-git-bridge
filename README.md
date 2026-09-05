@@ -27,6 +27,8 @@ Native Git for Obsidian on **Android**, executed by the real `git` binary inside
 - an operation strip with progress, a cancel slot, and directional activity animations on fetch, pull and push;
 - optional auto-refresh at a chosen interval.
 
+**Git signs in the file explorer**: a letter beside a changed file in Obsidian's own explorer (`M` modified, `A` added, `D` deleted, `U` untracked, `!` conflict) and a dot on every folder that holds one, taken from the last status the panel fetched. One toggle in the settings, on by default.
+
 **Diff panes** rendered by the plugin itself, line by line, with highlighting inside a changed line: a staged row shows `HEAD → staged`, an unstaged row `staged → working tree`, a commit shows what it changed. A hunk, or a set of lines picked in the gutter, can be staged, unstaged or discarded on its own, and each hunk says which lines of the file it is. Large diffs are trimmed at a hunk boundary against a configurable budget, and the pane says how much it is showing. Optional line wrapping, whitespace glyphs, a choice between comparing changed lines by word or by character, and optional custom colours for the diff and conflict panes (off by default, light and dark configured separately).
 
 **History**: a repository-wide panel whose commits expand into their changed files, and a per-file panel that says what each commit did to the file (`added`, `+25 −12`, `renamed from …`), shows the file as it was at that commit, and can restore the whole file or a single block from it. Every route to a diff or a history — status panel, context menu, command palette — opens these panels; there is one surface per question.

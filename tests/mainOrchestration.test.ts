@@ -1,5 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
+  __fakeEl,
+  __findAllByClass,
   __findByClass,
   __modalActionLabels,
   __modalBodies,
@@ -18,6 +20,7 @@ import { RUNNER_MIN_VERSION } from "../src/constants";
 import { BridgeClient } from "../src/bridge/BridgeClient";
 import { RuntimePaths } from "../src/bridge/runtimePaths";
 import { validateRemoteUrl } from "../src/git/remoteUrl";
+import { NativeGitBridgeSettingTab } from "../src/settings/SettingsTab";
 
 /**
  * Orchestration tests for the plugin entry (src/main.ts): the REAL plugin
@@ -2748,6 +2751,213 @@ describe("sync on close (fire and forget)", () => {
     await (h.plugin as Any).queueSyncAndForget("blur");
     expect(requestFiles(h.adapter)).toHaveLength(0);
     (h.plugin as Any).lock.release("r-20260905T000000Z-busy01");
+  });
+});
+
+describe("git signs in the file explorer", () => {
+  /**
+   * The explorer is Obsidian's DOM. The fake here is the shape the controller
+   * relies on and nothing more: title rows carrying `data-path`, files and
+   * folders told apart by class. No MutationObserver in node — the controller
+   * tolerates its absence and the re-render path stays a device check.
+   */
+  function fakeExplorer(h: Harness, paths: { files: string[]; folders: string[] }) {
+    const container = __fakeEl("div", "workspace-leaf-content");
+    for (const f of paths.folders) {
+      const row = container.createDiv({ cls: "nav-folder-title" });
+      row.setAttribute("data-path", f);
+      row.createDiv({ cls: "nav-folder-title-content", text: f.split("/").pop() });
+    }
+    for (const f of paths.files) {
+      const row = container.createDiv({ cls: "nav-file-title" });
+      row.setAttribute("data-path", f);
+      row.createDiv({ cls: "nav-file-title-content", text: f.split("/").pop() });
+    }
+    h.app.registerLeaf("file-explorer", { containerEl: container });
+    return container;
+  }
+  const rowFor = (container: Any, path: string) =>
+    [...__findAllByClass(container, "nav-file-title"), ...__findAllByClass(container, "nav-folder-title")].find(
+      (r: Any) => r.getAttribute("data-path") === path
+    );
+  const signOf = (container: Any, path: string) => {
+    const row = rowFor(container, path);
+    const sign = row ? __findByClass(row, "ngb-sign") : null;
+    return sign ? { text: sign.textContent, cls: sign.className } : null;
+  };
+
+  it("paints a letter on changed files and a dot on their folders, from the last status", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const ex = fakeExplorer(h, {
+      folders: ["Notes", "Notes/deep", "Clean"],
+      files: ["Notes/a.md", "Notes/deep/b.md", "Clean/c.md", "loose.md"],
+    });
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, RUNNER_MIN_VERSION, {
+          branchInfo:
+            "# branch.oid abc123\n# branch.head main\n" +
+            "1 .M N... 100644 100644 100644 aaaa bbbb Notes/a.md\n" +
+            "1 A. N... 000000 100644 100644 0000 cccc Notes/deep/b.md\n" +
+            "? loose.md",
+        })
+      );
+    };
+    await h.plugin.cmdStatus(true);
+    h.plugin.explorerSigns.apply();
+    expect(signOf(ex, "Notes/a.md")).toEqual({ text: "M", cls: "ngb-sign ngb-sign-modified" });
+    expect(signOf(ex, "Notes/deep/b.md")).toEqual({ text: "A", cls: "ngb-sign ngb-sign-added" });
+    expect(signOf(ex, "loose.md")).toEqual({ text: "U", cls: "ngb-sign ngb-sign-untracked" });
+    expect(signOf(ex, "Clean/c.md")).toBeNull();
+    expect(signOf(ex, "Notes")).toEqual({ text: "●", cls: "ngb-sign ngb-sign-changed ngb-sign-folder" });
+    expect(signOf(ex, "Notes/deep")).toEqual({ text: "●", cls: "ngb-sign ngb-sign-changed ngb-sign-folder" });
+    expect(signOf(ex, "Clean")).toBeNull();
+    // A second paint changes nothing and duplicates nothing.
+    h.plugin.explorerSigns.apply();
+    expect(__findAllByClass(rowFor(ex, "Notes/a.md"), "ngb-sign")).toHaveLength(1);
+    // The next status without that change takes the sign away again.
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, RUNNER_MIN_VERSION));
+    };
+    await h.plugin.cmdStatus(true);
+    h.plugin.explorerSigns.apply();
+    expect(signOf(ex, "Notes/a.md")).toBeNull();
+    expect(signOf(ex, "Notes")).toBeNull();
+  });
+
+  it("the toggle removes every sign at once and puts them back", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    const ex = fakeExplorer(h, { folders: ["Notes"], files: ["Notes/a.md"] });
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(
+        paths.resultFile(id),
+        okStatusResult(id, RUNNER_MIN_VERSION, {
+          branchInfo: "# branch.oid abc123\n# branch.head main\n1 .M N... 100644 100644 100644 aaaa bbbb Notes/a.md",
+        })
+      );
+    };
+    await h.plugin.cmdStatus(true);
+    h.plugin.explorerSigns.apply();
+    expect(signOf(ex, "Notes/a.md")?.text).toBe("M");
+    await h.plugin.setSharedPref({ showExplorerSigns: false });
+    expect(signOf(ex, "Notes/a.md")).toBeNull();
+    expect(signOf(ex, "Notes")).toBeNull();
+    await h.plugin.setSharedPref({ showExplorerSigns: true });
+    expect(signOf(ex, "Notes/a.md")?.text).toBe("M");
+    expect(signOf(ex, "Notes")?.text).toBe("●");
+  });
+});
+
+describe("the settings tab, declared (getSettingDefinitions)", () => {
+  /**
+   * The tab is data now, so its shape can be asserted: every control names a
+   * key the storage actually answers, every key is used once, every row that
+   * can be searched has a name. A wrong key here would render a control that
+   * reads `undefined` and writes into a field nothing reads — exactly the
+   * class of mistake a type checker cannot see.
+   */
+  type Def = Any;
+  function walk(items: Def[], into: Def[] = []): Def[] {
+    for (const it of items) {
+      into.push(it);
+      if (Array.isArray(it.items)) walk(it.items, into);
+    }
+    return into;
+  }
+  const controls = (tab: NativeGitBridgeSettingTab) => walk(tab.getSettingDefinitions()).filter((d) => d.control);
+
+  it("every control key resolves to a stored value, and no key is used twice", async () => {
+    const h = await loadPlugin();
+    const tab = new NativeGitBridgeSettingTab(h.app, h.plugin);
+    const cs = controls(tab);
+    expect(cs.length).toBeGreaterThan(30);
+    const keys = cs.map((c) => c.control.key as string);
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const c of cs) {
+      const v = tab.getControlValue(c.control.key);
+      expect(v, c.control.key).not.toBeUndefined();
+      if (c.control.type === "toggle") expect(typeof v, c.control.key).toBe("boolean");
+      if (c.control.type === "number") expect(typeof v, c.control.key).toBe("number");
+      if (c.control.type === "dropdown") {
+        // The stored value is one of the options, or the slot form that
+        // lists a template no longer in the list under its own name.
+        expect(Object.keys(c.control.options), c.control.key).toContain(String(v));
+      }
+      expect(c.name, c.control.key).not.toBe("");
+    }
+  });
+
+  it("writes through the storage the key names, clamped like the old inputs", async () => {
+    const h = await loadPlugin();
+    const tab = new NativeGitBridgeSettingTab(h.app, h.plugin);
+    await tab.setControlValue("device.opTimeoutSeconds", 5);
+    expect(h.plugin.deviceSettings.opTimeoutSeconds).toBe(10);
+    await tab.setControlValue("device.opTimeoutSeconds", 99999);
+    expect(h.plugin.deviceSettings.opTimeoutSeconds).toBe(3600);
+    await tab.setControlValue("device.recentCommitMessagesMax", "not a number");
+    expect(h.plugin.deviceSettings.recentCommitMessagesMax).toBe(10);
+    await tab.setControlValue("device.repoPathHint", "  /storage/emulated/0/V  ");
+    expect(h.plugin.deviceSettings.repoPathHint).toBe("/storage/emulated/0/V");
+    await tab.setControlValue("shared.wrapDiffLines", true);
+    expect(h.plugin.sharedPrefs.wrapDiffLines).toBe(true);
+    await tab.setControlValue("shared.commitDateFormat", "   ");
+    expect(h.plugin.sharedPrefs.commitDateFormat).toBe("YYYY-MM-DD HH:mm:ss");
+    await tab.setControlValue("color.dark.diffAddBg", "#123456");
+    expect(h.plugin.sharedPrefs.colorsDark.diffAddBg).toBe("#123456");
+    expect(h.plugin.sharedPrefs.colorsLight.diffAddBg).not.toBe("#123456");
+    expect(tab.getControlValue("color.dark.diffAddBg")).toBe("#123456");
+    await tab.setControlValue("slot.syncTemplate", "Update {{date}}");
+    expect(h.plugin.deviceSettings.syncTemplate).toBe("Update {{date}}");
+  });
+
+  it("a change that alters the structure re-reads the definitions; a plain value does not", async () => {
+    const h = await loadPlugin();
+    const tab = new NativeGitBridgeSettingTab(h.app, h.plugin) as Any;
+    await tab.setControlValue("device.wifiOnly", true);
+    expect(tab.__updates).toBe(0);
+    await tab.setControlValue("shared.customColors", true);
+    expect(tab.__updates).toBe(1);
+    // The colour pages are visible only while the toggle is on.
+    const pages = walk(tab.getSettingDefinitions()).filter((d: Any) => d.type === "page" && /Colours/.test(d.name));
+    expect(pages).toHaveLength(2);
+    expect(pages.every((p: Any) => p.visible() === true)).toBe(true);
+    await tab.setControlValue("shared.customColors", false);
+    expect(pages.every((p: Any) => p.visible() === false)).toBe(true);
+  });
+
+  it("the four rule managers are pages holding lists, and deleting a protected path removes exactly that one", async () => {
+    const h = await loadPlugin();
+    await h.plugin.updateDeviceSettings({ protectedPaths: ["Private/A", "Private/B", "Private/C"] });
+    const tab = new NativeGitBridgeSettingTab(h.app, h.plugin) as Any;
+    const pages = walk(tab.getSettingDefinitions()).filter((d: Any) => d.type === "page");
+    const names = pages.map((p: Any) => p.name);
+    for (const n of ["Protected paths", "Sparse checkout exclusions", ".gitignore", ".git/info/exclude"]) {
+      expect(names).toContain(n);
+    }
+    const protectedPage = pages.find((p: Any) => p.name === "Protected paths");
+    expect(protectedPage.displayValue()).toBe("3 effective");
+    const list = protectedPage.items.find((i: Any) => i.type === "list");
+    expect(list.items.map((i: Any) => i.name)).toEqual(["Private/A", "Private/B", "Private/C"]);
+    list.onDelete(1);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.plugin.deviceSettings.protectedPaths).toEqual(["Private/A", "Private/C"]);
+    expect(tab.__updates).toBe(1);
+  });
+
+  it("on desktop the tab is one explanation and no settings", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(false);
+    const tab = new NativeGitBridgeSettingTab(h.app, h.plugin);
+    const defs = tab.getSettingDefinitions();
+    expect(defs).toHaveLength(1);
+    expect(controls(tab)).toHaveLength(0);
+    __setPlatformAndroid(true);
+    expect(controls(tab).length).toBeGreaterThan(30);
   });
 });
 
