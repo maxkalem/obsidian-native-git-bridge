@@ -106,6 +106,7 @@ function bootstrapCommandLocal(vaultPath, configDir) {
 }
 var PAIRING_FILE = "pairing.json";
 var CLAIM_FILE = "claim.json";
+var SETUP_FILE = "setup.json";
 var PROFILE_MARKER_FILE = "profile.json";
 var PAIRING_WAIT_MS = 2e4;
 var COMPANION_SETUP_URI = "nativegitbridge://setup";
@@ -159,7 +160,8 @@ var ACTION_MIN_RUNNER = /* @__PURE__ */ new Map([
   ["repair-triage", 16],
   ["gitignore-list", 18],
   ["gitignore-add", 18],
-  ["gitignore-remove", 18]
+  ["gitignore-remove", 18],
+  ["hide-outside-vault", 18]
 ]);
 var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   "sparse-reapply",
@@ -204,7 +206,9 @@ var MUTATING_ACTIONS = /* @__PURE__ */ new Set([
   // .gitignore is a TRACKED file, so a change to it travels to every other
   // device — a mutation in every sense the operation lock exists for.
   "gitignore-add",
-  "gitignore-remove"
+  "gitignore-remove",
+  // Rewrites the sparse definition and reapplies it, like sparse-exclude-add.
+  "hide-outside-vault"
 ]);
 
 // src/git/commitMessage.ts
@@ -7183,6 +7187,15 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
      */
     this.pairingPollMs = 500;
     this.pairingWaitMs = PAIRING_WAIT_MS;
+    /**
+     * The last thing the runner said about whether a repository exists at the
+     * profile's directory. Set by a `REPO_MISSING` answer, cleared by a status
+     * that carried a branch. It is how `vaultHasRepository` answers for the one
+     * arrangement where the vault cannot look for `.git` itself: with the vault
+     * INSIDE the repository, `.git` lies above the vault, out of the adapter's
+     * reach, and a profile the installer paired for bootstrap has none yet.
+     */
+    this.repoMissingReported = false;
     /** Remote URL of the repository as of the last status (already redacted by the runner). */
     this.lastRemoteUrl = "";
     /**
@@ -8041,6 +8054,11 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
           await adapter.remove(path);
         } catch {
         }
+        try {
+          const intent = `${this.app.vault.configDir}/plugins/${this.manifest.id}/runtime/${SETUP_FILE}`;
+          if (await adapter.exists(intent)) await adapter.remove(intent);
+        } catch {
+        }
         this.log.add("info", "pairing", "Pairing token imported from Termux installer.");
         this.notify("Native Git Bridge: paired with the Termux runner.");
       };
@@ -8337,8 +8355,217 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         label: "Pair with a folder inside the vault\u2026",
         keepOpen: true,
         onClick: () => this.promptPairWithFolder()
+      },
+      {
+        label: "The repository is a folder above this vault\u2026",
+        keepOpen: true,
+        onClick: () => this.promptPairWithParent()
       }
     ];
+  }
+  /**
+   * The vault is one folder of a larger repository (a documentation folder in
+   * a code repository, ADR-003). A claim cannot point upward — a file on
+   * shared storage naming an ancestor could name any directory on the phone
+   * (threat model T13) — so the choice travels to the INSTALLER instead: the
+   * plugin writes `runtime/setup.json` saying how many folders up the
+   * repository is, and the one command the user pastes into Termux anyway
+   * (the runner install) finds the vault, reads the file, prints both
+   * absolute paths and asks the user to confirm them at the terminal before
+   * pairing. The runner never reads this file. The repository need not exist
+   * yet: the installer pairs the folder for bootstrap and Create / Clone here
+   * then land the repository above the vault. Nothing here needs git
+   * knowledge, and nothing beyond that one paste happens in Termux.
+   */
+  promptPairWithParent() {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Where is the repository?",
+        placeholder: "1 = the folder that contains this vault",
+        submitLabel: "Continue",
+        initial: "1"
+      },
+      (raw) => {
+        if (raw === null) return;
+        const levels = parseInt(raw.trim(), 10);
+        if (!Number.isFinite(levels) || levels < 1 || levels > 8) {
+          new ResultModal(this.app, "That is not a folder count", [
+            "Enter how many folders up the repository's root is: 1 means the folder that directly contains this vault, 2 the one above that, and so on (at most 8)."
+          ], { isError: true }).open();
+          return;
+        }
+        this.promptParentClone(levels);
+      }
+    ).open();
+  }
+  /**
+   * Second question: is there a remote to clone? With a URL the installer
+   * clones in the same Termux session the paste opens — git's own credential
+   * prompt appears there if the remote needs one, and the answer is saved for
+   * the repository — so nothing is left for the plugin to fetch afterwards.
+   * Empty means "create it later from here".
+   */
+  promptParentClone(levels) {
+    new CommitMessageModal(
+      this.app,
+      {
+        title: "Clone a remote into it?",
+        placeholder: "https://github.com/you/project.git \u2014 or leave empty",
+        submitLabel: "Continue",
+        initial: ""
+      },
+      (raw) => {
+        if (raw === null) return;
+        const url = raw.trim();
+        if (url === "") {
+          this.confirmParentIntent(levels, "", false);
+          return;
+        }
+        const verdict = validateRemoteUrl(url);
+        if (!verdict.ok) {
+          new ResultModal(this.app, "That URL cannot be used", [verdict.reason ?? "Invalid URL."], { isError: true }).open();
+          return;
+        }
+        new ConfirmModal(
+          this.app,
+          {
+            title: "Hide the rest of the repository here?",
+            body: [
+              "After the clone, every top-level folder of the repository except the vault's can be hidden on this device (sparse checkout), so only the vault's folder is checked out. Nothing is deleted anywhere, and each hidden folder is protected from being committed as a deletion from here.",
+              "Decline to keep the whole repository checked out on this device."
+            ],
+            confirmLabel: "Hide the rest",
+            icon: "check"
+          },
+          (hide) => this.confirmParentIntent(levels, verdict.url, hide)
+        ).open();
+      }
+    ).open();
+  }
+  confirmParentIntent(levels, cloneUrl, hideOutside) {
+    const where = levels === 1 ? "the folder that contains this vault" : `the folder ${levels} levels above this vault`;
+    const body = [
+      `Git will work in ${where}, and this vault is one folder inside it. Files of the repository outside the vault are shown in the Git panel and can be staged and committed, but Obsidian cannot open them.`,
+      cloneUrl ? `${redactRemoteUrl(cloneUrl)} is cloned into it during the install, in Termux; a username and password prompt appears there if the remote needs one, and what you enter is saved for this repository.${hideOutside ? " Afterwards everything outside the vault is hidden on this device." : ""}` : "No remote: the repository is created or cloned from here afterwards.",
+      "Next: paste the install command into Termux. It shows both folders and asks you to confirm them before pairing; nothing is changed until you do."
+    ];
+    new ConfirmModal(
+      this.app,
+      { title: `The repository is ${where}?`, body, confirmLabel: "Continue", icon: "check" },
+      async (confirmed) => {
+        if (!confirmed) return;
+        await this.writeSetupIntent(levels, cloneUrl, hideOutside);
+      }
+    ).open();
+  }
+  /**
+   * Write the installer's intent file, then hand over the one paste. The
+   * remote URL is the only value in it that reaches git, and it goes through
+   * `validateRemoteUrl` here and `valid_remote_url` in the runner; it never
+   * carries a password, because the validator refuses one.
+   */
+  async writeSetupIntent(repoAbove, cloneUrl = "", hideOutside = false) {
+    const root = new RuntimePaths(this.app.vault.configDir).root;
+    try {
+      await this.client.ensureRuntimeDirs();
+      await this.app.vault.adapter.write(
+        `${root}/${SETUP_FILE}`,
+        JSON.stringify(
+          {
+            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+            vault: this.app.vault.getName(),
+            repoAbove,
+            ...cloneUrl ? { cloneUrl } : {},
+            ...hideOutside ? { hideOutside: true } : {}
+          },
+          null,
+          2
+        )
+      );
+    } catch (e) {
+      new ResultModal(this.app, "Could not prepare the pairing", [String(e)], { isError: true }).open();
+      return;
+    }
+    this.log.add(
+      "info",
+      "pairing",
+      `Setup intent written: the repository is ${repoAbove} folder(s) above this vault${cloneUrl ? `, clone ${redactRemoteUrl(cloneUrl)}` : ""}${hideOutside ? ", hide the rest" : ""}; the installer will do it.`
+    );
+    new ResultModal(
+      this.app,
+      "One paste in Termux",
+      [
+        "Copy the install command and paste it into Termux. It installs the runner, finds this vault, shows the repository folder and the vault folder, and asks you to confirm them.",
+        cloneUrl ? "It then clones the remote right there \u2014 answer the username and password prompt if one appears \u2014 and comes back to you with everything paired." : "When it finishes, come back here: the pairing is imported by itself, and Set up repository offers Create or Clone."
+      ],
+      {
+        actions: [
+          {
+            label: "Copy command & open Termux",
+            cta: true,
+            keepOpen: true,
+            onClick: () => this.copyCommandAndOpenTermux()
+          }
+        ]
+      }
+    ).open();
+  }
+  /**
+   * Hide, on this device, everything at the repository's top level that does
+   * not lead to this vault (the vault inside a larger repository). One
+   * request; the runner writes one sparse exclusion per TRACKED folder (each
+   * joins the protected set, so nothing outside the vault can be committed as
+   * a deletion from here) and one exclude line per UNTRACKED entry (so what
+   * merely surrounds the vault on disk never enters this repository).
+   */
+  async cmdHideOutsideVault() {
+    if (this.rootOffset.kind !== "vault-in-repo") {
+      new import_obsidian16.Notice("This vault is not a folder inside a larger repository, so there is nothing outside it to hide.");
+      return;
+    }
+    const top = this.rootOffset.offset.split("/")[0] ?? this.rootOffset.offset;
+    new ConfirmModal(
+      this.app,
+      {
+        title: "Hide everything outside this vault?",
+        body: [
+          `Every top-level folder of the repository except ${top}/ is removed from THIS device's working tree (sparse checkout), and each of them joins the protected paths. Whatever else already sits beside ${top}/ and is not part of this repository is kept out of it (.git/info/exclude), so it can never be committed from here by accident.`,
+          "Nothing is deleted from the repository, from the folders around the vault, or from other devices. Files the repository itself tracks at its top level (a README, for example) stay. Undo one entry at a time from Settings \u2192 Sparse checkout exclusions and .git/info/exclude."
+        ],
+        confirmLabel: "Hide on this device"
+      },
+      async (ok) => {
+        if (!ok) return;
+        const result = await this.runOperation("hide-outside-vault", {});
+        if (!result) return;
+        if (!result.ok) return this.renderMutationError("Native Git: hiding failed", result);
+        this.absorbStatusData(result.data ?? {});
+        this.absorbExcludeList(result.data?.excludeList);
+        const listOf = (raw) => (raw ?? "").split("\n").filter((l) => l.trim() !== "");
+        const hidden = listOf(result.data?.hiddenOutside);
+        const excluded = listOf(result.data?.excludedOutside);
+        const cfg = this.repoPathOf(this.app.vault.configDir);
+        const lines = [
+          hidden.length === 0 && excluded.length === 0 ? "Nothing to hide: every top-level entry already leads to this vault, is hidden, or is kept out of git." : [
+            hidden.length > 0 ? `Hidden on this device (sparse checkout, protected): ${hidden.join(", ")}.` : "",
+            excluded.length > 0 ? `Kept out of this repository (they belong to something else around the vault): ${excluded.join(", ")}.` : ""
+          ].filter((l) => l !== "").join(" ")
+        ];
+        const actions = [];
+        if (cfg !== null) {
+          lines.push(
+            "",
+            `Obsidian's settings folder (${cfg}/) is inside the repository. Keeping it out of git on this device means your workspace and plugin settings are never committed from here; other devices are not affected.`
+          );
+          actions.push({
+            label: `Keep ${cfg}/ out of git on this device`,
+            onClick: () => void this.cmdExcludeChange(cfg, true)
+          });
+        }
+        new ResultModal(this.app, "Hidden outside the vault", lines, { actions }).open();
+      }
+    ).open();
   }
   /**
    * Ask which folder inside the vault is the repository, then pair. The
@@ -8389,14 +8616,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
    * bootstrap steps make sense.
    *
    * With the vault INSIDE the repository, `.git` lies above the vault where
-   * Obsidian cannot look. That arrangement is reachable only through the
-   * installer, which pairs nothing but an existing repository, so the answer
-   * is yes; a repository that later disappears is reported by the runner as
-   * `REPO_MISSING`, which every command already handles.
+   * Obsidian cannot look, so the answer is the runner's last word
+   * (`repoMissingReported`): the installer pairs such a vault for bootstrap
+   * too, and the first status then says `REPO_MISSING`, which is what turns
+   * the setup window's buttons into Create / Clone.
    */
   async vaultHasRepository() {
     const gitDir = this.vaultPathOf(".git");
-    if (gitDir === null) return true;
+    if (gitDir === null) return !this.repoMissingReported;
     try {
       return await this.app.vault.adapter.exists(gitDir);
     } catch {
@@ -8408,7 +8635,14 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
    * or a folder inside it.
    */
   repoPlaceName() {
-    return this.rootOffset.kind === "repo-in-vault" ? `the folder ${this.rootOffset.offset}/` : "this vault";
+    switch (this.rootOffset.kind) {
+      case "repo-in-vault":
+        return `the folder ${this.rootOffset.offset}/`;
+      case "vault-in-repo":
+        return "the folder above this vault";
+      case "same":
+        return "this vault";
+    }
   }
   /**
    * The folder a NEW pairing would put the repository in, typed by the user,
@@ -8494,6 +8728,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         keepOpen: true,
         onClick: () => this.promptSetRemote()
       });
+      actions.push(...this.hideOutsideAction());
       actions.push({
         label: "Re-clone from a remote",
         keepOpen: true,
@@ -8607,7 +8842,8 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
               "Next: add a remote, then push."
             ], {
               actions: [
-                { label: "Add a remote", cta: true, keepOpen: true, onClick: () => this.promptSetRemote() }
+                { label: "Add a remote", cta: true, keepOpen: true, onClick: () => this.promptSetRemote() },
+                ...this.hideOutsideAction()
               ]
             }).open();
           }
@@ -8978,7 +9214,26 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         `This repository also tracks ${this.app.vault.configDir}/. Restart Obsidian now: it read the old configuration when it started and can overwrite parts of it from memory until you do. Plugins that arrived with the clone appear only after the restart.`
       );
     }
-    new ResultModal(this.app, "Repository cloned", lines.filter((l) => l !== "")).open();
+    if (this.rootOffset.kind === "vault-in-repo") {
+      lines.push(
+        "",
+        "This vault is one folder of the repository. The rest of it is on this device too; hide it here if you only want the vault's folder checked out."
+      );
+    }
+    new ResultModal(this.app, "Repository cloned", lines.filter((l) => l !== ""), {
+      actions: this.hideOutsideAction()
+    }).open();
+  }
+  /** The offer to hide the rest of the repository, only where there is a rest. */
+  hideOutsideAction() {
+    if (this.rootOffset.kind !== "vault-in-repo") return [];
+    return [
+      {
+        label: "Hide everything outside this vault\u2026",
+        keepOpen: true,
+        onClick: () => void this.cmdHideOutsideVault()
+      }
+    ];
   }
   async reconcileAfterRestart() {
     const raw = this.store.getValue(MARKER_KEY);
@@ -9296,6 +9551,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
         failureDetail(result)
       );
       this.lastVerdict = result.ok ? `${action} finished` : `${action} failed: ${result.error?.message ?? `exit ${result.exitCode}`}`;
+      if (!result.ok && result.error?.code === "REPO_MISSING") this.repoMissingReported = true;
       if (!result.ok && result.error?.code === "REPO_MISSING" && action !== "status" && !await this.vaultHasRepository()) {
         this.log.add("info", action, "No repository in this vault; opening the repository setup window.");
         await this.cmdSetupRepository();
@@ -10732,6 +10988,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
       }
     }
     this.absorbGitignoreList(d.gitignoreList);
+    if (d.branchInfo) this.repoMissingReported = false;
     if (typeof d.rescueBranches === "string") this.offerRescueCleanup(d.rescueBranches);
     if (!d.branchInfo) return;
     const status = parseStatusPorcelainV2(d.branchInfo);

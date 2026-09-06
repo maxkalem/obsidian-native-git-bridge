@@ -109,6 +109,7 @@ export type BridgeAction =
   | "cred-helper-local-reset"
   | "gitignore-list"
   | "gitignore-add"
+  | "hide-outside-vault"
   | "gitignore-remove"
   /**
    * Read-only triage for the unified repair (v16): the stale-lock facts (the
@@ -166,6 +167,7 @@ export const ACTION_MIN_RUNNER: ReadonlyMap<BridgeAction, number> = new Map([
   ["gitignore-list", 18],
   ["gitignore-add", 18],
   ["gitignore-remove", 18],
+  ["hide-outside-vault", 18],
 ]);
 
 /** Actions that may modify repository state; serialized behind the operation lock. */
@@ -213,6 +215,8 @@ export const MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   // device — a mutation in every sense the operation lock exists for.
   "gitignore-add",
   "gitignore-remove",
+  // Rewrites the sparse definition and reapplies it, like sparse-exclude-add.
+  "hide-outside-vault",
 ]);
 
 export interface BridgeRequest {

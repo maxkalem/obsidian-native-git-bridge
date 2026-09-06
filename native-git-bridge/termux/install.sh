@@ -7,6 +7,9 @@
 # folder Obsidian opens (it holds .obsidian and this plugin's runtime folder),
 # and one has to contain the other — a documentation vault inside a code
 # repository, or one folder of a larger vault kept as a repository of its own.
+# The plugin can also say where the repository is through a setup-intent file
+# in its runtime folder (see intent_repo_above); a folder that is not a
+# repository yet is then paired for the plugin to create or clone into.
 set -u
 
 # Output width. Termux on a phone is far narrower than a desktop terminal (the
@@ -213,19 +216,107 @@ ask_line() { # $1 prompt -> stdout answer
 # inside a code repository (git finds that one by walking up from the vault).
 # A repository BELOW a vault cannot be detected — nothing says which folder
 # it would be — and is named on the command line instead.
+#
+# A vault may also carry the plugin's SETUP INTENT (`runtime/setup.json`,
+# written when the user said in Obsidian "the repository is N folders above
+# this vault"). Such a vault is listed with that ancestor as its repository
+# whether or not a repository exists there yet: pairing a folder that is not
+# a repository is exactly what lets the plugin create or clone it afterwards.
+# The intent is honoured by THIS script only, on a run the user started, and
+# only after both folders were printed and confirmed — the runner never reads
+# it, so nothing on shared storage can point the unattended half at a folder
+# the user did not approve.
 detect_vaults() {
   local roots="/storage/emulated/0 $HOME/storage/shared /sdcard"
-  local r d v top
+  local r d v top above
   { for r in $roots; do
       [ -d "$r" ] || continue
       find "$r/" -maxdepth 4 -type d -name .obsidian 2>/dev/null
     done; } | while IFS= read -r d; do
       v="$(dirname "$d")"
-      top="$(git -C "$v" rev-parse --show-toplevel 2>/dev/null || true)"
+      above="$(intent_repo_above "$v")"
+      if [ -n "$above" ]; then
+        top="$(ancestor_dir "$v" "$above")"
+      else
+        top="$(git -C "$v" rev-parse --show-toplevel 2>/dev/null || true)"
+      fi
       [ -n "$top" ] || continue
       printf '%s\t%s\n' "$(realpath "$v" 2>/dev/null || printf '%s' "$v")" \
         "$(realpath "$top" 2>/dev/null || printf '%s' "$top")"
     done | sort -u
+}
+
+# The plugin's setup intent for a vault: how many folders above the vault the
+# repository is (1..8), or nothing. Read defensively — the file lies on shared
+# storage — and never acted on without the confirmation below.
+intent_file_for() { # $1 vault
+  printf '%s/.obsidian/plugins/native-git-bridge/runtime/setup.json' "$1"
+}
+intent_repo_above() { # $1 vault -> "N" or ""
+  local f n
+  f="$(intent_file_for "$1")"
+  [ -f "$f" ] || { printf ''; return 0; }
+  n="$(jq -r '.repoAbove // empty' "$f" 2>/dev/null || true)"
+  case "$n" in [1-8]) printf '%s' "$n" ;; *) printf '' ;; esac
+}
+
+# The rest of the plugin's intent: a remote to clone (validated by the
+# runner, which refuses anything that is not a plain https/ssh/scp/file URL,
+# and again when queued below through jq so it can never break the request's
+# JSON), and whether to hide everything outside the vault afterwards.
+intent_clone_url() { # $1 vault -> URL or ""
+  local f
+  f="$(intent_file_for "$1")"
+  [ -f "$f" ] || { printf ''; return 0; }
+  jq -r '.cloneUrl // empty' "$f" 2>/dev/null | head -1 | tr -d '\r\n' || true
+}
+intent_hide_outside() { # $1 vault -> "true" or ""
+  local f
+  f="$(intent_file_for "$1")"
+  [ -f "$f" ] || { printf ''; return 0; }
+  [ "$(jq -r '.hideOutside // false' "$f" 2>/dev/null || true)" = "true" ] && printf 'true' || printf ''
+}
+
+# Queue the requests the intent asked for, in the order the plugin would have
+# sent them: clone first, then hide everything outside the vault. Built with
+# jq so a URL can never break the JSON; ids embed a timestamp one second
+# apart, which is what orders them in the runner's queue. A request file is
+# exactly what the plugin writes, so the runner treats them the same way —
+# validating the URL, landing the clone collision-safe, and answering into
+# results/ for the plugin to see later.
+queue_intent_requests() { # $1 runtime dir, $2 token, $3 clone URL or "", $4 "true" to hide outside
+  local rt="$1" token="$2" url="$3" hide="$4" now id1 id2
+  mkdir -p "$rt/requests"
+  now="$(date -u +%s)"
+  QUEUED_CLONE_ID=""; QUEUED_HIDE_ID=""
+  if [ -n "$url" ]; then
+    id1="r-$(date -u -d "@$now" +%Y%m%dT%H%M%SZ)-install-clone"
+    jq -n --arg id "$id1" --arg token "$token" --arg url "$url" \
+      --arg created "$(date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ)" \
+      '{protocolVersion:1,id:$id,token:$token,action:"clone-into-vault",createdAt:$created,timeoutSeconds:3600,args:{url:$url}}' \
+      > "$rt/requests/$id1.json"
+    QUEUED_CLONE_ID="$id1"
+  fi
+  if [ "$hide" = "true" ]; then
+    id2="r-$(date -u -d "@$((now + 1))" +%Y%m%dT%H%M%SZ)-install-hide"
+    jq -n --arg id "$id2" --arg token "$token" \
+      --arg created "$(date -u -d "@$((now + 1))" +%Y-%m-%dT%H:%M:%SZ)" \
+      '{protocolVersion:1,id:$id,token:$token,action:"hide-outside-vault",createdAt:$created,timeoutSeconds:600,args:{}}' \
+      > "$rt/requests/$id2.json"
+    QUEUED_HIDE_ID="$id2"
+  fi
+}
+
+# The N-th ancestor of a directory, or nothing when the walk reaches the
+# filesystem root first (a repository at "/" is nobody's intention).
+ancestor_dir() { # $1 dir, $2 levels
+  local d="$1" i=0
+  while [ "$i" -lt "$2" ]; do
+    case "$d" in */*) d="${d%/*}" ;; *) printf ''; return 0 ;; esac
+    [ -n "$d" ] || { printf ''; return 0; }
+    i=$((i + 1))
+  done
+  printf '%s' "$d"
 }
 
 # One line of the detection list as a person reads it: the vault, and the
@@ -459,6 +550,20 @@ if [ -z "$REPO_ARG" ]; then
 fi
 REPO_DIR="$REPO_ARG"
 [ -d "$REPO_DIR" ] || fail "Directory does not exist: $REPO_DIR"
+# One path that is a VAULT carrying the plugin's setup intent: the path the
+# plugin's own install command passes is the vault, and the intent says where
+# the repository is. Explicit --vault always wins over the file.
+INTENT_ABOVE=""
+if [ -z "$VAULT_ARG" ] && [ -z "$VAULT_DIR" ]; then
+  INTENT_ABOVE="$(intent_repo_above "$REPO_DIR")"
+  if [ -n "$INTENT_ABOVE" ]; then
+    VAULT_DIR="$REPO_DIR"
+    REPO_DIR="$(ancestor_dir "$VAULT_DIR" "$INTENT_ABOVE")"
+    [ -n "$REPO_DIR" ] || fail "The plugin asked for a repository $INTENT_ABOVE folder(s) above $VAULT_DIR, and there is no such folder."
+  fi
+elif [ -n "$VAULT_DIR" ] && [ -z "$VAULT_ARG" ]; then
+  INTENT_ABOVE="$(intent_repo_above "$VAULT_DIR")"
+fi
 # The vault: named, detected, or the repository itself. It has to be an
 # Obsidian vault — the runtime directory goes under its .obsidian, and that is
 # where the plugin will look for answers — and it has to nest with the
@@ -473,7 +578,23 @@ fi
 
 # 7+8. Verify repository; explain safe.directory if needed (repo on shared
 # storage is usually owned by a different uid, which new git versions reject).
-if ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+#
+# A folder that is NOT a repository yet is accepted when the vault is a
+# different folder (the plugin's setup intent, or --vault): the profile is
+# written in the runner's bootstrap state, and Create / Clone in the plugin
+# then land the repository here, above the vault. The user is told exactly
+# that and confirms both folders first. A plain single path stays what it
+# was: a vault that is its own repository, refused when it is not one — the
+# plugin pairs that case by itself, without this script.
+BOOTSTRAP=false
+if [ "$VAULT_DIR" != "$REPO_DIR" ] && ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+   ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree 2>&1 | grep -qi 'dubious ownership'; then
+  BOOTSTRAP=true
+  say "-- There is no git repository in $REPO_DIR yet."
+  say "-- Repository (to be created or cloned from the plugin): $REPO_DIR"
+  say "-- Vault: $VAULT_DIR"
+  confirm "Pair this vault with that folder as its repository?" || fail "Nothing was changed."
+elif ! git -C "$REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if git -C "$REPO_DIR" rev-parse --is-inside-work-tree 2>&1 | grep -qi 'dubious ownership'; then
     say "-- Git rejected the repository because of 'dubious ownership' (normal for shared storage). The following EXPLICIT global change marks only this directory as safe:"
     sayr "     git config --global --add safe.directory \"$REPO_DIR\""
@@ -488,23 +609,30 @@ fi
 # repository passes the test above while its `.git` is the parent's. The
 # runner pins git to the profile's own directory and would answer
 # REPO_MISSING there forever, so name the real root now instead.
-REPO_TOP="$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -n "$REPO_TOP" ] && [ "$(realpath "$REPO_TOP" 2>/dev/null || printf '%s' "$REPO_TOP")" != "$(realpath "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")" ]; then
-  fail "$REPO_DIR is inside the repository $REPO_TOP but is not a repository of its own. Pass the repository root as the first argument and, if the vault is this folder, add: --vault \"$REPO_DIR\""
-fi
-if [ "$VAULT_DIR" = "$REPO_DIR" ]; then
-  say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
-else
-  say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
-  say "-- Vault: $VAULT_DIR (the repository and the vault are different folders; the plugin's runtime lives in the vault, git works in the repository)"
+if [ "$BOOTSTRAP" = false ]; then
+  REPO_TOP="$(git -C "$REPO_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$REPO_TOP" ] && [ "$(realpath "$REPO_TOP" 2>/dev/null || printf '%s' "$REPO_TOP")" != "$(realpath "$REPO_DIR" 2>/dev/null || printf '%s' "$REPO_DIR")" ]; then
+    fail "$REPO_DIR is inside the repository $REPO_TOP but is not a repository of its own. Pass the repository root as the first argument and, if the vault is this folder, add: --vault \"$REPO_DIR\""
+  fi
+  if [ "$VAULT_DIR" = "$REPO_DIR" ]; then
+    say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
+  else
+    say "-- Repository ${NGB_GREEN}OK${NGB_OFF}: $REPO_DIR"
+    say "-- Vault: $VAULT_DIR (the repository and the vault are different folders; the plugin's runtime lives in the vault, git works in the repository)"
+    if [ -n "$INTENT_ABOVE" ]; then
+      confirm "Pair this vault with that repository?" || fail "Nothing was changed."
+    fi
+  fi
 fi
 
 # 9. Verify sparse checkout (informational; sparse is supported, not required).
-SPARSE=$(git -C "$REPO_DIR" config --get core.sparseCheckout 2>/dev/null || true)
-if [ "$SPARSE" = "true" ]; then
-  say "-- Sparse checkout: ${NGB_GREEN}ENABLED${NGB_OFF} ($(git -C "$REPO_DIR" sparse-checkout list 2>/dev/null | wc -l | tr -d ' ') patterns)"
-else
-  say "-- Sparse checkout: not enabled (that's fine if you don't use it)."
+if [ "$BOOTSTRAP" = false ]; then
+  SPARSE=$(git -C "$REPO_DIR" config --get core.sparseCheckout 2>/dev/null || true)
+  if [ "$SPARSE" = "true" ]; then
+    say "-- Sparse checkout: ${NGB_GREEN}ENABLED${NGB_OFF} ($(git -C "$REPO_DIR" sparse-checkout list 2>/dev/null | wc -l | tr -d ' ') patterns)"
+  else
+    say "-- Sparse checkout: not enabled (that's fine if you don't use it)."
+  fi
 fi
 
 # 6. Profile + token for this vault (the runner itself went in at step 4).
@@ -653,9 +781,13 @@ fi
 # credential helper, or SSH) and is configured PER REPOSITORY, so two vaults can
 # use two different accounts. Credentials never leave Termux and never reach
 # the plugin, a result file or any log.
-section "Authentication"
 CREDS_DIR="$CONF_DIR/creds"
 PROFILE_CREDS="$CREDS_DIR/$PROFILE_ID"
+# No repository yet means no remote to configure credentials for: the clone
+# from the plugin brings its own credential route (the profile's credential
+# file for https, entered once at a Termux prompt; a key for ssh).
+if [ "$BOOTSTRAP" = false ]; then
+section "Authentication"
 
 # git's credential-store format is `https://username:password@host`. A line
 # whose userinfo has NO colon serves a username and no password, so every
@@ -761,6 +893,7 @@ if [ -n "$REMOTE_URL" ]; then
     saybad "-- WARNING: non-interactive access to the remote FAILED. The bridge will not be able to fetch or push until credentials work without a prompt (expired PAT? missing helper?)."
   fi
 fi
+fi # BOOTSTRAP
 
 # 6. Exclude the runtime dir and Obsidian's trash locally (never synced).
 # Both lines are derived from where the VAULT is, and skipped when the
@@ -768,6 +901,7 @@ fi
 # would misdescribe the layout. The trash line exists because staging is
 # `git add -A`: without it a note deleted in Obsidian, or a file the sparse
 # repair moved out of a protected path, is committed straight back.
+if [ "$BOOTSTRAP" = false ]; then
 GIT_DIR_PATH="$(git -C "$REPO_DIR" rev-parse --git-dir)"
 case "$GIT_DIR_PATH" in
   /*) : ;;
@@ -793,6 +927,11 @@ if [ -n "$RUNTIME_LINE" ]; then
 else
   say "-- The vault lies outside the repository: nothing to exclude, git never sees the runtime dir or the trash."
 fi
+else
+  # The runner writes both exclusions itself the moment a repository is
+  # created or cloned into this folder (init-repo / clone-into-vault).
+  say "-- No repository yet: the runtime and trash exclusions are written when it is created or cloned."
+fi # BOOTSTRAP
 
 # 10. Test round trip: write a ping request and run the runner.
 #
@@ -842,6 +981,44 @@ REQ
 section "Self-test"
 run_self_test
 
+# 10b. What the plugin asked for in its setup intent, done HERE, in the one
+# Termux session the user is already in: the clone (git's own credential
+# prompt appears in this terminal if the remote needs one, and the answer is
+# saved for this repository by the runner's clone-time helper), then hiding
+# everything outside the vault. The runner runs in interactive mode, so it may
+# prompt; the requests are the plugin's own shapes, so the plugin finds the
+# results and the fresh status the next time it looks. Nothing else in Termux
+# is needed of the user after this.
+INTENT_CLONE=""; INTENT_HIDE=""; CLONED_NOW=false
+if [ -n "$INTENT_ABOVE" ]; then
+  INTENT_CLONE="$(intent_clone_url "$VAULT_DIR")"
+  INTENT_HIDE="$(intent_hide_outside "$VAULT_DIR")"
+fi
+if [ -n "$INTENT_CLONE" ] || [ "$INTENT_HIDE" = "true" ]; then
+  section "Repository"
+  [ -n "$INTENT_CLONE" ] && say "-- Cloning $INTENT_CLONE into $REPO_DIR (if the remote asks for a username and password, answer here; a token is saved for this repository)..."
+  [ "$INTENT_HIDE" = "true" ] && say "-- Then hiding every folder of the repository outside the vault on this device."
+  queue_intent_requests "$RUNTIME_DIR" "$TOKEN" "$INTENT_CLONE" "$INTENT_HIDE"
+  "$CONF_DIR/runner.sh" interactive || true
+  if [ -n "$QUEUED_CLONE_ID" ]; then
+    if jq -e '.ok == true' "$RUNTIME_DIR/results/$QUEUED_CLONE_ID.json" >/dev/null 2>&1; then
+      say "-- Clone ${NGB_GREEN}done${NGB_OFF}: the repository is in $REPO_DIR, the vault's own files were kept."
+      BOOTSTRAP=false
+      CLONED_NOW=true
+    else
+      saybad "-- The clone did not finish: $(jq -r '.error.message // "no result"' "$RUNTIME_DIR/results/$QUEUED_CLONE_ID.json" 2>/dev/null || echo 'no result')"
+      saybad "   Nothing was written into the vault. Fix the cause (URL, credentials, network) and clone from the plugin: Set up repository -> Clone from a remote."
+    fi
+  fi
+  if [ -n "$QUEUED_HIDE_ID" ]; then
+    if jq -e '.ok == true' "$RUNTIME_DIR/results/$QUEUED_HIDE_ID.json" >/dev/null 2>&1; then
+      say "-- Hidden outside the vault on this device: $(jq -r '.data.sparseHiddenOutside // ""' "$RUNTIME_DIR/results/$QUEUED_HIDE_ID.json" | tr '\n' ' ')"
+    else
+      saybad "-- Hiding the folders outside the vault did not finish: $(jq -r '.error.message // "no result"' "$RUNTIME_DIR/results/$QUEUED_HIDE_ID.json" 2>/dev/null || echo 'no result'). The plugin offers it again under Set up repository."
+    fi
+  fi
+fi
+
 # 11. Auto-pairing: the plugin imports this file on next start and deletes it,
 # so the token never has to be copied by hand. (It transits vault storage once;
 # same trust boundary as the request files themselves.)
@@ -857,6 +1034,8 @@ cat > "$RUNTIME_DIR/pairing.json" <<PAIR
 {"token":"$TOKEN","repoPath":"$REPO_DIR","profileId":"$PROFILE_ID","vaultInRepo":"$VAULT_IN_REPO","repoInVault":"$REPO_IN_VAULT","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)"}
 PAIR
 say "-- Pairing file ${NGB_GREEN}written${NGB_OFF}; the Obsidian plugin will import the token automatically."
+# The setup intent is consumed: it asked for exactly this pairing.
+[ -n "$INTENT_ABOVE" ] && rm -f "$(intent_file_for "$VAULT_DIR")" 2>/dev/null
 
 # 12. Next steps. The former single block mixed the three actions with the
 # token, the profile id, two file paths and three notes; the user could not
@@ -865,7 +1044,13 @@ say "-- Pairing file ${NGB_GREEN}written${NGB_OFF}; the Obsidian plugin will imp
 section "Done. What is left (outside Termux)"
 say "1. Open Obsidian -> Settings -> Native Git Bridge -> enable on this device. The pairing token is imported automatically on plugin start."
 say "2. In the Git Bridge Companion app: grant the 'Run commands in Termux environment' permission (step 2 there) - all three checkmarks must be green."
-say "3. Authentication: whatever you already use in Termux (PAT via credential helper, token in URL, or SSH key) keeps working - see the auth check result above."
+if [ "$BOOTSTRAP" = true ]; then
+  say "3. There is no repository in $REPO_DIR yet. In Obsidian: Settings -> Native Git Bridge -> Set up repository -> Create a repository, or Clone from a remote. It lands in that folder, above the vault; afterwards the same window offers to hide everything outside the vault on this device."
+elif [ "$CLONED_NOW" = true ]; then
+  say "3. The repository is cloned and paired; credentials you entered above are saved for it in Termux. Open Obsidian: the Git panel shows the repository, and Set up repository can still hide the folders outside the vault if that was not done here."
+else
+  say "3. Authentication: whatever you already use in Termux (PAT via credential helper, token in URL, or SSH key) keeps working - see the auth check result above."
+fi
 
 section "For reference"
 say "Pairing token (only needed if the automatic import fails):"

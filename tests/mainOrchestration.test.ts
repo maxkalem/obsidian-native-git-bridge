@@ -2754,6 +2754,83 @@ describe("sync on close (fire and forget)", () => {
   });
 });
 
+describe("the vault inside a larger repository (ADR-003, the installer's route)", () => {
+  it("writes the setup intent for the installer and hands over the one paste; the pairing import consumes it", async () => {
+    const h = await loadPlugin();
+    __setPlatformAndroid(true);
+    await (h.plugin as Any).writeSetupIntent(2, "https://github.com/you/project.git", true);
+    const intent = JSON.parse(h.adapter.files.get(`${paths.root}/setup.json`)!);
+    expect(intent.repoAbove).toBe(2);
+    expect(intent.cloneUrl).toBe("https://github.com/you/project.git");
+    expect(intent.hideOutside).toBe(true);
+    expect(intent.token).toBeUndefined();
+    expect(__modalTitles).toContain("One paste in Termux");
+    expect(__modalActionLabels).toContain("Copy command & open Termux");
+    // The installer paired the parent; its pairing file arrives and the intent goes.
+    h.adapter.files.set(
+      `${paths.root}/pairing.json`,
+      JSON.stringify({ token: "e1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6", profileId: "p-778899aabbccddee", vaultInRepo: "Documentation" })
+    );
+    h.app.workspace.fireLayoutReady();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.plugin.deviceSettings.vaultInRepo).toBe("Documentation");
+    expect(h.adapter.files.has(`${paths.root}/setup.json`)).toBe(false);
+  });
+
+  it("with the vault inside the repository, whether a repository exists is the runner's last word", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    await h.plugin.updateDeviceSettings({ vaultInRepo: "Documentation" });
+    (h.plugin as Any).rootOffset = { kind: "vault-in-repo", offset: "Documentation" };
+    // Nothing said yet: assume yes (the installer pairs existing repositories too).
+    expect(await h.plugin.vaultHasRepository()).toBe(true);
+    h.useFastClient();
+    answerWith(h, () => ({
+      ok: false,
+      exitCode: 1,
+      error: { code: "REPO_MISSING", message: "not a git repository of its own yet." },
+    }));
+    await h.plugin.cmdStatus(true, true);
+    // REPO_MISSING + no repository -> the setup window with Create / Clone, not an error.
+    expect(await h.plugin.vaultHasRepository()).toBe(false);
+    expect(__modalTitles).toContain("Set up the repository");
+    expect(__modalActionLabels).toContain("Create a repository here");
+    // A status that carries a branch says the repository is back.
+    h.runner.onTrigger = (id) => {
+      h.adapter.files.set(paths.resultFile(id), okStatusResult(id, RUNNER_MIN_VERSION, { vaultInRepo: "Documentation" }));
+    };
+    await h.plugin.cmdStatus(true);
+    expect(await h.plugin.vaultHasRepository()).toBe(true);
+  });
+
+  it("hides everything outside the vault in one request, and refuses where there is no outside", async () => {
+    const h = await loadPlugin();
+    await enableBridge(h);
+    h.useFastClient();
+    await h.plugin.cmdHideOutsideVault();
+    expect(__notices.join(" ")).toContain("nothing outside it to hide");
+    expect(requestFiles(h.adapter)).toHaveLength(0);
+    (h.plugin as Any).rootOffset = { kind: "vault-in-repo", offset: "Documentation" };
+    __autoConfirm.answer = true;
+    let seen: Any = null;
+    answerWith(h, (req) => {
+      seen = req;
+      return { ok: true, exitCode: 0, data: { hiddenOutside: "src\nassets", excludedOutside: "Scratch", vaultTopFolder: "Documentation", vaultInRepo: "Documentation" } };
+    });
+    await h.plugin.cmdHideOutsideVault();
+    // The confirmation's decision runs detached (the mock fires it without
+    // awaiting), so the round trip completes after the command returns.
+    for (let i = 0; i < 500 && !__modalTitles.includes("Hidden outside the vault"); i++) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    expect(seen?.action).toBe("hide-outside-vault");
+    expect(__modalTitles).toContain("Hidden outside the vault");
+    expect(__modalBodies.some((b) => /Hidden on this device \(sparse checkout, protected\): src, assets\./.test(b) && /Kept out of this repository .*: Scratch\./.test(b))).toBe(true);
+    // The offer to keep Obsidian's settings folder out of git names the REPOSITORY path.
+    expect(__modalActionLabels).toContain("Keep Documentation/.obsidian/ out of git on this device");
+  });
+});
+
 describe("git signs in the file explorer", () => {
   /**
    * The explorer is Obsidian's DOM. The fake here is the shape the controller

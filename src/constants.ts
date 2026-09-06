@@ -176,6 +176,17 @@ export const PAIRING_FILE = "pairing.json";
  */
 export const CLAIM_FILE = "claim.json";
 
+/**
+ * Written by this vault when the user says the repository is a folder ABOVE
+ * it, read by the INSTALLER (never the runner) on the run the user starts by
+ * pasting the install command. A claim may only point downward (ADR-003, T13);
+ * this file may point upward because the installer prints both absolute paths
+ * and asks the user to confirm them at the terminal before pairing anything.
+ * It carries no secret and is consumed by the installer; the plugin also
+ * deletes it once a pairing has been imported.
+ */
+export const SETUP_FILE = "setup.json";
+
 /** Written by the runner; ties this runtime directory to a profile id. */
 export const PROFILE_MARKER_FILE = "profile.json";
 

@@ -612,19 +612,50 @@ write_profile_marker() {
 # never touches a tracked file. .gitignore was rejected because it is synced and
 # would hide the folder for every collaborator; a submodule was rejected because
 # it rewrites the outer repository's history and the project supports none.
-ensure_nested_exclusion() { # $1 outer repo dir, $2 inner repo dir
-  local rel line xf
+#
+# Two shapes of nesting, told apart by what the OUTER repository already
+# tracks under the inner one (ADR-003, the user's second arrangement):
+#
+# - The outer tracks nothing there: the inner vault is separate content, and
+#   the whole inner directory is excluded, as before — without that, the
+#   outer's `git add -A` records the inner working tree as a gitlink.
+# - The outer already tracks files there: a project folder of a large vault
+#   that grew a repository of its own. The outer keeps tracking that content
+#   (git treats a directory with tracked files as a plain directory, nested
+#   .git or not — verified: new files under it are added as files, never as a
+#   gitlink), so excluding the whole folder would silently stop the outer
+#   from syncing the user's notes. What the outer must never record is the
+#   inner's machinery: its `.git` (git skips that by itself; the line states
+#   the intent) and the inner VAULT's configuration directory, where this
+#   plugin's runtime queue lives — without that line the outer commits the
+#   inner vault's request files.
+ensure_nested_exclusion() { # $1 outer repo dir, $2 inner repo dir, $3 inner vault's config dir (optional)
+  local rel xf line lines="" tracked
   rel="${2#"$1"/}"
   [ "$rel" = "$2" ] && return 0
-  line="/$rel/"
   xf="$(git -C "$1" rev-parse --git-path info/exclude 2>/dev/null || true)"
   [ -n "$xf" ] || return 0
   case "$xf" in /*) : ;; *) xf="$1/$xf" ;; esac
+  tracked="$(git -C "$1" ls-files -z -- ":(literal)$rel/" 2>/dev/null | head -c 1)"
+  if [ -z "$tracked" ]; then
+    lines="/$rel/"
+  else
+    lines="/$rel/.git/"
+    if [ -n "${3:-}" ]; then
+      case "$3" in
+        "$1"/*) lines="$lines
+/${3#"$1"/}/" ;;
+      esac
+    fi
+  fi
   mkdir -p "$(dirname "$xf")" 2>/dev/null || return 0
-  grep -qxF "$line" "$xf" 2>/dev/null && return 0
-  ensure_trailing_newline "$xf"
-  printf '%s\n' "$line" >> "$xf" || return 0
-  log "NESTED excluded $line from the outer repository $1 (.git/info/exclude, local only)"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    grep -qxF "$line" "$xf" 2>/dev/null && continue
+    ensure_trailing_newline "$xf"
+    printf '%s\n' "$line" >> "$xf" || return 0
+    log "NESTED excluded $line from the outer repository $1 (.git/info/exclude, local only)"
+  done <<< "$lines"
 }
 
 # ---- discovery: relocation and adoption ----------------------------------------
@@ -3140,6 +3171,102 @@ action_sparse_exclude_add() {
   DATA=$(merge_data "$DATA" "$(obj_from_fields sparseExcluded "$path")")
 }
 
+# Hide, on this device, everything at the top level of the repository that
+# does not lead to the vault (ADR-003, the vault INSIDE a larger repository —
+# a documentation vault in a code repository, or a project folder of a large
+# vault that got a repository of its own). One request, so a user who knows
+# no git can do the whole thing from the plugin. Two halves, because the
+# entries come in two kinds:
+#
+# - TRACKED top-level directories (in HEAD) are hidden with sparse checkout,
+#   one `!/<dir>` per directory through the same verified write as
+#   `sparse-exclude-add` — deliberately NOT git's `/*` + `!/*/` + `/<vault>/`
+#   whitelist, which the write guard refuses (it is also what emptied a real
+#   working tree). Each becomes a protected path. Top-level FILES stay: they
+#   are the repository's, and hiding files one by one buys nothing.
+# - UNTRACKED top-level entries on disk — the folders and files that already
+#   surround the vault, tracked by an OUTER repository or by nobody — go into
+#   `.git/info/exclude`, so `git add -A` here never sweeps them into THIS
+#   repository. Sparse cannot do that: it only applies to what is tracked.
+#
+# Refused when the vault is not inside the repository: there is no "outside".
+hide_outside_untracked() { # -> HIDE_EXCLUDED (newline list); excludes untracked top-level entries outside the vault
+  HIDE_EXCLUDED=""
+  local keep="${NGB_VAULT_IN_REPO%%/*}" name xf line
+  xf="$(exclude_file_path)"
+  case "$xf" in /*) : ;; *) xf="$NGB_REPO_DIR/$xf" ;; esac
+  mkdir -p "$(dirname "$xf")" 2>/dev/null || return 0
+  # `ls -1A`, not a glob: nullglob is on, and a name is a name.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ "$name" = ".git" ] && continue
+    [ "$name" = "$keep" ] && continue
+    valid_rel_path "$name" || continue
+    # Anything tracked here is sparse's business, not exclude's.
+    [ -n "$(git ls-files -z -- ":(literal)$name" 2>/dev/null | head -c 1)" ] && continue
+    if [ -d "$NGB_REPO_DIR/$name" ]; then line="/$name/"; else line="/$name"; fi
+    grep -qxF "$line" "$xf" 2>/dev/null && continue
+    ensure_trailing_newline "$xf"
+    printf '%s\n' "$line" >> "$xf"
+    HIDE_EXCLUDED="$HIDE_EXCLUDED$name
+"
+  done < <(ls -1A "$NGB_REPO_DIR" 2>/dev/null)
+}
+
+action_hide_outside_vault() {
+  refuse_cone_sparse || return 1
+  compute_root_offset
+  if [ -z "$NGB_VAULT_IN_REPO" ]; then
+    ERROR=$(err_json BAD_REQUEST "The vault is not a folder inside this repository, so there is nothing outside it to hide." "" "")
+    return 1
+  fi
+  local keep="${NGB_VAULT_IN_REPO%%/*}" d hidden="" staged_under=""
+  local tmpf; tmpf="$(mktemp)"
+  if [ "$(git config --get core.sparseCheckout 2>/dev/null || true)" = "true" ]; then
+    git sparse-checkout list > "$tmpf" 2>/dev/null || true
+    ensure_trailing_newline "$tmpf"
+  else
+    printf '/*\n' > "$tmpf"
+  fi
+  # Top-level directories from HEAD (the committed tree), NUL-separated so a
+  # name with a newline or a quote cannot split into two patterns. An unborn
+  # repository has no HEAD and nothing tracked to hide; only the exclude half
+  # applies then.
+  while IFS= read -r -d '' d; do
+    [ -n "$d" ] || continue
+    [ "$d" = "$keep" ] && continue
+    valid_rel_path "$d" || continue
+    # The same guard as a single exclusion: staged content under the
+    # directory would be stranded in the index.
+    run_git diff --cached --name-only -- "$d" || true
+    if [ -n "$GIT_OUT" ]; then staged_under="$staged_under$d
+"; continue; fi
+    # Reported only when newly hidden: a second call finds nothing to do and
+    # says so, rather than claiming to have hidden what already was.
+    if ! grep -qxF -e "!/$d" -e "!/$d/" -e "!$d" -e "!$d/" "$tmpf"; then
+      printf '!/%s\n' "$d" >> "$tmpf"
+      hidden="$hidden$d
+"
+    fi
+  done < <(git ls-tree -d -z --name-only HEAD 2>/dev/null || true)
+  if [ -n "$staged_under" ]; then
+    rm -f "$tmpf"
+    ERROR=$(err_json GIT_FAILED "Cannot hide the folders outside the vault: staged changes exist under the ones listed below, and hiding them would strand those changes in the index. Commit or unstage them first." "$staged_under" "")
+    return 1
+  fi
+  if [ -n "$hidden" ]; then
+    progress_note "sparse: hiding the tracked folders outside the vault"
+    if ! sparse_write_verified "$tmpf"; then
+      rm -f "$tmpf"
+      return 1
+    fi
+  fi
+  rm -f "$tmpf"
+  hide_outside_untracked
+  collect_status_fields
+  DATA=$(merge_data "$DATA" "$(obj_from_fields hiddenOutside "$hidden" excludedOutside "$HIDE_EXCLUDED" vaultTopFolder "$keep" excludeList "$(cat "$(exclude_file_path)" 2>/dev/null || true)")")
+}
+
 action_sparse_exclude_remove() {
   local req_file="$1" path
   path=$(jq -r '.args.path // empty' "$req_file")
@@ -3838,7 +3965,7 @@ exclude_from_outer_profiles() {
     [ -n "$outer" ] || continue
     [ "$outer" = "$NGB_REPO_DIR" ] && continue
     case "$NGB_REPO_DIR" in
-      "$outer"/*) ensure_nested_exclusion "$outer" "$NGB_REPO_DIR" ;;
+      "$outer"/*) ensure_nested_exclusion "$outer" "$NGB_REPO_DIR" "$(config_dir_of_runtime_dir "$NGB_RUNTIME_DIR")" ;;
     esac
   done < <(list_profile_files)
 }
@@ -3957,6 +4084,17 @@ action_init_repo() {
   write_runtime_exclude
   write_trash_exclude
   exclude_from_outer_profiles
+  # A repository created ABOVE its vault (ADR-003) is created FOR that vault:
+  # whatever else already sits at its top level — the siblings a larger vault
+  # or an outer repository owns — is excluded before the first `git add -A`
+  # can sweep it in. Reported as `excludedOutside`. The vault's own folder is
+  # the one thing kept.
+  HIDE_EXCLUDED=""
+  compute_root_offset
+  if [ -n "$NGB_VAULT_IN_REPO" ]; then
+    hide_outside_untracked
+    [ -n "$HIDE_EXCLUDED" ] && log "INIT excluded the entries outside the vault from this repository: $(printf '%s' "$HIDE_EXCLUDED" | tr '\n' ' ')"
+  fi
   # From here the repository EXISTS. Anything that fails after this point must
   # say so, or the user is told "init failed" while looking at a new .git.
   local committed=false
@@ -3988,7 +4126,7 @@ action_init_repo() {
     fi
   fi
   collect_status_fields
-  DATA=$(merge_data "$DATA" "$(obj_from_fields initialised "true" branch "$branch" committed "$committed")")
+  DATA=$(merge_data "$DATA" "$(obj_from_fields initialised "true" branch "$branch" committed "$committed" excludedOutside "$HIDE_EXCLUDED")")
 }
 
 action_set_remote() {
@@ -4491,6 +4629,7 @@ process_request() {
     discard-all)           action_discard_all "$req_file" || { ok=false; ec=1; } ;;
     reset-all)             action_reset_all "$req_file" || { ok=false; ec=1; } ;;
     sparse-exclude-add)    action_sparse_exclude_add "$req_file" || { ok=false; ec=1; } ;;
+    hide-outside-vault)    action_hide_outside_vault || { ok=false; ec=1; } ;;
     sparse-exclude-remove) action_sparse_exclude_remove "$req_file" || { ok=false; ec=1; } ;;
     repair-sparse-definition) action_repair_sparse_definition || { ok=false; ec=1; } ;;
     identity-drop-global)  action_identity_drop_global || { ok=false; ec=1; } ;;
@@ -4684,6 +4823,7 @@ migrate_legacy_config
 PROFILE_FILES=()
 HEALTHY_FILES=()
 HEALTHY_REPOS=()
+HEALTHY_CFGS=()
 UNHEALTHY=0
 TOTAL_PENDING=0
 mapfile -t PROFILE_FILES < <(list_profile_files)
@@ -4696,7 +4836,10 @@ for conf in "${PROFILE_FILES[@]}"; do
     # Only a real repository takes part in the nested-vault exclusion: a vault
     # that is merely paired must not disappear from the outer repository's
     # status before it becomes a repository of its own.
-    [ "$PROFILE_STATE" = "ready" ] && HEALTHY_REPOS+=("$NGB_REPO_DIR")
+    if [ "$PROFILE_STATE" = "ready" ]; then
+      HEALTHY_REPOS+=("$NGB_REPO_DIR")
+      HEALTHY_CFGS+=("$(config_dir_of_runtime_dir "$NGB_RUNTIME_DIR")")
+    fi
     recover_interrupted
     pending=("$REQ_DIR"/*.json)
     TOTAL_PENDING=$((TOTAL_PENDING + ${#pending[@]}))
@@ -4724,11 +4867,15 @@ if [ "${NGB_DISCOVER:-}" = "1" ] || [ "$UNHEALTHY" = 1 ] || [ "$TOTAL_PENDING" -
   # Re-activate: relocation and adoption may have added or moved work.
   HEALTHY_FILES=()
   HEALTHY_REPOS=()
+  HEALTHY_CFGS=()
   mapfile -t PROFILE_FILES < <(list_profile_files)
   for conf in "${PROFILE_FILES[@]}"; do
     if activate_profile "$conf"; then
       HEALTHY_FILES+=("$conf")
-      [ "$PROFILE_STATE" = "ready" ] && HEALTHY_REPOS+=("$NGB_REPO_DIR")
+      if [ "$PROFILE_STATE" = "ready" ]; then
+        HEALTHY_REPOS+=("$NGB_REPO_DIR")
+        HEALTHY_CFGS+=("$(config_dir_of_runtime_dir "$NGB_RUNTIME_DIR")")
+      fi
       recover_interrupted
     fi
   done
@@ -4741,7 +4888,7 @@ for i in "${!HEALTHY_REPOS[@]}"; do
   for j in "${!HEALTHY_REPOS[@]}"; do
     [ "$i" = "$j" ] && continue
     case "${HEALTHY_REPOS[$j]}" in
-      "${HEALTHY_REPOS[$i]}"/*) ensure_nested_exclusion "${HEALTHY_REPOS[$i]}" "${HEALTHY_REPOS[$j]}" ;;
+      "${HEALTHY_REPOS[$i]}"/*) ensure_nested_exclusion "${HEALTHY_REPOS[$i]}" "${HEALTHY_REPOS[$j]}" "${HEALTHY_CFGS[$j]}" ;;
     esac
   done
 done

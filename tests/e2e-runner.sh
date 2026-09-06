@@ -3387,6 +3387,201 @@ check '! grep -q "trash" "$SR_VAULT/project/.git/info/exclude" 2>/dev/null' \
   "…and none for the trash either, which lives above the work tree"
 check '[ -f "$SR_VAULT/Inbox/today.md" ]' "the vault's own notes outside the repository are untouched"
 
+# --- arrangement A, from the plugin's side: a documentation vault paired for
+# bootstrap inside a folder that is NOT a repository yet, then cloned into ------
+# The happy path for a user who knows no git: the installer pairs the empty
+# parent folder (the profile below is what it writes), the plugin's Clone lands
+# the repository ABOVE the vault, and one more action hides everything outside
+# the vault on this device.
+echo "# phase 19b: clone lands above the vault, then everything outside it is hidden"
+DV_REPO="$ROOT/split-c"
+mkdir -p "$DV_REPO/Documentation/.obsidian/plugins/native-git-bridge/runtime/requests" "$ROOT/conf-split-c"
+echo "my own note" > "$DV_REPO/Documentation/Inbox.md"
+DV_RUNTIME="$DV_REPO/Documentation/.obsidian/plugins/native-git-bridge/runtime"
+cat > "$ROOT/conf-split-c/config" <<CONF
+NGB_REPO_DIR="$DV_REPO"
+NGB_TOKEN="$TOKEN"
+NGB_RUNTIME_DIR="$DV_RUNTIME"
+CONF
+req_dv() { # $1 id, $2 action, $3 extra-args-json
+  local args="${3:-}"; [ -z "$args" ] && args='{}'
+  cat > "$DV_RUNTIME/requests/$1.json" <<REQ
+{"protocolVersion":1,"id":"$1","token":"$TOKEN","action":"$2","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":$args}
+REQ
+}
+# A remote shaped like a code repository with a docs folder.
+git init -q --bare "$ROOT/code.git"
+git clone -q "$ROOT/code.git" "$ROOT/code-work" 2>/dev/null
+( cd "$ROOT/code-work" && git config user.email c@e && git config user.name C &&
+  mkdir -p src assets Documentation/Guides && echo 'main()' > src/main.ts && echo 'img' > assets/logo.svg &&
+  echo '# Guide' > Documentation/Guides/guide.md && echo 'readme' > README.md && printf 'build/\n' > .gitignore &&
+  git add -A && git commit -qm "code + docs" && git push -q origin HEAD )
+req_dv "r-20260906T090000Z-dv00" status
+NGB_CONFIG="$ROOT/conf-split-c/config" bash "$RUNNER"
+check 'jq -e ".error.code == \"REPO_MISSING\"" "$DV_RUNTIME/results/r-20260906T090000Z-dv00.json" >/dev/null' \
+  "a vault paired inside a folder with no repository is in the bootstrap state (status -> REPO_MISSING)"
+req_dv "r-20260906T090001Z-dv01" clone-into-vault "{\"url\":\"file://$ROOT/code.git\"}"
+NGB_CONFIG="$ROOT/conf-split-c/config" bash "$RUNNER"
+RES="$DV_RUNTIME/results/r-20260906T090001Z-dv01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "clone-into-vault lands the repository ABOVE the vault"
+check '[ -d "$DV_REPO/.git" ] && [ ! -e "$DV_REPO/Documentation/.git" ]' "…the .git is at the repository root, not in the vault"
+check '[ -f "$DV_REPO/src/main.ts" ] && [ -f "$DV_REPO/Documentation/Guides/guide.md" ]' "…and the whole tree is checked out, docs included"
+check '[ "$(cat "$DV_REPO/Documentation/Inbox.md")" = "my own note" ]' "the vault's own note was not touched"
+check '[ "$(jq -r ".data.vaultInRepo" "$RES")" = "Documentation" ]' "the result reports the vault as Documentation/ inside the repository"
+check 'grep -qxF "Documentation/.obsidian/plugins/native-git-bridge/runtime/" "$DV_REPO/.git/info/exclude"' "the runtime exclusion is written with the vault's prefix"
+check 'grep -qxF "Documentation/.trash/" "$DV_REPO/.git/info/exclude"' "…and so is the trash exclusion"
+check '! git -C "$DV_REPO" status --porcelain | grep -q runtime' "the runtime directory does not show as a change"
+
+# Two untracked entries that merely surround the vault on disk (an outer
+# repository's, or nobody's): they must never enter THIS repository.
+mkdir -p "$DV_REPO/Scratch" && echo "outer's" > "$DV_REPO/Scratch/x.md" && echo "loose" > "$DV_REPO/loose.txt"
+req_dv "r-20260906T090002Z-dv02" hide-outside-vault
+NGB_CONFIG="$ROOT/conf-split-c/config" bash "$RUNNER"
+RES="$DV_RUNTIME/results/r-20260906T090002Z-dv02.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "hide-outside-vault ok"
+check '[ "$(jq -r ".data.vaultTopFolder" "$RES")" = "Documentation" ]' "…keeps the vault's top folder"
+check 'jq -er ".data.hiddenOutside" "$RES" | grep -qx "src" && jq -er ".data.hiddenOutside" "$RES" | grep -qx "assets"' \
+  "…and names the tracked folders it hid"
+check '! jq -er ".data.hiddenOutside" "$RES" | grep -qx "Documentation"' "…never the vault's own folder"
+check 'jq -er ".data.excludedOutside" "$RES" | grep -qx "Scratch" && jq -er ".data.excludedOutside" "$RES" | grep -qx "loose.txt"' \
+  "…and names the untracked entries it kept out"
+check 'grep -qxF "/Scratch/" "$DV_REPO/.git/info/exclude" && grep -qxF "/loose.txt" "$DV_REPO/.git/info/exclude"' \
+  "the untracked neighbours are in .git/info/exclude (a folder with its slash, a file without)"
+check '[ -f "$DV_REPO/Scratch/x.md" ]' "…and still on disk: exclude hides from git, sparse hides from disk"
+check '! git -C "$DV_REPO" status --porcelain | grep -q "Scratch\|loose"' "…so git here never offers them"
+check '[ ! -e "$DV_REPO/src/main.ts" ] && [ ! -e "$DV_REPO/assets/logo.svg" ]' "the folders outside the vault are gone from the working tree"
+check '[ -f "$DV_REPO/Documentation/Guides/guide.md" ] && [ -f "$DV_REPO/README.md" ]' "the vault and the top-level files stay"
+check '[ "$(jq -r ".data.sparseEnabled" "$RES")" = "true" ]' "sparse checkout was enabled for it"
+check 'jq -er ".data.sparseList" "$RES" | grep -qx "/\*" && jq -er ".data.sparseList" "$RES" | grep -qx "!/src"' \
+  "…in the plugin's own model: the /* base plus one !/<dir> per folder, never git's !/*/ default"
+check '! jq -er ".data.sparseList" "$RES" | grep -qxF "!/*/"' "…so the write guard's forbidden line is absent"
+check '! git -C "$DV_REPO" status --porcelain | grep -q "^ D\|^D "' "and no deletion is reported: sparse omissions are not deletions (the vault's own note stays untracked)"
+# Idempotent: a second call hides nothing new and changes nothing.
+req_dv "r-20260906T090003Z-dv03" hide-outside-vault
+NGB_CONFIG="$ROOT/conf-split-c/config" bash "$RUNNER"
+RES="$DV_RUNTIME/results/r-20260906T090003Z-dv03.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null && [ "$(jq -r ".data.hiddenOutside" "$RES")" = "" ] && [ "$(jq -r ".data.excludedOutside" "$RES")" = "" ]' "a second call finds nothing left to hide or keep out"
+check '[ "$(grep -c "^!/src$" "$DV_REPO/.git/info/sparse-checkout")" = "1" ]' "…and does not duplicate a pattern"
+# Refused where there is no outside: the ordinary one-root vault.
+req "r-20260906T090004Z-dv04" hide-outside-vault "$TOKEN"
+bash "$RUNNER"
+check 'jq -e ".error.code == \"BAD_REQUEST\"" "$RUNTIME/results/r-20260906T090004Z-dv04.json" >/dev/null' \
+  "on a vault that is its own repository the action is refused: there is no outside"
+
+# --- the user's own arrangement: a big vault that is a repository (Kalem/.git),
+# and one of its project folders opened as a second vault whose repository
+# sits one level above it (Kalem/Projects/.git). Both repositories track the
+# project's notes. The outer must keep syncing them and must never record the
+# inner vault's machinery; the inner must never swallow its neighbours. -----
+echo "# phase 19c: a project folder of a tracked vault becomes a repository of its own"
+NV="$ROOT/nested-overlap"
+KALEM="$NV/Kalem"
+mkdir -p "$KALEM/.obsidian/plugins/native-git-bridge/runtime/requests" "$KALEM/Projects/WSC/.obsidian/plugins/native-git-bridge/runtime/requests" "$KALEM/Projects/Other"
+git init -q "$KALEM"; git -C "$KALEM" config user.email k@e; git -C "$KALEM" config user.name K
+echo "wsc note" > "$KALEM/Projects/WSC/note.md"
+echo "other project" > "$KALEM/Projects/Other/plan.md"
+echo "loose" > "$KALEM/Projects/todo.md"
+echo "root note" > "$KALEM/Daily.md"
+( cd "$KALEM" && echo ".obsidian/plugins/native-git-bridge/runtime/" >> .git/info/exclude && git add -A && git commit -qm "kalem" )
+NVCONF="$ROOT/conf-nested-overlap"; mkdir -p "$NVCONF/profiles"
+K_RT="$KALEM/.obsidian/plugins/native-git-bridge/runtime"
+W_RT="$KALEM/Projects/WSC/.obsidian/plugins/native-git-bridge/runtime"
+printf 'NGB_PROFILE_FORMAT=1\nNGB_PROFILE_ID="p-aaaa0001aaaa0001"\nNGB_REPO_DIR="%s"\nNGB_RUNTIME_DIR="%s"\nNGB_TOKEN="tok-kalem-0001"\n' "$KALEM" "$K_RT" > "$NVCONF/profiles/p-aaaa0001aaaa0001.conf"
+# The inner profile is what the installer writes from the plugin's intent
+# ("the repository is 1 folder above this vault"): repository Projects/, not a
+# repository yet, runtime in the inner vault.
+printf 'NGB_PROFILE_FORMAT=1\nNGB_PROFILE_ID="p-bbbb0002bbbb0002"\nNGB_REPO_DIR="%s"\nNGB_RUNTIME_DIR="%s"\nNGB_TOKEN="tok-wsc-0002"\n' "$KALEM/Projects" "$W_RT" > "$NVCONF/profiles/p-bbbb0002bbbb0002.conf"
+chmod 600 "$NVCONF"/profiles/*.conf
+nvrun() { NGB_CONFIG="$NVCONF/config" NGB_SCAN_ROOTS="$NV" bash "$RUNNER" "$@"; }
+nvreq() { # $1 runtime, $2 id, $3 token, $4 action, $5 profileId, $6 args
+  local args="${6:-}"; [ -z "$args" ] && args='{}'
+  cat > "$1/requests/$2.json" <<REQ
+{"protocolVersion":1,"id":"$2","token":"$3","action":"$4","profileId":"$5","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","timeoutSeconds":300,"args":$args}
+REQ
+}
+nvreq "$W_RT" "r-20260906T100000Z-nv01" "tok-wsc-0002" init-repo "p-bbbb0002bbbb0002" '{"branch":"main","initialCommit":true,"message":"wsc: first"}'
+nvrun >/dev/null
+RES="$W_RT/results/r-20260906T100000Z-nv01.json"
+check 'jq -e ".ok == true" "$RES" >/dev/null' "init-repo creates the project's repository one level above its vault, inside the outer repository"
+check '[ -d "$KALEM/Projects/.git" ]' "…at Projects/.git"
+check '[ "$(jq -r ".data.vaultInRepo" "$RES")" = "WSC" ]' "…and reports the vault as WSC/ inside it"
+check 'jq -er ".data.excludedOutside" "$RES" | grep -qx "Other" && jq -er ".data.excludedOutside" "$RES" | grep -qx "todo.md"' \
+  "the neighbours already around the vault were excluded before the first commit"
+check 'git -C "$KALEM/Projects" ls-files | grep -qx "WSC/note.md"' "the first commit holds the vault's note"
+check '! git -C "$KALEM/Projects" ls-files | grep -q "Other\|todo.md"' "…and nothing of the neighbours (they are the outer repository's)"
+check 'grep -qxF "/Other/" "$KALEM/Projects/.git/info/exclude" && grep -qxF "/todo.md" "$KALEM/Projects/.git/info/exclude"' \
+  "the inner repository's exclude names them"
+check 'grep -qxF "WSC/.obsidian/plugins/native-git-bridge/runtime/" "$KALEM/Projects/.git/info/exclude"' "…and its own vault's runtime folder"
+# The OUTER repository: it already tracked Projects/, so it keeps tracking it.
+check '! grep -qxF "/Projects/" "$KALEM/.git/info/exclude"' "the outer repository does NOT exclude the whole project folder (it tracks content there)"
+check 'grep -qxF "/Projects/.git/" "$KALEM/.git/info/exclude"' "…it excludes the inner .git"
+check 'grep -qxF "/Projects/WSC/.obsidian/" "$KALEM/.git/info/exclude"' "…and the inner vault's configuration folder, where the runtime queue lives"
+echo "edited by wsc" >> "$KALEM/Projects/WSC/note.md"
+echo "new in other" > "$KALEM/Projects/Other/new.md"
+check 'git -C "$KALEM" status --porcelain | grep -q "^ M Projects/WSC/note.md"' "the outer still sees the project note's change"
+check 'git -C "$KALEM" status --porcelain | grep -q "^?? Projects/Other/new.md"' "…and new files beside the project (git treats a tracked folder as a folder, nested .git or not)"
+check '! git -C "$KALEM" status --porcelain | grep -q "runtime\|\.obsidian"' "…but never the inner vault's runtime or configuration"
+( cd "$KALEM" && git add -A >/dev/null 2>&1 )
+check '! git -C "$KALEM" ls-files -s | grep -q "^160000"' "…and no gitlink was ever recorded for the project folder"
+git -C "$KALEM" reset -q
+# The inner repository, from its own side: the same edit is its change too.
+nvreq "$W_RT" "r-20260906T100001Z-nv02" "tok-wsc-0002" status "p-bbbb0002bbbb0002"
+nvrun >/dev/null
+RES="$W_RT/results/r-20260906T100001Z-nv02.json"
+check 'jq -er ".data.branchInfo" "$RES" | grep -q "WSC/note.md"' "the inner repository sees the note's change as its own"
+check '! jq -er ".data.branchInfo" "$RES" | grep -q "Other"' "…and nothing of the neighbours"
+# The outer's own queue works too: two profiles, one runner, both healthy.
+nvreq "$K_RT" "r-20260906T100002Z-nv03" "tok-kalem-0001" status "p-aaaa0001aaaa0001"
+nvrun >/dev/null
+check 'jq -e ".ok == true" "$K_RT/results/r-20260906T100002Z-nv03.json" >/dev/null' "the outer profile answers beside the inner one"
+
+echo "# installer: the setup intent and the ancestor walk (lifted)"
+for fn in intent_repo_above ancestor_dir intent_file_for; do
+  check "grep -q '^$fn() {' \"$SCRIPT_DIR/native-git-bridge/termux/install.sh\"" "the installer defines $fn (lifted below)"
+done
+inst_lift2() {
+  eval "$(sed -n '/^intent_file_for() {/,/^}$/p;/^intent_repo_above() {/,/^}$/p;/^ancestor_dir() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+}
+INT_LAB="$ROOT/intent-lab/a/b/Vault"
+mkdir -p "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime"
+check '[ -z "$(inst_lift2; intent_repo_above "$INT_LAB")" ]' "no intent file, no intent"
+printf '{"createdAt":"2026-09-06T00:00:00Z","vault":"Vault","repoAbove":2}\n' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ "$(inst_lift2; intent_repo_above "$INT_LAB")" = "2" ]' "an intent of 2 folders up is read"
+check '[ "$(inst_lift2; ancestor_dir "$INT_LAB" 2)" = "$ROOT/intent-lab/a" ]' "…and resolves to the grandparent"
+check '[ "$(inst_lift2; ancestor_dir "$INT_LAB" 1)" = "$ROOT/intent-lab/a/b" ]' "one level up is the parent"
+printf '{"repoAbove":99}\n' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ -z "$(inst_lift2; intent_repo_above "$INT_LAB")" ]' "an intent beyond 8 levels is ignored"
+printf '{"repoAbove":"../../etc"}\n' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ -z "$(inst_lift2; intent_repo_above "$INT_LAB")" ]' "a non-numeric intent is ignored"
+printf 'not json' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ -z "$(inst_lift2; intent_repo_above "$INT_LAB")" ]' "an unparsable intent is ignored"
+check '[ -z "$(inst_lift2; ancestor_dir "/x" 3)" ]' "a walk that would pass the filesystem root answers nothing"
+
+echo "# installer: the intent's clone and hide-outside are queued as the plugin's own requests (lifted)"
+inst_lift3() {
+  eval "$(sed -n '/^intent_file_for() {/,/^}$/p;/^intent_clone_url() {/,/^}$/p;/^intent_hide_outside() {/,/^}$/p;/^queue_intent_requests() {/,/^}$/p' "$SCRIPT_DIR/native-git-bridge/termux/install.sh")"
+}
+for fn in intent_clone_url intent_hide_outside queue_intent_requests; do
+  check "grep -q '^$fn() {' \"$SCRIPT_DIR/native-git-bridge/termux/install.sh\"" "the installer defines $fn (lifted below)"
+done
+printf '{"repoAbove":1,"cloneUrl":"https://example.com/o/r.git","hideOutside":true}\n' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ "$(inst_lift3; intent_clone_url "$INT_LAB")" = "https://example.com/o/r.git" ]' "the clone URL is read from the intent"
+check '[ "$(inst_lift3; intent_hide_outside "$INT_LAB")" = "true" ]' "…and so is the hide-outside choice"
+printf '{"repoAbove":1}\n' > "$INT_LAB/.obsidian/plugins/native-git-bridge/runtime/setup.json"
+check '[ -z "$(inst_lift3; intent_clone_url "$INT_LAB")" ] && [ -z "$(inst_lift3; intent_hide_outside "$INT_LAB")" ]' "an intent without them asks for neither"
+QRT="$ROOT/intent-lab/queue-rt"
+( inst_lift3; queue_intent_requests "$QRT" "tok-e2e-12345" 'https://example.com/o/r.git' true )
+check '[ "$(ls "$QRT/requests" | wc -l | tr -d " ")" = "2" ]' "two requests are queued: the clone and the hide"
+CLONE_REQ="$(ls "$QRT"/requests/*-install-clone.json)"; HIDE_REQ="$(ls "$QRT"/requests/*-install-hide.json)"
+check 'jq -e ".action == \"clone-into-vault\" and .args.url == \"https://example.com/o/r.git\" and .token == \"tok-e2e-12345\" and .timeoutSeconds == 3600" "$CLONE_REQ" >/dev/null' \
+  "the clone request is the plugin's own shape, with the clone budget"
+check 'jq -e ".action == \"hide-outside-vault\" and .token == \"tok-e2e-12345\"" "$HIDE_REQ" >/dev/null' "…and so is the hide request"
+check '[ "$(basename "$CLONE_REQ")" \< "$(basename "$HIDE_REQ")" ]' "the clone sorts before the hide, so the runner does them in that order"
+rm -rf "$QRT"
+( inst_lift3; queue_intent_requests "$QRT" "tok-e2e-12345" 'https://ex.com/a"b.git' "" )
+check 'jq -e ".args.url == \"https://ex.com/a\\\"b.git\"" "$QRT"/requests/*-install-clone.json >/dev/null' "a quote in the URL cannot break the request's JSON (jq builds it)"
+check '[ "$(ls "$QRT/requests" | wc -l | tr -d " ")" = "1" ]' "…and no hide request without the choice"
+
 # ---------------------------------------------------------------------------
 echo "# phase 20: a claim chooses a repository folder inside the vault (ADR-003 stage C)"
 # The route a user actually takes: the plugin writes a claim naming a folder
