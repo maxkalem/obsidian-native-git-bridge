@@ -1,5 +1,13 @@
 export const PLUGIN_ID = "native-git-bridge";
 export const PROTOCOL_VERSION = 1;
+
+// Defined by esbuild at bundle time (esbuild.config.mjs). Under tsc and vitest
+// nothing defines it, and the stamp reads "dev".
+declare const __NGB_BUILD__: string | undefined;
+
+/** The build stamp: UTC yyMMdd.HHmm plus milliseconds, e.g. 260925.1804512. */
+export const BUILD_STAMP: string =
+  typeof __NGB_BUILD__ === "string" ? __NGB_BUILD__ : "dev";
 export const RUNNER_MIN_VERSION = 12;
 /**
  * The runner version this build SHIPS (RUNNER_VERSION in

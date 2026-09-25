@@ -59,8 +59,13 @@ jobs:
           npm test
           npm run test:e2e
 
+      # Same stamp as the committed main.js, or the comparison below fails on
+      # the banner alone (see build-plugin.yml).
       - name: Build plugin
-        run: npm run build
+        run: |
+          NGB_BUILD_STAMP=$(sed -n 's/^Build: //p' main.js | head -n 1)
+          [ -n "$NGB_BUILD_STAMP" ] || { echo "::error::main.js carries no Build: line."; exit 1; }
+          NGB_BUILD_STAMP="$NGB_BUILD_STAMP" npm run build
 
       # Release assets must be byte-identical to what a manual install (copying
       # native-git-bridge/) or BRAT (fetching the release) delivers.

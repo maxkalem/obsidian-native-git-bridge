@@ -1,5 +1,6 @@
 import { Menu, Notice, Plugin, Platform, type WorkspaceLeaf } from "obsidian";
 import {
+  BUILD_STAMP,
   DEFAULT_TIMEOUT_SECONDS,
   EMPTY_TREE_HASH,
   SPARSE_SAFETY_WARNING,
@@ -480,6 +481,9 @@ export default class NativeGitBridgePlugin extends Plugin {
     this.lastRunnerVersion = Number(this.store.getValue("last-runner-version") ?? 0) || 0;
     this.lastCompanionVersion = this.store.getValue("last-companion-version") ?? "";
     this.log = new OperationLog(this.store);
+    // The manifest version is the same for every build between two releases;
+    // the stamp is what tells which main.js this device is running.
+    this.log.add("info", "plugin", `Loaded ${this.manifest.version}, build ${BUILD_STAMP}.`);
 
     // ---- shared, non-device-specific UI prefs only ----
     const data = (await this.loadData()) as Partial<SharedUiPrefs> | null;

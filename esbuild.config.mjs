@@ -2,8 +2,39 @@ import esbuild from "esbuild";
 import fs from "fs";
 import process from "process";
 
+/*
+ * The manifest version does not identify a build: every build between two
+ * releases carries the same one. The stamp does. It is UTC, yyMMdd.HHmm
+ * followed by the milliseconds, written into the banner below and into the
+ * log entry the plugin adds on every load, so an installed main.js can be
+ * matched against the build it came from.
+ *
+ * NGB_BUILD_STAMP overrides it. CI passes the stamp read from the committed
+ * main.js, so its fresh build can still be compared byte for byte with what
+ * was committed.
+ */
+function buildStamp() {
+  const fromEnv = process.env.NGB_BUILD_STAMP;
+  if (fromEnv !== undefined && fromEnv !== "") {
+    if (!/^\d{6}\.\d{7}$/.test(fromEnv)) {
+      console.error(`NGB_BUILD_STAMP is not a build stamp: ${fromEnv}`);
+      process.exit(1);
+    }
+    return fromEnv;
+  }
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return (
+    p(d.getUTCFullYear() % 100) + p(d.getUTCMonth() + 1) + p(d.getUTCDate()) +
+    "." + p(d.getUTCHours()) + p(d.getUTCMinutes()) + p(d.getUTCMilliseconds(), 3)
+  );
+}
+
+const stamp = buildStamp();
+
 const banner = `/*
 Obsidian Native Git Bridge - bundled output.
+Build: ${stamp}
 */`;
 
 const prod = process.argv[2] === "production";
@@ -46,6 +77,7 @@ const ctx = await esbuild.context({
   logLevel: "info",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
+  define: { __NGB_BUILD__: JSON.stringify(stamp) },
   // Obsidian's convention (and its release verification) expects main.js in
   // the repository root; the copy under native-git-bridge/ is for manual
   // installs and is written after each build.

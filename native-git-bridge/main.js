@@ -1,5 +1,6 @@
 /*
 Obsidian Native Git Bridge - bundled output.
+Build: 260925.1547524
 */
 "use strict";
 var __defProp = Object.defineProperty;
@@ -35,6 +36,7 @@ var import_obsidian16 = require("obsidian");
 // src/constants.ts
 var PLUGIN_ID = "native-git-bridge";
 var PROTOCOL_VERSION = 1;
+var BUILD_STAMP = true ? "260925.1547524" : "dev";
 var RUNNER_MIN_VERSION = 12;
 var RUNNER_SHIPPED_VERSION = 18;
 var COMPANION_MIN_VERSION = "0.4.1";
@@ -7257,6 +7259,7 @@ var NativeGitBridgePlugin = class extends import_obsidian16.Plugin {
     this.lastRunnerVersion = Number(this.store.getValue("last-runner-version") ?? 0) || 0;
     this.lastCompanionVersion = this.store.getValue("last-companion-version") ?? "";
     this.log = new OperationLog(this.store);
+    this.log.add("info", "plugin", `Loaded ${this.manifest.version}, build ${BUILD_STAMP}.`);
     const data = await this.loadData();
     this.sharedPrefs = { ...DEFAULT_SHARED_PREFS, ...data ?? {} };
     this.sharedPrefs.colorsLight = sanitizeColorSet(this.sharedPrefs.colorsLight, "light");

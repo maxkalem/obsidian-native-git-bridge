@@ -26,8 +26,13 @@ jobs:
       - name: End-to-end tests (real git, sparse repo)
         run: npm run test:e2e
 
+      # The bundle carries a build stamp taken from the clock. Rebuilding with
+      # the stamp of the committed main.js keeps the comparison below exact.
       - name: Type-check and bundle (strict tsc + esbuild)
-        run: npm run build
+        run: |
+          NGB_BUILD_STAMP=$(sed -n 's/^Build: //p' main.js | head -n 1)
+          [ -n "$NGB_BUILD_STAMP" ] || { echo "::error::main.js carries no Build: line."; exit 1; }
+          NGB_BUILD_STAMP="$NGB_BUILD_STAMP" npm run build
 
       # The build syncs root manifest.json/styles.css into native-git-bridge/
       # and rebuilds main.js. If anything differs from what is committed, the
